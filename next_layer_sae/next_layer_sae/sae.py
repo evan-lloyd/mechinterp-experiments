@@ -14,7 +14,7 @@ class SAE(torch.nn.Module):
         init_from: Optional["SAE"] = None,
         with_inhibition: bool = False,
         d_dense: Optional[int] = None,
-        normalize_activations: bool = True,
+        normalize_activations: bool = False,
     ):
         super().__init__()
         self.device = device
@@ -31,14 +31,9 @@ class SAE(torch.nn.Module):
     def init_weights(
         self,
         init_from: Optional["SAE"] = None,
-        init_decoder_weight: torch.Tensor = None,
     ):
         if init_from is None:
             self.decoder = torch.nn.Linear(self.d_sae, self.d_model, device=self.device)
-            if init_decoder_weight is not None:
-                self.decoder.weight = torch.nn.Parameter(
-                    init_decoder_weight.clone().detach().contiguous()
-                )
             self.encoder = torch.nn.Linear(self.d_model, self.d_sae, device="meta")
             self.encoder.weight = torch.nn.Parameter(
                 self.decoder.weight.T.clone().detach().contiguous()
