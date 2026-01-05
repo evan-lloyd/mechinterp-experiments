@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch
@@ -12,11 +12,9 @@ from transformers import AutoTokenizer
 from .data_batch import DataBatch
 from .ops import generate
 from .replacement_model import make_replacement_model
+from .sae import SAE
 from .sae_data import SAEData, get_logits, get_sae_data
 from .tokenization import CONTEXT_LENGTH, input_generator
-
-if TYPE_CHECKING:
-    from .sae import SAE
 
 
 @torch.no_grad

@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import copy
-from typing import TYPE_CHECKING, Dict
+from typing import Dict
 
 import torch
 
-if TYPE_CHECKING:
-    from .sae import SAE
+from .sae import SAE
 
 
 class GenericReplacementLayer(torch.nn.Module):

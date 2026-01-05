@@ -5,17 +5,15 @@ from collections import defaultdict
 from contextlib import ExitStack
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import torch
 import zarr
 
+from .data_batch import DataBatch
 from .ops import ensure_directory
-
-if TYPE_CHECKING:
-    from .data_batch import DataBatch
-    from .sae import SAE
+from .sae import SAE
 
 
 @dataclass(kw_only=True)

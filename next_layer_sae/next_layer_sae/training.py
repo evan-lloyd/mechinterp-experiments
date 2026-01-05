@@ -3,22 +3,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from functools import partial
-from typing import TYPE_CHECKING, Dict, List, Mapping, Optional
+from typing import Dict, List, Mapping, Optional
 
 import torch
 from datasets import IterableDataset
 from tqdm.auto import tqdm
+from transformers import AutoTokenizer
 
+from .data_batch import DataBatch
 from .multiline_progress import MultilineProgress
+from .replacement_model import make_replacement_model
+from .sae import SAE
 from .sae_data import SAEData, cache_on_disk, get_sae_data, init_cache
 from .tokenization import CONTEXT_LENGTH, input_generator
 from .validation import sae_evals
-
-if TYPE_CHECKING:
-    from transformers import AutoTokenizer
-
-    from .data_batch import DataBatch
-    from .sae import SAE
 
 
 class TrainingMethod(Enum):
@@ -49,6 +47,7 @@ class TrainingConfig:
     balance_reconstruction_losses: bool = False | Mapping[int, float]
     use_weighted_mask: bool = False
     method: TrainingMethod
+
 
 def sae_losses(
     batch: DataBatch,
@@ -165,6 +164,98 @@ def build_cache(
     progress.close()
 
 
+def make_optimizer(saes: Dict[int, SAE], layers: List[int], config: TrainingConfig):
+    param_groups = [
+        {
+            "params": [
+                param for layer in layers for param in saes[layer].decoder.parameters()
+            ],
+            "lr": config.decoder_lr or config.lr,
+        },
+        {
+            "params": [
+                param for layer in layers for param in saes[layer].encoder.parameters()
+            ],
+            "lr": config.encoder_lr or config.lr,
+        },
+    ]
+    if any(sae.with_inhibition for sae in saes.values()):
+        param_groups.append(
+            {
+                "params": [
+                    param
+                    for layer in layers
+                    for param in [saes[layer].inhibition]
+                    if saes[layer].with_inhibition
+                ],
+                "lr": config.inhibition_lr or config.lr,
+            }
+        )
+    if any(sae.d_dense is not None for sae in saes.values()):
+        param_groups.append(
+            {
+                "params": [
+                    param
+                    for layer in layers
+                    for param in saes[layer].dense_decoder.parameters()
+                    if saes[layer].d_dense is not None
+                ],
+                "lr": config.dense_decoder_lr or config.lr,
+            }
+        )
+        param_groups.append(
+            {
+                "params": [
+                    param
+                    for layer in layers
+                    for param in saes[layer].dense_encoder.parameters()
+                    if saes[layer].d_dense is not None
+                ],
+                "lr": config.dense_encoder_lr or config.lr,
+            }
+        )
+
+    return torch.optim.Adam(param_groups, lr=config.lr)
+
+
+def maybe_balance_reconstruction_weights(
+    balance_reconstruction_losses: List[bool] | bool,
+    reconstruction_weight: List[float] | float,
+    next_reconstruction_weight: List[float] | float,
+    losses: Dict[str, torch.Tensor],
+    target_layer: int,
+):
+    balance_reconstruction_losses = (
+        balance_reconstruction_losses[target_layer]
+        if hasattr(balance_reconstruction_losses, "__getitem__")
+        else balance_reconstruction_losses
+    )
+    reconstruction_weight = (
+        reconstruction_weight[target_layer]
+        if hasattr(reconstruction_weight, "__getitem__")
+        else reconstruction_weight
+    )
+    next_reconstruction_weight = (
+        next_reconstruction_weight[target_layer]
+        if hasattr(next_reconstruction_weight, "__getitem__")
+        else next_reconstruction_weight
+    )
+    if balance_reconstruction_losses:
+        target_scale = (reconstruction_weight + next_reconstruction_weight) * max(
+            losses["reconstruction"].item(),
+            losses["next_reconstruction"].item(),
+            1e-8,
+        )
+        reconstruction_weight = target_scale / max(
+            losses["reconstruction"].item(), 1e-8
+        )
+        next_reconstruction_weight = target_scale / max(
+            losses["next_reconstruction"].item(), 1e-8
+        )
+
+    return reconstruction_weight, next_reconstruction_weight
+
+
 def train_one_layer(
     model: torch.nn.Module,
     tokenizer: AutoTokenizer,
@@ -175,38 +266,7 @@ def train_one_layer(
     cache_dir: Optional[str],
     did_reinit: bool,
 ):
-    param_groups = [
-        {
-            "params": list(saes[target_layer].decoder.parameters()),
-            "lr": config.decoder_lr or config.lr,
-        },
-        {
-            "params": list(saes[target_layer].encoder.parameters()),
-            "lr": config.encoder_lr or config.lr,
-        },
-    ]
-    if saes[target_layer].with_inhibition:
-        param_groups.append(
-            {
-                "params": saes[target_layer].inhibition,
-                "lr": config.inhibition_lr or config.lr,
-            }
-        )
-    if saes[target_layer].d_dense is not None:
-        param_groups.append(
-            {
-                "params": list(saes[target_layer].dense_decoder.parameters()),
-                "lr": config.dense_decoder_lr or config.lr,
-            }
-        )
-        param_groups.append(
-            {
-                "params": list(saes[target_layer].dense_encoder.parameters()),
-                "lr": config.dense_encoder_lr or config.lr,
-            }
-        )
-
-    optimizer = torch.optim.Adam(param_groups, lr=config.lr)
+    optimizer = make_optimizer(saes, [target_layer], config)
     if saes[target_layer].normalize_activations:
         normalizer_optimizer = torch.optim.Adam(
             list(saes[target_layer].normalizer.parameters()), lr=0.01
@@ -293,20 +353,14 @@ def train_one_layer(
             config.use_next_layer_sae and (target_layer + 1) in saes,
             config.next_reconstruction_weight > 0.0,
         )
-        balance_reconstruction_losses = (
-            config.balance_reconstruction_losses[target_layer]
-            if hasattr(config.balance_reconstruction_losses, "__getitem__")
-            else config.balance_reconstruction_losses
-        )
-        reconstruction_weight = (
-            config.reconstruction_weight[target_layer]
-            if hasattr(config.reconstruction_weight, "__getitem__")
-            else config.reconstruction_weight
-        )
-        next_reconstruction_weight = (
-            config.next_reconstruction_weight[target_layer]
-            if hasattr(config.next_reconstruction_weight, "__getitem__")
-            else config.next_reconstruction_weight
+        reconstruction_weight, next_reconstruction_weight = (
+            maybe_balance_reconstruction_weights(
+                config.balance_reconstruction_losses,
+                config.reconstruction_weight,
+                config.next_reconstruction_weight,
+                losses,
+                target_layer,
+            )
         )
         idempotency_weight = (
             config.idempotency_weight[target_layer]
@@ -318,18 +372,7 @@ def train_one_layer(
             if hasattr(config.dense_weight, "__getitem__")
             else config.dense_weight
         )
-        if balance_reconstruction_losses:
-            target_scale = (reconstruction_weight + next_reconstruction_weight) * max(
-                losses["reconstruction"].item(),
-                losses["next_reconstruction"].item(),
-                1e-8,
-            )
-            reconstruction_weight = target_scale / max(
-                losses["reconstruction"].item(), 1e-8
-            )
-            next_reconstruction_weight = target_scale / max(
-                losses["next_reconstruction"].item(), 1e-8
-            )
+
         loss = sum(
             (
                 losses["reconstruction"] * reconstruction_weight,
@@ -374,6 +417,159 @@ def train_one_layer(
 
     progress.close()
 
+
+def train_e2e(
+    model: torch.nn.Module,
+    tokenizer: AutoTokenizer,
+    saes: Dict[int, SAE],
+    dataset: IterableDataset,
+    config: TrainingConfig,
+    cache_dir: Optional[str],
+):
+    assert not any(sae.normalize_activations for sae in saes.values()), (
+        "Activation normalization not implemented for e2e training"
+    )
+    optimizer = make_optimizer(saes, list(range(model.config.num_layers)), config)
+
+    replacement_model = make_replacement_model(
+        model, {f"transformer.h.{layer}": sae for layer, sae in saes.items()}
+    )
+
+    progress = MultilineProgress(
+        total=config.num_train_tokens,
+        desc=[
+            f"Layer {layer}"
+            for layer in list(range(model.config.num_layers - 1, -1, -1))
+        ],
+        num_header_lines=model.config.num_layers,
+    )
+
+    num_used_tokens = 0
+    replacement_model.eval()
+    eval_threshold = 0
+
+    # TODO: this is mostly just a hack to get e2e to run on a Macbook; we should configure the batch size
+    # separately for the fine-tuning method.
+
+    batch_size = max(int(config.training_batch_size / 4), 1)
+    for step, batch in enumerate(
+        input_generator(
+            replacement_model,
+            tokenizer,
+            dataset,
+            max_tokens=config.num_train_tokens,
+            tokenizer_batch_size=config.tokenizer_batch_size,
+            inference_batch_size=batch_size,
+            use_weighted_mask=config.use_weighted_mask,
+        )
+    ):
+        optimizer.zero_grad()
+        num_used_tokens += batch.num_tokens
+
+        result, original_logits = get_sae_data(
+            replacement_model,
+            saes,
+            batch,
+            0,
+            model.config.num_layers,
+            config.use_next_layer_sae,
+            cache_dir,
+            step * batch_size,
+            config.use_kl_on_final_layer,
+        )
+
+        losses = [
+            sae_losses(
+                batch,
+                result[()][target_layer],
+                result[()][target_layer + 1],
+                result[(target_layer,)][target_layer + 1],
+                saes[target_layer],
+                target_layer == model.config.num_layers - 1,
+                False,
+                target_layer
+                == model.config.num_layers
+                - 1,  # Reconstruct "next layer" only for the last layer, since that's when we compute the KL
+            )
+            for target_layer in range(model.config.num_layers)
+        ]
+        loss = torch.zeros((1,), device=model.device)
+        # Keep track of this separately from any sparsity / other losses, so we can rescale the KL
+        mse_loss = torch.zeros((1,), device=model.device)
+
+        for target_layer in saes.keys():
+            reconstruction_weight, next_reconstruction_weight = (
+                maybe_balance_reconstruction_weights(
+                    # We will manually balance KL vs the sum of all MSE losses
+                    False,
+                    config.reconstruction_weight,
+                    config.next_reconstruction_weight,
+                    losses[target_layer],
+                    target_layer,
+                )
+            )
+            idempotency_weight = (
+                config.idempotency_weight[target_layer]
+                if hasattr(config.idempotency_weight, "__getitem__")
+                else config.idempotency_weight
+            )
+            dense_weight = (
+                config.dense_weight[target_layer]
+                if hasattr(config.dense_weight, "__getitem__")
+                else config.dense_weight
+            )
+            loss += sum(
+                (
+                    losses[target_layer]["reconstruction"] * reconstruction_weight,
+                    losses[target_layer]["idempotency"] * idempotency_weight,
+                    losses[target_layer]["dense"] * dense_weight,
+                )
+            )
+            with torch.no_grad():
+                mse_loss += (
+                    losses[target_layer]["reconstruction"] * reconstruction_weight
+                )
+
+            if target_layer == model.config.num_layers - 1:
+                kl_loss = losses[target_layer]["next_reconstruction"]
+
+        # Balance KL loss with MSE ala (Karvonen 2025)
+        with torch.no_grad():
+            kl_scale = mse_loss.item() / (kl_loss.item() + 1e-8)
+        loss += kl_loss * kl_scale
+
+        loss.backward()
+        optimizer.step()
+
+        if num_used_tokens >= eval_threshold:
+            progress.set_postfix(
+                [
+                    {
+                        k: v
+                        for k, v in sae_evals(
+                            batch,
+                            result[()][target_layer],
+                            result[()][target_layer + 1],
+                            result[(target_layer,)][target_layer + 1],
+                            model,
+                            saes[target_layer],
+                            original_logits=original_logits,
+                        ).items()
+                        if k not in ("mse",)
+                    }
+                    for target_layer in range(model.config.num_layers - 1, -1, -1)
+                ],
+                refresh=False,
+            )
+            eval_threshold = min(
+                eval_threshold + config.eval_interval, config.num_train_tokens
+            )
+        progress.total = max(config.num_train_tokens, num_used_tokens)
+        progress.update(batch.num_tokens)
+
+    progress.close()
+
+
 def train(
     model: torch.nn.Module,
     tokenizer: AutoTokenizer,
@@ -398,5 +594,6 @@ def train(
                 cache_dir,
                 reinit_weights,
             )
-    elif config.method is TrainingMethod.e2e:
-        pass
+
+    if config.method in (TrainingMethod.e2e, TrainingMethod.finetuned):
+        train_e2e(model, tokenizer, saes, dataset, config, cache_dir)
