@@ -4,18 +4,26 @@ import jurigged
 
 _has_run = False
 
-
-def _monkeypatched_on_prepare(self, module_name, filename):
-    jurigged.live.JuriggedHandler(self, filename).schedule(self.observer)
-
-
 if not _has_run:
-    _jurigged_watcher = jurigged.watch("sae/*.py", autostart=False)
-    _jurigged_watcher.registry.auto_register(
-        jurigged.live.to_filter("backtracking/*.py")
-    )
-    _jurigged_watcher.registry.precache_activity[-1] = partial(
-        _monkeypatched_on_prepare, _jurigged_watcher
+
+    class _SilentLogger:
+        def debug(self, *args, **kwargs):
+            pass
+
+        def info(self, *args, **kwargs):
+            pass
+
+        def warning(self, *args, **kwargs):
+            pass
+
+        def error(self, *args, **kwargs):
+            pass
+
+        def critical(self, *args, **kwargs):
+            pass
+
+    _jurigged_watcher = jurigged.watch(
+        "next_layer_sae/*.py", autostart=False, logger=_SilentLogger()
     )
     _jurigged_watcher.start()
     _has_run = True

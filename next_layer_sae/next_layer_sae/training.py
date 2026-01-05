@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from functools import partial
 from typing import TYPE_CHECKING, Dict, List, Mapping, Optional
 
@@ -18,6 +19,12 @@ if TYPE_CHECKING:
 
     from .data_batch import DataBatch
     from .sae import SAE
+
+
+class TrainingMethod(Enum):
+    next_layer = "Next Layer"
+    e2e = "End-to-end"
+    finetuned = "Finetuned"
 
 
 @dataclass(kw_only=True)
@@ -41,7 +48,7 @@ class TrainingConfig:
     use_kl_on_final_layer: bool = False
     balance_reconstruction_losses: bool = False | Mapping[int, float]
     use_weighted_mask: bool = False
-
+    method: TrainingMethod
 
 def sae_losses(
     batch: DataBatch,
@@ -51,29 +58,32 @@ def sae_losses(
     sae: SAE,
     use_kl: bool,
     use_next_layer_sae: bool,
+    should_reconstruct_next_layer: bool,
 ):
     token_mask = batch.token_mask.to(sae.device)
-    if use_kl:
-        next_layer_reconstruction_loss = torch.nn.KLDivLoss(
-            reduction="none", log_target=True
-        )(
-            next_layer_replacement.original.log_softmax(-1),
-            next_layer_baseline.original.log_softmax(-1),
-        ).mean(dim=-1)
-    else:
-        if use_next_layer_sae:
-            next_layer_attr = "features"
-            next_layer_fn = torch.abs
-        else:
-            next_layer_attr = "normalized_original"
-            next_layer_fn = partial(torch.pow, exponent=2)
 
-        next_layer_reconstruction_loss = next_layer_fn(
-            (
-                getattr(next_layer_replacement, next_layer_attr)
-                - getattr(next_layer_baseline, next_layer_attr)
-            )
-        ).mean(dim=-1)
+    if should_reconstruct_next_layer:
+        if use_kl:
+            next_layer_reconstruction_loss = torch.nn.KLDivLoss(
+                reduction="none", log_target=True
+            )(
+                next_layer_replacement.original.log_softmax(-1),
+                next_layer_baseline.original.log_softmax(-1),
+            ).mean(dim=-1)
+        else:
+            if use_next_layer_sae:
+                next_layer_attr = "features"
+                next_layer_fn = torch.abs
+            else:
+                next_layer_attr = "normalized_original"
+                next_layer_fn = partial(torch.pow, exponent=2)
+
+            next_layer_reconstruction_loss = next_layer_fn(
+                (
+                    getattr(next_layer_replacement, next_layer_attr)
+                    - getattr(next_layer_baseline, next_layer_attr)
+                )
+            ).mean(dim=-1)
 
     reconstruction_loss = (
         (this_layer_baseline.reconstruction - this_layer_baseline.normalized_original)
@@ -94,7 +104,9 @@ def sae_losses(
     result = {
         "reconstruction": (reconstruction_loss * token_mask).sum() / batch.num_tokens,
         "next_reconstruction": (next_layer_reconstruction_loss * token_mask).sum()
-        / batch.num_tokens,
+        / batch.num_tokens
+        if should_reconstruct_next_layer
+        else 0.0,
         "idempotency": (idempotency_loss * token_mask).sum() / batch.num_tokens,
         "dense": (dense_loss * token_mask).sum() / batch.num_tokens
         if this_layer_baseline.dense_decoding is not None
@@ -279,6 +291,7 @@ def train_one_layer(
             config.use_kl_on_final_layer
             and target_layer == model.config.num_layers - 1,
             config.use_next_layer_sae and (target_layer + 1) in saes,
+            config.next_reconstruction_weight > 0.0,
         )
         balance_reconstruction_losses = (
             config.balance_reconstruction_losses[target_layer]
@@ -361,7 +374,6 @@ def train_one_layer(
 
     progress.close()
 
-
 def train(
     model: torch.nn.Module,
     tokenizer: AutoTokenizer,
@@ -371,10 +383,20 @@ def train(
     cache_dir: Optional[str] = None,
     reinit_weights: bool = False,
 ):
-    # Always train later layers first
-    for layer in sorted(config.train_layers, reverse=True):
-        if reinit_weights:
-            saes[layer].init_weights(saes.get(layer + 1))
-        train_one_layer(
-            model, tokenizer, saes, layer, dataset, config, cache_dir, reinit_weights
-        )
+    if config.method in (TrainingMethod.next_layer, TrainingMethod.finetuned):
+        # Always train later layers first
+        for layer in sorted(config.train_layers, reverse=True):
+            if reinit_weights:
+                saes[layer].init_weights(saes.get(layer + 1))
+            train_one_layer(
+                model,
+                tokenizer,
+                saes,
+                layer,
+                dataset,
+                config,
+                cache_dir,
+                reinit_weights,
+            )
+    elif config.method is TrainingMethod.e2e:
+        pass
