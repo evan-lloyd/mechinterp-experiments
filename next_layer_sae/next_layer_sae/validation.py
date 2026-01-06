@@ -28,7 +28,6 @@ def validate_saes(
     num_tokens: Optional[int] = None,
     num_batches: Optional[int] = None,
     cache_dir: Optional[str] = None,
-    use_next_layer_sae: bool = False,
 ):
     model.eval()
     num_tokens_consumed = 0
@@ -70,7 +69,7 @@ def validate_saes(
             model,
             saes,
             batch,
-            use_next_layer_sae=use_next_layer_sae,
+            use_next_layer_sae=False,
             cache_dir=cache_dir,
             cache_offset=step * inference_batch_size,
             use_kl_on_final_layer=True,
@@ -179,15 +178,21 @@ def sae_evals(
     mse = ((next_layer_replacement.original - next_layer_baseline.original) ** 2).sum(
         dim=-1
     ) * token_mask
-    next_norm = (
-        torch.linalg.vector_norm(
-            next_layer_replacement.original - next_layer_baseline.original,
-            dim=-1,
-        )
-        / torch.linalg.vector_norm(next_layer_baseline.original, dim=-1)[
-            token_mask.bool()
-        ].mean()
-    ) * token_mask
+
+    # We don't want to calculate the rcn in the vocabulary space, since we're actually using KL (but that's
+    # already reported elsewhere, so just skip)
+    if this_layer_baseline.target_layer < model.config.num_layers - 1:
+        next_norm = (
+            torch.linalg.vector_norm(
+                next_layer_replacement.original - next_layer_baseline.original,
+                dim=-1,
+            )
+            / torch.linalg.vector_norm(next_layer_baseline.original, dim=-1)[
+                token_mask.bool()
+            ].mean()
+        ) * token_mask
+    else:
+        next_norm = None
     relative_norm = (
         torch.linalg.vector_norm(
             this_layer_baseline.denormalized_reconstruction
@@ -230,7 +235,8 @@ def sae_evals(
     )
 
     if aggregate:
-        next_norm = next_norm.sum().item() / batch.num_tokens
+        if next_norm is not None:
+            next_norm = next_norm.sum().item() / batch.num_tokens
         relative_norm = relative_norm.sum().item() / batch.num_tokens
         l0 = l0[token_mask.bool()].sum().item() / batch.num_tokens
         idempotency = idempotency.sum().item() / batch.num_tokens
@@ -241,7 +247,8 @@ def sae_evals(
                 (this_layer_baseline.dense_decoding**2).sum(dim=-1) * token_mask
             ).sum().item() / batch.num_tokens
     else:
-        next_norm = next_norm[token_mask.bool()].flatten().cpu().numpy()
+        if next_norm is not None:
+            next_norm = next_norm[token_mask.bool()].flatten().cpu().numpy()
         relative_norm = relative_norm[token_mask.bool()].flatten().cpu().numpy()
         l0 = l0[token_mask.bool()].flatten().cpu().numpy()
         idempotency = idempotency[token_mask.bool()].flatten().cpu().numpy()
@@ -288,8 +295,16 @@ def generate_with_replacement(
     input: str | List[str],
     saes: Dict[int, SAE],
     do_sample: bool = False,
+    stream: bool = True,
 ):
     replacement_model = make_replacement_model(
         model, {f"transformer.h.{layer}": sae for layer, sae in saes.items()}
     )
-    generate(input, replacement_model, tokenizer, do_sample=do_sample, temperature=0.5)
+    return generate(
+        input,
+        replacement_model,
+        tokenizer,
+        do_sample=do_sample,
+        temperature=0.5,
+        stream=stream,
+    )
