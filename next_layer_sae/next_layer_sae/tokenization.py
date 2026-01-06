@@ -267,6 +267,7 @@ def input_generator(
     tokenizer_batch_size: int = 1,
     inference_batch_size: int = 1,
     use_weighted_mask: bool = False,
+    offset: int = 0,
 ):
     if use_weighted_mask:
         position_weights = get_position_weights(
@@ -298,5 +299,8 @@ def input_generator(
             inference_batch_size,
             use_weighted_mask,
         )
-        yield batch
+        if state.num_tokens_generated + batch.num_tokens > offset:
+            # NB: this should maybe technically discard some rows from the start, since we'll effectively
+            # be training on the overlapping tokens twice, but I doubt this matters much.
+            yield batch
         state.num_tokens_generated += batch.num_tokens

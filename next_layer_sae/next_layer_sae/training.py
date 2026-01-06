@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
 from functools import partial
@@ -30,6 +31,7 @@ class TrainingConfig:
     num_train_tokens: int
     tokenizer_batch_size: int
     training_batch_size: int
+    e2e_batch_size: int
     eval_interval: int
     reconstruction_weight: float | Mapping[int, float]
     next_reconstruction_weight: float | Mapping[int, float]
@@ -47,6 +49,7 @@ class TrainingConfig:
     balance_reconstruction_losses: bool = False | Mapping[int, float]
     use_weighted_mask: bool = False
     method: TrainingMethod
+    finetune_fraction: Optional[float] = None
 
 
 def sae_losses(
@@ -265,7 +268,16 @@ def train_one_layer(
     config: TrainingConfig,
     cache_dir: Optional[str],
     did_reinit: bool,
+    previous_trained_tokens: int = 0,
+    max_tokens: Optional[int] = None,
 ):
+    if max_tokens is None:
+        max_tokens = config.num_train_tokens
+
+    train_result = defaultdict(list)
+    replacement_model = make_replacement_model(
+        model, {f"transformer.h.{layer}": sae for layer, sae in saes.items()}
+    )
     optimizer = make_optimizer(saes, [target_layer], config)
     if saes[target_layer].normalize_activations:
         normalizer_optimizer = torch.optim.Adam(
@@ -273,7 +285,7 @@ def train_one_layer(
         )
 
     progress = MultilineProgress(
-        total=config.num_train_tokens,
+        total=max_tokens,
         desc=[f"Layer {target_layer}"],
         num_header_lines=1,
     )
@@ -286,7 +298,7 @@ def train_one_layer(
             model,
             tokenizer,
             dataset,
-            max_tokens=config.num_train_tokens,
+            max_tokens=max_tokens,
             tokenizer_batch_size=config.tokenizer_batch_size,
             inference_batch_size=config.training_batch_size,
             use_weighted_mask=config.use_weighted_mask,
@@ -385,7 +397,6 @@ def train_one_layer(
         loss.backward()
 
         optimizer.step()
-        # lr_scheduler.step()
 
         if saes[target_layer].normalize_activations:
             normalizer_optimizer.zero_grad()
@@ -393,29 +404,29 @@ def train_one_layer(
             normalizer_optimizer.step()
 
         if num_used_tokens >= eval_threshold:
+            evals = sae_evals(
+                batch,
+                result[()][target_layer],
+                result[()][target_layer + 1],
+                result[(target_layer,)][target_layer + 1],
+                model,
+                saes[target_layer],
+                original_logits=original_logits,
+                replacement_model=replacement_model,
+            )
+            for k, v in evals.items():
+                train_result[k].append((num_used_tokens + previous_trained_tokens, v))
+
             progress.set_postfix(
-                {
-                    k: v
-                    for k, v in sae_evals(
-                        batch,
-                        result[()][target_layer],
-                        result[()][target_layer + 1],
-                        result[(target_layer,)][target_layer + 1],
-                        model,
-                        saes[target_layer],
-                        original_logits=original_logits,
-                    ).items()
-                    if k not in ("mse",)
-                },
+                {k: v for k, v in evals.items() if k not in ("mse", "idm")},
                 refresh=False,
             )
-            eval_threshold = min(
-                eval_threshold + config.eval_interval, config.num_train_tokens
-            )
-        progress.total = max(config.num_train_tokens, num_used_tokens)
+            eval_threshold = min(eval_threshold + config.eval_interval, max_tokens)
+        progress.total = max(max_tokens, num_used_tokens)
         progress.update(batch.num_tokens)
 
     progress.close()
+    return train_result, num_used_tokens
 
 
 def train_e2e(
@@ -425,7 +436,9 @@ def train_e2e(
     dataset: IterableDataset,
     config: TrainingConfig,
     cache_dir: Optional[str],
+    previous_trained_tokens: int = 0,
 ):
+    train_result = defaultdict(lambda: defaultdict(list))
     assert not any(sae.normalize_activations for sae in saes.values()), (
         "Activation normalization not implemented for e2e training"
     )
@@ -436,7 +449,7 @@ def train_e2e(
     )
 
     progress = MultilineProgress(
-        total=config.num_train_tokens,
+        total=config.num_train_tokens - previous_trained_tokens,
         desc=[
             f"Layer {layer}"
             for layer in list(range(model.config.num_layers - 1, -1, -1))
@@ -448,15 +461,15 @@ def train_e2e(
     replacement_model.eval()
     eval_threshold = 0
 
-    # TODO: this is mostly just a hack to get e2e to run on a Macbook; we should configure the batch size
-    # separately for the fine-tuning method.
-
-    batch_size = max(int(config.training_batch_size / 4), 1)
+    batch_size = config.e2e_batch_size
     for step, batch in enumerate(
         input_generator(
             replacement_model,
             tokenizer,
             dataset,
+            # For the finetuning method, make sure it sees the tokens at the end of the training set
+            # We could also accomplish the same thing by adding a "finetune" split at the dataset level
+            offset=previous_trained_tokens,
             max_tokens=config.num_train_tokens,
             tokenizer_batch_size=config.tokenizer_batch_size,
             inference_batch_size=batch_size,
@@ -542,32 +555,39 @@ def train_e2e(
         optimizer.step()
 
         if num_used_tokens >= eval_threshold:
+            evals = [
+                sae_evals(
+                    batch,
+                    result[()][target_layer],
+                    result[()][target_layer + 1],
+                    result[(target_layer,)][target_layer + 1],
+                    model,
+                    saes[target_layer],
+                    original_logits=original_logits,
+                    replacement_model=replacement_model,
+                )
+                for target_layer in range(model.config.num_layers - 1, -1, -1)
+            ]
+            for i, e in enumerate(evals):
+                for k, v in e.items():
+                    train_result[i][k].append(
+                        (num_used_tokens + previous_trained_tokens, v)
+                    )
             progress.set_postfix(
-                [
-                    {
-                        k: v
-                        for k, v in sae_evals(
-                            batch,
-                            result[()][target_layer],
-                            result[()][target_layer + 1],
-                            result[(target_layer,)][target_layer + 1],
-                            model,
-                            saes[target_layer],
-                            original_logits=original_logits,
-                        ).items()
-                        if k not in ("mse",)
-                    }
-                    for target_layer in range(model.config.num_layers - 1, -1, -1)
-                ],
+                [{k: v for k, v in e.items() if k not in ("mse",)} for e in evals],
                 refresh=False,
             )
             eval_threshold = min(
-                eval_threshold + config.eval_interval, config.num_train_tokens
+                eval_threshold + config.eval_interval,
+                config.num_train_tokens - previous_trained_tokens,
             )
-        progress.total = max(config.num_train_tokens, num_used_tokens)
+        progress.total = max(
+            config.num_train_tokens - previous_trained_tokens, num_used_tokens
+        )
         progress.update(batch.num_tokens)
 
     progress.close()
+    return train_result, num_used_tokens
 
 
 def train(
@@ -579,12 +599,16 @@ def train(
     cache_dir: Optional[str] = None,
     reinit_weights: bool = False,
 ):
+    train_result = {layer: defaultdict(list) for layer in saes.keys()}
+    num_tokens = 0
     if config.method in (TrainingMethod.next_layer, TrainingMethod.finetuned):
         # Always train later layers first
         for layer in sorted(config.train_layers, reverse=True):
             if reinit_weights:
                 saes[layer].init_weights(saes.get(layer + 1))
-            train_one_layer(
+            # NB: yeah, we're overwriting num_tokens, we have the same number for each layer though
+            # so it doesn't matter.
+            result, num_tokens = train_one_layer(
                 model,
                 tokenizer,
                 saes,
@@ -593,7 +617,26 @@ def train(
                 config,
                 cache_dir,
                 reinit_weights,
+                previous_trained_tokens=0,
+                max_tokens=int(
+                    (1.0 - config.finetune_fraction) * config.num_train_tokens
+                ) if config.finetune_fraction else None,
             )
+            for key, value in result.items():
+                train_result[layer][key].extend(value)
 
     if config.method in (TrainingMethod.e2e, TrainingMethod.finetuned):
-        train_e2e(model, tokenizer, saes, dataset, config, cache_dir)
+        e2e_result, num_tokens = train_e2e(
+            model,
+            tokenizer,
+            saes,
+            dataset,
+            config,
+            cache_dir,
+            previous_trained_tokens=num_tokens,
+        )
+        for layer, result in e2e_result.items():
+            for key, value in result.items():
+                train_result[layer][key].extend(value)
+
+    return train_result

@@ -135,13 +135,6 @@ def run_replacement_evals(
     base_logits: torch.Tensor,
 ):
     token_mask = batch.token_mask.to(base_model.device)
-    target_labels = (
-        torch.nn.functional.pad(
-            batch.input_ids.to(base_model.device), (0, 1), value=-100
-        )[..., 1:]
-        .contiguous()
-        .view(-1)
-    )
     replacement_model = make_replacement_model(
         base_model, {f"transformer.h.{layer}": sae for layer, sae in saes.items()}
     )
@@ -151,22 +144,6 @@ def run_replacement_evals(
         attention_mask=batch.attention_mask.to(replacement_model.device),
         use_cache=False,
     ).logits
-    base_loss = torch.nn.CrossEntropyLoss(reduction="none")(
-        base_logits.view(-1, base_model.config.vocab_size),
-        target_labels,
-    )
-    replacement_loss = torch.nn.CrossEntropyLoss(reduction="none")(
-        replacement_logits.view(-1, base_model.config.vocab_size),
-        target_labels,
-    )
-    rel_ce = (
-        ((replacement_loss - base_loss) / (base_loss.sum() / batch.num_tokens))[
-            token_mask.bool().view(-1)
-        ]
-        .flatten()
-        .cpu()
-        .numpy()
-    )
     replacement_log_probs = replacement_logits.log_softmax(-1)
     base_log_probs = base_logits.log_softmax(-1)
     kl = (
@@ -179,7 +156,7 @@ def run_replacement_evals(
         .numpy()
     )
 
-    return {"stack_rel_ce": rel_ce, "kl": kl}
+    return {"kl": kl}
 
 
 @torch.no_grad
@@ -192,23 +169,21 @@ def sae_evals(
     sae: SAE,
     aggregate: bool = True,
     original_logits: Optional[torch.Tensor] = None,
-    use_next_layer_sae: bool = False,
+    replacement_model: Optional[torch.nn.Module] = None,
 ):
+    # TODO: we should refactor SAEData to use replacement_model; it should compute the logits for us
+    # on steps where we're running evals
+    if replacement_model is None:
+        replacement_model = model
     token_mask = batch.token_mask.to(sae.device).bool()
     mse = ((next_layer_replacement.original - next_layer_baseline.original) ** 2).sum(
         dim=-1
     ) * token_mask
-    # TODO: use_next_layer_SAE
-    # if use_next_layer_sae and next_layer_baseline.features is not None:
-    #     next_layer_attr = "features"
-    # else:
-    #     next_layer_attr = "normalized_original"
     next_norm = (
         torch.linalg.vector_norm(
             next_layer_replacement.original - next_layer_baseline.original,
             dim=-1,
         )
-        # TODO: Actually, this should use token mask
         / torch.linalg.vector_norm(next_layer_baseline.original, dim=-1)[
             token_mask.bool()
         ].mean()
@@ -233,35 +208,18 @@ def sae_evals(
         dim=-1
     ) * token_mask
 
-    target_labels = (
-        torch.nn.functional.pad(batch.input_ids.to(model.device), (0, 1), value=-100)[
-            ..., 1:
-        ]
-        .contiguous()
-        .view(-1)
-    )
-
     if original_logits is None:
         original_logits = get_logits(
             model,
             next_layer_baseline,
             batch.attention_mask.to(model.device),
         )
-    original_loss = torch.nn.CrossEntropyLoss(reduction="none")(
-        original_logits.view(-1, model.config.vocab_size),
-        target_labels,
-    ) * token_mask.view(-1)
 
     replacement_output = get_logits(
-        model,
+        replacement_model,
         next_layer_replacement,
         batch.attention_mask.to(model.device),
     )
-
-    replacement_loss = torch.nn.CrossEntropyLoss(reduction="none")(
-        replacement_output.view(-1, model.config.vocab_size),
-        target_labels,
-    ) * token_mask.view(-1)
 
     rep_kl = (
         torch.nn.KLDivLoss(reduction="none", log_target=True)(
@@ -276,9 +234,6 @@ def sae_evals(
         relative_norm = relative_norm.sum().item() / batch.num_tokens
         l0 = l0[token_mask.bool()].sum().item() / batch.num_tokens
         idempotency = idempotency.sum().item() / batch.num_tokens
-        replacement_loss = replacement_loss.sum().item() / batch.num_tokens
-        original_loss = original_loss.sum().item() / batch.num_tokens
-        rel_ce = (replacement_loss - original_loss) / original_loss
         rep_kl = rep_kl.sum().item() / batch.num_tokens
         mse = mse.sum().item() / batch.num_tokens
         if this_layer_baseline.dense_decoding is not None:
@@ -290,15 +245,6 @@ def sae_evals(
         relative_norm = relative_norm[token_mask.bool()].flatten().cpu().numpy()
         l0 = l0[token_mask.bool()].flatten().cpu().numpy()
         idempotency = idempotency[token_mask.bool()].flatten().cpu().numpy()
-        rel_ce = (
-            (
-                (replacement_loss - original_loss)
-                / (original_loss.sum() / batch.num_tokens)
-            )[token_mask.bool().view(-1)]
-            .flatten()
-            .cpu()
-            .numpy()
-        )
         rep_kl = rep_kl[token_mask.bool()].flatten().cpu().numpy()
         mse = mse[token_mask.bool()].flatten().cpu().numpy()
         if this_layer_baseline.dense_decoding is not None:
@@ -316,7 +262,6 @@ def sae_evals(
         "mse": mse,
         "idm": idempotency,
         "L0": l0,
-        "rel_ce": rel_ce,
         "rep_kl": rep_kl,
     }
     if this_layer_baseline.dense_decoding is not None:
