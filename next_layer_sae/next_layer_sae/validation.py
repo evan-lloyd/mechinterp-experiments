@@ -181,7 +181,7 @@ def sae_evals(
 
     # We don't want to calculate the rcn in the vocabulary space, since we're actually using KL (but that's
     # already reported elsewhere, so just skip)
-    if this_layer_baseline.target_layer < model.config.num_layers - 1:
+    if next_layer_replacement.target_layer < model.config.num_layers:
         next_norm = (
             torch.linalg.vector_norm(
                 next_layer_replacement.original - next_layer_baseline.original,
