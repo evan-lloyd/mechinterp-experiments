@@ -128,14 +128,14 @@ def sae_losses(
     result = {
         "reconstruction": (reconstruction_loss * token_mask).sum() / batch.num_tokens
         if want_mse
-        else 0.0,
+        else torch.zeros((1,), device=sae.device),
         "downstream_reconstruction": downstream_reconstruction_loss,
         "idempotency": (idempotency_loss * token_mask).sum() / batch.num_tokens
         if want_idempotency
-        else 0.0,
+        else torch.zeros((1,), device=sae.device),
         "dense": (dense_loss * token_mask).sum() / batch.num_tokens
         if this_layer_baseline.dense_decoding is not None
-        else 0.0,
+        else torch.zeros((1,), device=sae.device),
     }
 
     if sae.normalize_activations:
@@ -454,6 +454,29 @@ def train_one_layer(
             )
             for k, v in evals.items():
                 train_result[k].append((num_used_tokens + previous_trained_tokens, v))
+            train_result["raw_loss.mse"].append(losses["reconstruction"].item())
+            train_result["raw_loss.next_layer_mse"].append(
+                losses["downstream_reconstruction"][-1].item()
+                if config.method is TrainingMethod.next_layer
+                and target_layer <= model.config.num_layers - 1
+                else 0.0
+            )
+            train_result["raw_loss.kl"].append(
+                losses["downstream_reconstruction"][-1].item()
+                if config.method is TrainingMethod.next_layer
+                and target_layer == model.config.num_layers - 1
+                else 0.0
+            )
+            train_result["weighted_loss.mse"].append(
+                train_result["raw_loss.mse"][-1] * reconstruction_weight
+            )
+            train_result["weighted_loss.next_layer_mse"].append(
+                train_result["raw_loss.next_layer_mse"][-1]
+                * downstream_reconstruction_weight
+            )
+            train_result["weighted_loss.kl"].append(
+                train_result["raw_loss.kl"][-1] * downstream_reconstruction_weight
+            )
 
             progress.set_postfix(
                 {k: v for k, v in evals.items() if k not in ("mse", "idm")},
@@ -599,7 +622,11 @@ def train_e2e(
             ):
                 kl_scale = 1.0
             else:
-                kl_scale = mse_loss.item() / (kl_loss.item() + 1e-8)
+                # For e2e, make KL be the same scale as the *average* MSE loss for a layer
+                # (this factor will be 1 for finetuned)
+                kl_scale = (
+                    mse_loss.item() / len(losses["downstream_reconstruction"])
+                ) / (kl_loss.item() + 1e-8)
 
         loss += mse_loss * reconstruction_weight + kl_loss * kl_scale
 
@@ -634,6 +661,21 @@ def train_e2e(
             )
             for k, v in evals.items():
                 train_result[k].append((num_used_tokens + previous_trained_tokens, v))
+            train_result["raw_loss.mse"].append(losses["reconstruction"].item())
+            train_result["raw_loss.kl"].append(kl_loss.item())
+            train_result["raw_loss.downstream"].append(
+                [ds.item() for ds in losses["downstream_reconstruction"]]
+            )
+            train_result["weighted_loss.mse"].append(
+                losses["reconstruction"].item() * reconstruction_weight
+            )
+            train_result["weighted_loss.kl"].append(kl_loss.item() * kl_scale)
+            train_result["weighted_loss.downstream"].append(
+                [
+                    ds.item() * reconstruction_weight
+                    for ds in losses["downstream_reconstruction"]
+                ]
+            )
 
             progress.set_postfix(
                 {k: v for k, v in evals.items() if k not in ("mse", "idm")},
@@ -665,7 +707,12 @@ def train(
     train_result = {layer: defaultdict(list) for layer in saes.keys()}
     num_tokens = 0
     if (
-        config.method in (TrainingMethod.standard, TrainingMethod.next_layer, TrainingMethod.finetuned)
+        config.method
+        in (
+            TrainingMethod.standard,
+            TrainingMethod.next_layer,
+            TrainingMethod.finetuned,
+        )
         and not start_at_finetune
     ):
         # Always train later layers first

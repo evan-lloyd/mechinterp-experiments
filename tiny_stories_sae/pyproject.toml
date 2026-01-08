@@ -14,7 +14,20 @@ dependencies = [
 version = "0.0.0"
 
 [dependency-groups]
-dev = [
-    "jurigged>=0.6.1",
-    "ruff>=0.14.10",
+dev = ["jurigged>=0.6.1", "ruff>=0.14.10"]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", marker = "platform_system == 'Darwin'" },
+    { index = "pytorch-cu126", marker = "platform_system != 'Darwin'" },
 ]

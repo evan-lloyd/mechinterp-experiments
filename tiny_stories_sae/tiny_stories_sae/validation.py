@@ -175,9 +175,6 @@ def sae_evals(
     if replacement_model is None:
         replacement_model = model
     token_mask = batch.token_mask.to(sae.device).bool()
-    mse = ((next_layer_replacement.original - next_layer_baseline.original) ** 2).sum(
-        dim=-1
-    ) * token_mask
 
     # We don't want to calculate the rcn in the vocabulary space, since we're actually using KL (but that's
     # already reported elsewhere, so just skip)
@@ -241,7 +238,6 @@ def sae_evals(
         l0 = l0[token_mask.bool()].sum().item() / batch.num_tokens
         idempotency = idempotency.sum().item() / batch.num_tokens
         rep_kl = rep_kl.sum().item() / batch.num_tokens
-        mse = mse.sum().item() / batch.num_tokens
         if this_layer_baseline.dense_decoding is not None:
             dense_l2 = (
                 (this_layer_baseline.dense_decoding**2).sum(dim=-1) * token_mask
@@ -253,7 +249,6 @@ def sae_evals(
         l0 = l0[token_mask.bool()].flatten().cpu().numpy()
         idempotency = idempotency[token_mask.bool()].flatten().cpu().numpy()
         rep_kl = rep_kl[token_mask.bool()].flatten().cpu().numpy()
-        mse = mse[token_mask.bool()].flatten().cpu().numpy()
         if this_layer_baseline.dense_decoding is not None:
             dense_l2 = (
                 (this_layer_baseline.dense_decoding**2)
@@ -266,7 +261,6 @@ def sae_evals(
     result = {
         "rcn": relative_norm,
         "next_rcn": next_norm,
-        "mse": mse,
         "idm": idempotency,
         "L0": l0,
         "rep_kl": rep_kl,

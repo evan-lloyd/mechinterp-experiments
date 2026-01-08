@@ -130,7 +130,7 @@ def tokenize_strings(
                     input_id_stack[-1],
                     torch.full(
                         (CONTEXT_LENGTH - new_tokens,),
-                        -1,
+                        tokenizer.bos_token_id,
                         dtype=torch.int64,
                     ),
                 )
@@ -161,6 +161,9 @@ def tokenize_strings(
         )
     else:
         token_mask = (position_ids >= 0).float()
+
+    # These have to be non-negative on CUDA kernels
+    position_ids = torch.where(position_ids >= 0, position_ids, 0)
     return DataBatch(
         torch.stack(input_id_stack),
         position_ids,
