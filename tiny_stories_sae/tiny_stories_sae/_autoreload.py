@@ -4,7 +4,7 @@ _has_run = False
 
 if not _has_run:
     _jurigged_watcher = jurigged.watch(
-        "next_layer_sae/*.py", autostart=False, logger=jurigged.live.conservative_logger
+        "tiny_stories_sae/*.py", autostart=False, logger=jurigged.live.conservative_logger
     )
     _jurigged_watcher.start()
     _has_run = True

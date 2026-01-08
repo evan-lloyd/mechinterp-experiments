@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from contextlib import ExitStack
+from copy import copy
 from dataclasses import dataclass
 from functools import partial
-from typing import Dict, Optional, Tuple
+from typing import Dict, Literal, Optional, Tuple
 
 import numpy as np
 import torch
@@ -24,10 +25,10 @@ class SAEData:
     features: torch.Tensor
     reconstruction: torch.Tensor
     denormalized_reconstruction: torch.Tensor
+    reconstruction_eval: Literal["norm"] | Literal["KL"]
     norms: Optional[torch.Tensor] = None
     dense_encoding: Optional[torch.Tensor] = None
     dense_decoding: Optional[torch.Tensor] = None
-    next_layer_data: Optional["SAEData"] = None
 
 
 def get_logits(
@@ -180,11 +181,11 @@ def get_sae_data(
     batch: DataBatch,
     start_layer: int = 0,
     end_layer: Optional[int] = None,
-    use_next_layer_sae: bool = True,
+    use_downstream_saes: bool = True,
     cache_dir: Optional[str] = None,
     cache_offset: Optional[int] = None,
-    use_kl_on_final_layer: bool = False,
-) -> Tuple[Dict[Tuple[int, ...], SAEData], Optional[torch.Tensor]]:
+    replace_previous_layer_only: bool = False,
+) -> Tuple[Dict[Tuple[int, ...], Dict[int, SAEData]], Optional[torch.Tensor]]:
     if end_layer is None:
         end_layer = base_model.config.num_layers
 
@@ -231,28 +232,25 @@ def get_sae_data(
 
     # Handle model output as the n+1th "layer"
     if end_layer == base_model.config.num_layers:
-        if use_kl_on_final_layer:
-            if logits is None:
-                layer_norm_output = _ensure_tensor(activation_cache[end_layer])
-                logits = base_model.lm_head(
-                    layer_norm_output.view(
-                        (-1, layer_norm_output.shape[-2], layer_norm_output.shape[-1])
-                    )
+        if logits is None:
+            layer_norm_output = _ensure_tensor(activation_cache[end_layer])
+            logits = base_model.lm_head(
+                layer_norm_output.view(
+                    (-1, layer_norm_output.shape[-2], layer_norm_output.shape[-1])
                 )
-            final_layer_output = logits
-        else:
-            final_layer_output = _ensure_tensor(activation_cache[end_layer])
+            )
+        final_layer_output = logits
         baseline_data[base_model.config.num_layers] = SAEData(
             target_layer=end_layer,
             original=final_layer_output,
             normalized_original=final_layer_output,
             features=None,
             reconstruction=None,
+            reconstruction_eval="KL",
             denormalized_reconstruction=None,
             norms=None,
             dense_encoding=None,
             dense_decoding=None,
-            next_layer_data=None,
         )
 
     for layer in range(
@@ -285,41 +283,59 @@ def get_sae_data(
             features=features,
             reconstruction=reconstruction,
             denormalized_reconstruction=denormalized_reconstruction,
+            reconstruction_eval="norm",
             norms=true_norms,
             dense_encoding=dense_encoding,
             dense_decoding=dense_decoding,
-            next_layer_data=baseline_data.get(layer + 1),
         )
 
-    # Get data with activations where previous layer replaced by its SAE
-    replacement_data = defaultdict(dict)
+    # Get data with activations where start layer replaced by its SAE
+    # TODO: if using downstream SAEs, we should use a replacement model to make this cleaner
+    replacement_data: Dict[Tuple[int, ...], Dict[int, SAEData]] = defaultdict(dict)
+    replacement_data[(start_layer,)][start_layer] = copy(baseline_data[start_layer])
+
+    # Make the "original" be our reconstruction to simplify the below loop regardless of whether
+    # we are using downstream SAEs, since we *always* want the result after reconstructing the start layer.
+    replacement_data[(start_layer,)][start_layer].original = replacement_data[
+        (start_layer,)
+    ][start_layer].denormalized_reconstruction
+    if use_downstream_saes:
+        prev_layer_attr = "denormalized_reconstruction"
+    else:
+        prev_layer_attr = "original"
+
     for layer in range(start_layer + 1, end_layer + 1):
+        if replace_previous_layer_only:
+            layer_input = baseline_data[layer - 1].denormalized_reconstruction
+        else:
+            layer_input = getattr(
+                replacement_data[(start_layer,)][layer - 1], prev_layer_attr
+            )
         sae = saes.get(layer)
         if layer == base_model.config.num_layers:
             replacement_original = _ensure_tensor(
-                base_model.transformer.ln_f(
-                    baseline_data[layer - 1].denormalized_reconstruction
-                )
+                base_model.transformer.ln_f(layer_input)
             )
-            if use_kl_on_final_layer:
-                replacement_original = base_model.lm_head(
-                    replacement_original.view(
-                        (
-                            -1,
-                            replacement_original.shape[-2],
-                            replacement_original.shape[-1],
-                        )
+            replacement_original = base_model.lm_head(
+                replacement_original.view(
+                    (
+                        -1,
+                        replacement_original.shape[-2],
+                        replacement_original.shape[-1],
                     )
                 )
+            )
+            reconstruction_eval = "KL"
         else:
             replacement_original = _ensure_tensor(
                 base_model.transformer.h[layer](
-                    baseline_data[layer - 1].denormalized_reconstruction,
+                    layer_input,
                     attention_mask=batch.attention_mask.to(base_model.device),
                     use_cache=False,
                 )
             )
-        if use_next_layer_sae and sae is not None:
+            reconstruction_eval = "norm"
+        if use_downstream_saes and sae is not None:
             # with torch.no_grad():
             replacement_true_norms = torch.linalg.vector_norm(
                 replacement_original, dim=-1
@@ -365,17 +381,19 @@ def get_sae_data(
             replacement_true_norms = None
             replacement_denormalized_reconstruction = None
             replacement_true_norms = None
-        replacement_data[(layer - 1,)][layer] = SAEData(
+        replacement_data[
+            (layer - 1,) if replace_previous_layer_only else (start_layer,)
+        ][layer] = SAEData(
             target_layer=layer,
             original=replacement_original,
             normalized_original=replacement_scaled_original,
             features=replacement_features,
             reconstruction=replacement_reconstruction,
             denormalized_reconstruction=replacement_denormalized_reconstruction,
+            reconstruction_eval=reconstruction_eval,
             norms=replacement_true_norms,
             dense_encoding=replacement_dense_encoding,
             dense_decoding=replacement_dense_decoding,
-            next_layer_data=None,
         )
 
     return {(): baseline_data, **replacement_data}, logits
