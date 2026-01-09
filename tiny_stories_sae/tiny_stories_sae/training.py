@@ -15,7 +15,13 @@ from .data_batch import DataBatch
 from .multiline_progress import MultilineProgress
 from .replacement_model import make_replacement_model
 from .sae import SAE
-from .sae_data import SAEData, cache_on_disk, get_sae_data, init_cache
+from .sae_data import (
+    SAEData,
+    cache_on_disk,
+    get_sae_data,
+    init_cache,
+    get_sae_data_with_replacement,
+)
 from .tokenization import CONTEXT_LENGTH, input_generator
 from .validation import sae_evals
 
@@ -25,6 +31,8 @@ class TrainingMethod(Enum):
     next_layer = "Next Layer"
     e2e = "End-to-end"
     finetuned = "Finetuned"
+    full = "Full Replacement"
+    full_finetuned = "Full Replacement Finetuning"
 
 
 @dataclass(kw_only=True)
@@ -73,12 +81,13 @@ def sae_losses(
     ):
         if baseline.reconstruction_eval == "KL":
             downstream_reconstruction_loss.append(
-                torch.nn.KLDivLoss(reduction="none", log_target=True)(
-                    replacement.original.log_softmax(-1),
-                    baseline.original.log_softmax(-1),
-                )
-                .mean(dim=-1)
-                .sum()
+                (
+                    torch.nn.KLDivLoss(reduction="none", log_target=True)(
+                        replacement.original.log_softmax(-1),
+                        baseline.original.log_softmax(-1),
+                    ).mean(dim=-1)
+                    * token_mask
+                ).sum()
                 / batch.num_tokens
             )
         else:
@@ -90,14 +99,15 @@ def sae_losses(
                 next_layer_fn = partial(torch.pow, exponent=2)
 
             downstream_reconstruction_loss.append(
-                next_layer_fn(
-                    (
-                        getattr(replacement, next_layer_attr)
-                        - getattr(baseline, next_layer_attr)
-                    )
-                )
-                .mean(dim=-1)
-                .sum()
+                (
+                    next_layer_fn(
+                        (
+                            getattr(replacement, next_layer_attr)
+                            - getattr(baseline, next_layer_attr)
+                        )
+                    ).mean(dim=-1)
+                    * token_mask
+                ).sum()
                 / batch.num_tokens
             )
 
@@ -303,11 +313,7 @@ def train_one_layer(
     train_result = defaultdict(list)
     replacement_model = make_replacement_model(
         model,
-        {
-            f"transformer.h.{layer}": sae
-            for layer, sae in saes.items()
-            if layer >= target_layer
-        },
+        {layer: sae for layer, sae in saes.items() if layer >= target_layer},
     )
     optimizer = make_optimizer(saes, [target_layer], config)
     if saes[target_layer].normalize_activations:
@@ -508,11 +514,7 @@ def train_e2e(
 
     replacement_model = make_replacement_model(
         model,
-        {
-            f"transformer.h.{layer}": sae
-            for layer, sae in saes.items()
-            if layer >= target_layer
-        },
+        {layer: sae for layer, sae in saes.items() if layer >= target_layer},
     )
 
     progress = MultilineProgress(
@@ -694,6 +696,153 @@ def train_e2e(
     return train_result, num_used_tokens
 
 
+def train_full(
+    model: torch.nn.Module,
+    tokenizer: AutoTokenizer,
+    saes: Dict[int, SAE],
+    dataset: IterableDataset,
+    config: TrainingConfig,
+    cache_dir: Optional[str],
+    previous_trained_tokens: int = 0,
+):
+    train_result = defaultdict(lambda: defaultdict(list))
+    assert not any(sae.normalize_activations for sae in saes.values()), (
+        "Activation normalization not implemented for full training"
+    )
+    optimizer = make_optimizer(saes, list(range(model.config.num_layers)), config)
+
+    replacement_model = make_replacement_model(model, saes)
+
+    progress = MultilineProgress(
+        total=config.num_train_tokens - previous_trained_tokens,
+        desc=[
+            f"Layer {layer}"
+            for layer in list(range(model.config.num_layers - 1, -1, -1))
+        ],
+        num_header_lines=model.config.num_layers,
+    )
+
+    num_used_tokens = 0
+    model.eval()
+    eval_threshold = 0
+
+    batch_size = config.e2e_batch_size
+    for step, batch in enumerate(
+        input_generator(
+            model,
+            tokenizer,
+            dataset,
+            # For the finetuning method, make sure it sees the tokens at the end of the training set
+            # We could also accomplish the same thing by adding a "finetune" split at the dataset level
+            offset=previous_trained_tokens,
+            max_tokens=config.num_train_tokens,
+            tokenizer_batch_size=config.tokenizer_batch_size,
+            inference_batch_size=batch_size,
+            use_weighted_mask=config.use_weighted_mask,
+        )
+    ):
+        token_mask = batch.token_mask.to(model.device)
+        optimizer.zero_grad()
+        num_used_tokens += batch.num_tokens
+
+        baseline_data, replacement_data = get_sae_data_with_replacement(
+            model,
+            replacement_model,
+            saes,
+            batch,
+            cache_dir=cache_dir,
+            cache_offset=step * batch_size,
+        )
+
+        mse_loss = torch.zeros((1,), device=model.device)
+        for layer in range(model.config.num_layers):
+            mse_loss += (
+                (
+                    (
+                        replacement_data[layer].reconstruction
+                        - baseline_data[layer].original
+                    )
+                    ** 2
+                ).mean(dim=-1)
+                * token_mask
+            ).sum() / batch.num_tokens
+
+        kl_loss = (
+            torch.nn.KLDivLoss(reduction="none", log_target=True)(
+                replacement_data[model.config.num_layers].original.log_softmax(-1),
+                baseline_data[model.config.num_layers].original.log_softmax(-1),
+            ).mean(dim=-1)
+            * token_mask
+        ).sum() / batch.num_tokens
+
+        # Balance KL loss with MSE ala (Karvonen 2025)
+        with torch.no_grad():
+            kl_scale = (mse_loss.item() / model.config.num_layers) / (
+                kl_loss.item() + 1e-8
+            )
+        loss = mse_loss + kl_loss * kl_scale
+
+        loss.backward()
+        optimizer.step()
+
+        for pg in optimizer.param_groups:
+            if config.method is TrainingMethod.full:
+                schedule_fn = config.main_lr_schedule
+            else:
+                schedule_fn = config.finetune_lr_schedule
+
+            pg["lr"] = pg["base_lr"] * schedule_fn(
+                min(
+                    num_used_tokens
+                    / (config.num_train_tokens - previous_trained_tokens),
+                    1.0,
+                )
+            )
+
+        if num_used_tokens >= eval_threshold:
+            evals = {
+                target_layer: sae_evals(
+                    batch,
+                    baseline_data[target_layer],
+                    baseline_data[target_layer + 1],
+                    replacement_data[target_layer + 1],
+                    model,
+                    saes[target_layer],
+                    original_logits=baseline_data[model.config.num_layers].original,
+                    replacement_model=replacement_model,
+                )
+                for target_layer in range(model.config.num_layers - 1, -1, -1)
+            }
+            for layer, e in evals.items():
+                for k, v in e.items():
+                    train_result[layer][k].append(
+                        (num_used_tokens + previous_trained_tokens, v)
+                    )
+            train_result["all"]["raw_loss.mse"].append(mse_loss.item())
+            train_result["all"]["raw_loss.kl"].append(kl_loss.item())
+            train_result["all"]["weighted_loss.mse"].append(mse_loss.item())
+            train_result["all"]["weighted_loss.kl"].append(kl_loss.item() * kl_scale)
+
+            progress.set_postfix(
+                [
+                    {k: v for k, v in evals[layer].items() if k not in ("mse", "idm")}
+                    for layer in range(model.config.num_layers - 1, -1, -1)
+                ],
+                refresh=False,
+            )
+            eval_threshold = min(
+                eval_threshold + config.eval_interval,
+                config.num_train_tokens - previous_trained_tokens,
+            )
+        progress.total = max(
+            config.num_train_tokens - previous_trained_tokens, num_used_tokens
+        )
+        progress.update(batch.num_tokens)
+
+    progress.close()
+    return train_result, num_used_tokens
+
+
 def train(
     model: torch.nn.Module,
     tokenizer: AutoTokenizer,
@@ -705,6 +854,8 @@ def train(
     start_at_finetune: bool = False,
 ):
     train_result = {layer: defaultdict(list) for layer in saes.keys()}
+    train_result["all"] = defaultdict(list)
+
     num_tokens = 0
     if (
         config.method
@@ -712,6 +863,7 @@ def train(
             TrainingMethod.standard,
             TrainingMethod.next_layer,
             TrainingMethod.finetuned,
+            TrainingMethod.full_finetuned,
         )
         and not start_at_finetune
     ):
@@ -757,6 +909,24 @@ def train(
                 cache_dir,
                 previous_trained_tokens=num_tokens,
             )
+            for key, value in result.items():
+                train_result[layer][key].extend(value)
+
+    if config.method in (TrainingMethod.full, TrainingMethod.full_finetuned):
+        if reinit_weights and config.method is not TrainingMethod.full_finetuned:
+            for layer in sorted(config.train_layers, reverse=True):
+                saes[layer].init_weights(None)
+
+        full_result, _ = train_full(
+            model,
+            tokenizer,
+            saes,
+            dataset,
+            config,
+            cache_dir,
+            previous_trained_tokens=num_tokens,
+        )
+        for layer, result in full_result.items():
             for key, value in result.items():
                 train_result[layer][key].extend(value)
 

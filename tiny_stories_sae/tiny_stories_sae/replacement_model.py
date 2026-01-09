@@ -30,7 +30,7 @@ class GenericReplacementLayer(torch.nn.Module):
 
 
 class ReplacementModel:
-    sae_layers: Dict[str, SAE]
+    sae_layers: Dict[int, SAE]
 
     def __init__(self):
         raise NotImplementedError(
@@ -53,21 +53,20 @@ def _shallow_copy_model(source: torch.nn.Module):
 
 def make_replacement_model(
     original: torch.nn.Module,
-    sae_layers: Dict[str, SAE],
+    sae_layers: Dict[int, SAE],
 ) -> ReplacementModel:
     # Shallow copy into a new module instance, adding ReplacementModel as a mixin
     new_instance = _shallow_copy_model(original)
     new_instance.__class__ = type(
         "ReplacementModel", (ReplacementModel, original.__class__), {}
     )
-    replacement_layers = {}
-    for module_path, sae in sae_layers.items():
+    for layer, sae in sae_layers.items():
+        module_path = f"transformer.h.{layer}"
         original_layer = original.get_submodule(module_path)
         replacement_layer = GenericReplacementLayer(original_layer, sae)
         new_instance.set_submodule(module_path, replacement_layer)
-        replacement_layers[module_path] = replacement_layer
 
-    object.__setattr__(new_instance, "sae_layers", replacement_layers)
+    object.__setattr__(new_instance, "sae_layers", sae_layers)
 
     assert isinstance(new_instance, ReplacementModel)
     return new_instance

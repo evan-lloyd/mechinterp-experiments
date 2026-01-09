@@ -26,6 +26,7 @@ class SAE(torch.nn.Module):
         self.with_inhibition = with_inhibition
         self.normalize_activations = normalize_activations
         self.init_weights(init_from)
+        self.encoder_hook = torch.nn.Identity()
 
     @torch.no_grad
     def init_weights(
@@ -128,6 +129,9 @@ class SAE(torch.nn.Module):
 
         if self.with_inhibition:
             encoder_output = self.activation_fn(encoder_output @ self.inhibition)
+
+        # transformer_lens style hook
+        encoder_output = self.encoder_hook(encoder_output)
 
         if self.d_dense is None:
             return encoder_output

@@ -34,6 +34,11 @@ def validate_saes(
     position_ids = np.empty((0,), dtype=np.float32)
     token_influence = np.zeros((CONTEXT_LENGTH,))
     num_inputs = 0
+    all_evals = {layer: defaultdict(list) for layer in saes.keys()}
+    replacement_evals = defaultdict(list)
+
+    replacement_model = make_replacement_model(model, saes)
+
     for step, batch in enumerate(
         input_generator(
             model,
@@ -66,7 +71,7 @@ def validate_saes(
             axis=0,
         )
         data, base_logits = get_sae_data(
-            model,
+            replacement_model,
             saes,
             batch,
             use_downstream_saes=False,
@@ -75,15 +80,9 @@ def validate_saes(
             replace_previous_layer_only=True,
         )
         batch_replacement_evals = run_replacement_evals(model, saes, batch, base_logits)
-        if "replacement_evals" not in locals():
-            replacement_evals = {key: [] for key in batch_replacement_evals.keys()}
         for key, value in batch_replacement_evals.items():
-            if isinstance(value, np.ndarray):
-                replacement_evals[key] = np.concat(
-                    (batch_replacement_evals[key], value)
-                )
-            else:
-                replacement_evals[key].append(value)
+            replacement_evals[key] = np.concat((replacement_evals[key], value))
+
         for layer, sae in saes.items():
             batch_evals = sae_evals(
                 batch,
@@ -97,25 +96,8 @@ def validate_saes(
             )
 
             # Combine results across rows
-            if "all_evals" not in locals():
-                if len(saes) == 1:
-                    all_evals = {key: [] for key in batch_evals.keys()}
-                else:
-                    all_evals = {key: defaultdict(list) for key in batch_evals.keys()}
-
             for key, value in batch_evals.items():
-                if isinstance(value, np.ndarray):
-                    if len(saes) == 1:
-                        all_evals[key] = np.concat((all_evals[key], value))
-                    else:
-                        all_evals[key][layer] = np.concat(
-                            (all_evals[key][layer], value)
-                        )
-                else:
-                    if len(saes) == 1:
-                        all_evals[key].append(value)
-                    else:
-                        all_evals[key][layer].append(value)
+                all_evals[layer][key] = np.concat((all_evals[layer][key], value))
 
         num_tokens_consumed += batch.num_tokens
         progress.update(batch.num_tokens)
@@ -134,9 +116,7 @@ def run_replacement_evals(
     base_logits: torch.Tensor,
 ):
     token_mask = batch.token_mask.to(base_model.device)
-    replacement_model = make_replacement_model(
-        base_model, {f"transformer.h.{layer}": sae for layer, sae in saes.items()}
-    )
+    replacement_model = make_replacement_model(base_model, saes)
     replacement_logits = replacement_model(
         input_ids=batch.input_ids.to(replacement_model.device),
         position_ids=batch.position_ids.to(replacement_model.device),
@@ -260,7 +240,9 @@ def sae_evals(
 
     result = {
         "rcn": relative_norm,
-        "next_rcn": next_norm,
+        "next_rcn": next_norm
+        if next_norm is not None
+        else np.zeros_like(relative_norm),
         "idm": idempotency,
         "L0": l0,
         "rep_kl": rep_kl,
@@ -291,9 +273,7 @@ def generate_with_replacement(
     do_sample: bool = False,
     stream: bool = True,
 ):
-    replacement_model = make_replacement_model(
-        model, {f"transformer.h.{layer}": sae for layer, sae in saes.items()}
-    )
+    replacement_model = make_replacement_model(model, saes)
     return generate(
         input,
         replacement_model,
