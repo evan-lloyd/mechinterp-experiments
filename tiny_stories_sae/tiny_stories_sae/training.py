@@ -73,12 +73,13 @@ def sae_losses(
     ):
         if baseline.reconstruction_eval == "KL":
             downstream_reconstruction_loss.append(
-                torch.nn.KLDivLoss(reduction="none", log_target=True)(
-                    replacement.original.log_softmax(-1),
-                    baseline.original.log_softmax(-1),
-                )
-                .mean(dim=-1)
-                .sum()
+                (
+                    torch.nn.KLDivLoss(reduction="none", log_target=True)(
+                        replacement.original.log_softmax(-1),
+                        baseline.original.log_softmax(-1),
+                    ).mean(dim=-1)
+                    * token_mask
+                ).sum()
                 / batch.num_tokens
             )
         else:
@@ -90,14 +91,15 @@ def sae_losses(
                 next_layer_fn = partial(torch.pow, exponent=2)
 
             downstream_reconstruction_loss.append(
-                next_layer_fn(
-                    (
-                        getattr(replacement, next_layer_attr)
-                        - getattr(baseline, next_layer_attr)
-                    )
-                )
-                .mean(dim=-1)
-                .sum()
+                (
+                    next_layer_fn(
+                        (
+                            getattr(replacement, next_layer_attr)
+                            - getattr(baseline, next_layer_attr)
+                        )
+                    ).mean(dim=-1)
+                    * token_mask
+                ).sum()
                 / batch.num_tokens
             )
 
