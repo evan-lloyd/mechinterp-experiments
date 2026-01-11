@@ -225,7 +225,7 @@ def train_one_layer(
     cache_dir: Optional[str],
     previous_trained_tokens: int = 0,
     max_tokens: Optional[int] = None,
-    post_step_hook: Optional[Callable[int]] = None,
+    post_step_hook: Optional[Callable[[int, int]]] = None,
 ):
     if max_tokens is None:
         max_tokens = config.num_train_tokens
@@ -392,7 +392,7 @@ def train_one_layer(
         progress.update(batch.num_tokens)
 
         if post_step_hook:
-            post_step_hook(num_used_tokens)
+            post_step_hook(target_layer, num_used_tokens)
 
     progress.close()
     return train_result, num_used_tokens
@@ -407,7 +407,7 @@ def train_e2e(
     config: TrainingConfig,
     cache_dir: Optional[str],
     previous_trained_tokens: int = 0,
-    post_step_hook: Optional[Callable[int]] = None,
+    post_step_hook: Optional[Callable[[int, int]]] = None,
 ):
     train_result = defaultdict(list)
     optimizer = make_optimizer(saes, [target_layer], config)
@@ -432,6 +432,7 @@ def train_e2e(
     eval_threshold = 0
 
     batch_size = config.e2e_batch_size
+    print("hello")
     for step, batch in enumerate(
         input_generator(
             model,
@@ -439,9 +440,8 @@ def train_e2e(
             dataset,
             # For the finetuning method, make sure it only sees the tokens at the end of the training set
             # We could also accomplish the same thing by adding a "finetune" split at the dataset level
-            # XXX UNDO THIS
-            # offset=previous_trained_tokens,
-            max_tokens=config.num_train_tokens - previous_trained_tokens,
+            offset=previous_trained_tokens,
+            max_tokens=config.num_train_tokens,
             tokenizer_batch_size=config.tokenizer_batch_size,
             inference_batch_size=batch_size,
         )
@@ -609,7 +609,7 @@ def train_e2e(
         progress.update(batch.num_tokens)
 
         if post_step_hook:
-            post_step_hook(num_used_tokens)
+            post_step_hook(target_layer, num_used_tokens)
 
     progress.close()
     return train_result, num_used_tokens
@@ -625,7 +625,7 @@ def train(
     reinit_weights: bool = False,
     start_at_finetune: bool = False,
     start_at_token: Optional[int] = None,
-    post_step_hook: Optional[Callable[[int]]] = None,
+    post_step_hook: Optional[Callable[[int, int]]] = None,
 ):
     train_result = {layer: defaultdict(list) for layer in saes.keys()}
     num_tokens = 0

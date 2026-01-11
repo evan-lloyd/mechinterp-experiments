@@ -84,6 +84,7 @@ def tokenize_strings(
     tokenizer: AutoTokenizer,
     max_tokens: Optional[int] = None,
     max_batch_size: Optional[int] = None,
+    token_offset: int = 0,
 ):
     token_ids = _ensure_tokenized(inputs, tokenizer)
 
@@ -94,12 +95,35 @@ def tokenize_strings(
     num_tokens = 0
     batch_size = 0
     num_rows = 0
+    input_batches = []
+    row_lens = []
+    new_tokenses = []
+
+    # Minimize the amount of work we do in case we need to seek to token_offset. If we haven't generated
+    # enough tokens then we will be skipping this batch anyway, so no need to make tensors for it.
     for input_batch, row_len, new_tokens in _fill_context(
         token_ids, max_tokens, max_batch_size
     ):
+        num_tokens += new_tokens
         batch_size += 1
         num_rows += len(input_batch)
-        num_tokens += new_tokens
+        input_batches.append(input_batch)
+        row_lens.append(row_len)
+        new_tokenses.append(new_tokens)
+
+    if num_tokens <= token_offset:
+        return DataBatch(
+            torch.empty((0,)),
+            torch.empty((0,)),
+            torch.empty((0,)),
+            num_tokens,
+            batch_size,
+            num_rows,
+            row_lens,
+            torch.empty((0,)),
+        ), list(token_ids.values())
+
+    for input_batch, row_len, new_tokens in zip(input_batches, row_lens, new_tokenses):
         row_lens.append(row_len)
         input_id_stack.append(
             torch.cat([torch.tensor(in_, dtype=torch.int64) for in_ in input_batch])
@@ -233,6 +257,7 @@ def input_generator(
             tokenizer,
             state.tokens_to_generate,
             inference_batch_size,
+            offset - state.num_tokens_generated,
         )
         if state.num_tokens_generated + batch.num_tokens > offset:
             # NB: this should maybe technically discard some rows from the start, since we'll effectively
