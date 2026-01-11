@@ -82,10 +82,8 @@ def tokenize_strings(
     inputs: List[str | torch.Tensor],
     model: torch.nn.Module,
     tokenizer: AutoTokenizer,
-    position_weights: torch.Tensor,
     max_tokens: Optional[int] = None,
     max_batch_size: Optional[int] = None,
-    use_weighted_mask: bool = False,
 ):
     token_ids = _ensure_tokenized(inputs, tokenizer)
 
@@ -145,22 +143,7 @@ def tokenize_strings(
 
     unused_inputs = list(token_ids.values())
     position_ids = torch.stack(position_id_stack)
-    # Normalize token mask, such that every token position contributes ~equally despite
-    # skew to earlier positions
-    if use_weighted_mask:
-        token_mask = torch.stack(
-            [
-                torch.index_select(
-                    position_weights,
-                    0,
-                    # Put weight of 0 on unused tokens
-                    torch.where(position_ids[i, :] >= 0, position_ids[i, :], 0),
-                )
-                for i in range(batch_size)
-            ]
-        )
-    else:
-        token_mask = (position_ids >= 0).float()
+    token_mask = (position_ids >= 0).float()
 
     # These have to be non-negative on CUDA kernels
     position_ids = torch.where(position_ids >= 0, position_ids, 0)
@@ -225,41 +208,6 @@ def _iter_dataset(
             return
 
 
-def get_position_weights(
-    tokenizer: AutoTokenizer,
-    dataset: IterableDataset,
-    max_tokens: Optional[int] = None,
-    max_rows: Optional[int] = None,
-    max_batches: Optional[int] = None,
-    tokenizer_batch_size: int = 1,
-    inference_batch_size: int = 1,
-):
-    """Do a tokenization pass over our dataset to see how to weight each token position
-    such that it will contribute equally."""
-    position_counts = torch.zeros((CONTEXT_LENGTH,), dtype=torch.int32)
-    for state in _iter_dataset(
-        dataset,
-        max_tokens,
-        max_rows,
-        max_batches,
-        tokenizer_batch_size,
-        inference_batch_size,
-    ):
-        token_ids = _ensure_tokenized(state.batch_inputs, tokenizer)
-
-        for input_batch, row_len, new_tokens in _fill_context(
-            token_ids,
-            state.tokens_to_generate,
-            inference_batch_size,
-        ):
-            state.num_tokens_generated += new_tokens
-            for cur_input in input_batch:
-                position_counts[0 : len(cur_input)] += 1
-        state.batch_inputs = list(token_ids.values())
-
-    return position_counts[0] / position_counts
-
-
 def input_generator(
     model: torch.nn.Module,
     tokenizer: AutoTokenizer,
@@ -269,22 +217,8 @@ def input_generator(
     max_batches: Optional[int] = None,
     tokenizer_batch_size: int = 1,
     inference_batch_size: int = 1,
-    use_weighted_mask: bool = False,
     offset: int = 0,
 ):
-    if use_weighted_mask:
-        position_weights = get_position_weights(
-            tokenizer,
-            dataset,
-            max_tokens,
-            max_rows,
-            max_batches,
-            tokenizer_batch_size,
-            inference_batch_size,
-        )
-    else:
-        position_weights = None
-
     for state in _iter_dataset(
         dataset,
         max_tokens,
@@ -297,10 +231,8 @@ def input_generator(
             state.batch_inputs,
             model,
             tokenizer,
-            position_weights,
             state.tokens_to_generate,
             inference_batch_size,
-            use_weighted_mask,
         )
         if state.num_tokens_generated + batch.num_tokens > offset:
             # NB: this should maybe technically discard some rows from the start, since we'll effectively

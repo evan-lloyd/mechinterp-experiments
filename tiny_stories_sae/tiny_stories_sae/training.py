@@ -23,7 +23,8 @@ class TrainingMethod(Enum):
     standard = "Standard"
     next_layer = "Next Layer"
     e2e = "End-to-end"
-    finetuned = "Finetuned"
+    finetuned = "KL Fine-tuning"
+    next_layer_finetuned = "Next Layer + Fine-Tuning"
 
 
 @dataclass(kw_only=True)
@@ -35,23 +36,17 @@ class TrainingConfig:
     eval_interval: int
     reconstruction_weight: float | Mapping[int, float]
     downstream_reconstruction_weight: float | Mapping[int, float]
-    idempotency_weight: float | Mapping[int, float]
-    dense_weight: float | Mapping[int, float]
     train_layers: List[int]
     lr: float = 1e-3
+    decoder_lr: Optional[float] = None
+    encoder_lr: Optional[float] = None
     # Default schedule is constant
     main_lr_schedule: Callable[[float], float] = lambda frac_trained: 1.0
     finetune_lr_schedule: Callable[[float], float] = lambda frac_trained: 1.0
-    decoder_lr: Optional[float] = None
-    encoder_lr: Optional[float] = None
-    dense_decoder_lr: Optional[float] = None
-    dense_encoder_lr: Optional[float] = None
-    inhibition_lr: Optional[float] = None
     use_downstream_saes: bool = True
     balance_reconstruction_losses: bool = False | Mapping[int, bool]
-    use_weighted_mask: bool = False
-    method: TrainingMethod
     finetune_fraction: Optional[float] = None
+    method: TrainingMethod
 
 
 def _cos_dist(x: torch.Tensor, y: torch.Tensor):
@@ -69,7 +64,6 @@ def sae_losses(
     downstream_layers_replacement: List[SAEData],
     sae: SAE,
     use_downstream_saes: bool,
-    want_idempotency: bool = False,
     want_mse: bool = True,
 ):
     token_mask = batch.token_mask.to(sae.device)
@@ -94,7 +88,7 @@ def sae_losses(
                 downstream_attr = "features"
                 downstream_fn = _cos_dist
             else:
-                downstream_attr = "normalized_original"
+                downstream_attr = "original"
                 downstream_fn = _mse
 
             downstream_reconstruction_loss.append(
@@ -110,51 +104,15 @@ def sae_losses(
 
     if want_mse:
         reconstruction_loss = (
-            (
-                this_layer_baseline.reconstruction
-                - this_layer_baseline.normalized_original
-            )
-            ** 2
+            (this_layer_baseline.reconstruction - this_layer_baseline.original) ** 2
         ).mean(dim=-1)
-
-    reencode_result = sae.encode(this_layer_baseline.reconstruction)
-
-    if want_idempotency:
-        if this_layer_baseline.dense_decoding is not None:
-            reencoded_features = reencode_result[0]
-        else:
-            reencoded_features = reencode_result
-        idempotency_loss = (
-            (this_layer_baseline.features - reencoded_features).abs()
-        ).mean(dim=-1)
-    else:
-        idempotency_loss = None
-    if this_layer_baseline.dense_decoding is not None:
-        dense_loss = (this_layer_baseline.dense_decoding**2).mean(dim=-1)
 
     result = {
         "reconstruction": (reconstruction_loss * token_mask).sum() / batch.num_tokens
         if want_mse
         else torch.zeros((1,), device=sae.device),
         "downstream_reconstruction": downstream_reconstruction_loss,
-        "idempotency": (idempotency_loss * token_mask).sum() / batch.num_tokens
-        if want_idempotency
-        else torch.zeros((1,), device=sae.device),
-        "dense": (dense_loss * token_mask).sum() / batch.num_tokens
-        if this_layer_baseline.dense_decoding is not None
-        else torch.zeros((1,), device=sae.device),
     }
-
-    if sae.normalize_activations:
-        result["normalizer"] = (
-            (
-                (
-                    sae.normalizer(batch.position_ids.to(sae.device))
-                    - this_layer_baseline.norms
-                )
-                ** 2
-            )[token_mask.bool()]
-        ).mean()
 
     return result
 
@@ -212,41 +170,6 @@ def make_optimizer(saes: Dict[int, SAE], layers: List[int], config: TrainingConf
             "lr": config.encoder_lr or config.lr,
         },
     ]
-    if any(sae.with_inhibition for sae in saes.values()):
-        param_groups.append(
-            {
-                "params": [
-                    param
-                    for layer in layers
-                    for param in [saes[layer].inhibition]
-                    if saes[layer].with_inhibition
-                ],
-                "lr": config.inhibition_lr or config.lr,
-            }
-        )
-    if any(sae.d_dense is not None for sae in saes.values()):
-        param_groups.append(
-            {
-                "params": [
-                    param
-                    for layer in layers
-                    for param in saes[layer].dense_decoder.parameters()
-                    if saes[layer].d_dense is not None
-                ],
-                "lr": config.dense_decoder_lr or config.lr,
-            }
-        )
-        param_groups.append(
-            {
-                "params": [
-                    param
-                    for layer in layers
-                    for param in saes[layer].dense_encoder.parameters()
-                    if saes[layer].d_dense is not None
-                ],
-                "lr": config.dense_encoder_lr or config.lr,
-            }
-        )
 
     for pg in param_groups:
         pg["base_lr"] = pg["lr"]
@@ -317,10 +240,6 @@ def train_one_layer(
         },
     )
     optimizer = make_optimizer(saes, [target_layer], config)
-    if saes[target_layer].normalize_activations:
-        normalizer_optimizer = torch.optim.Adam(
-            list(saes[target_layer].normalizer.parameters()), lr=0.01
-        )
 
     progress = MultilineProgress(
         total=max_tokens,
@@ -339,7 +258,6 @@ def train_one_layer(
             max_tokens=max_tokens,
             tokenizer_batch_size=config.tokenizer_batch_size,
             inference_batch_size=config.training_batch_size,
-            use_weighted_mask=config.use_weighted_mask,
         )
     ):
         optimizer.zero_grad()
@@ -357,49 +275,6 @@ def train_one_layer(
             step * config.training_batch_size,
         )
 
-        # Warm up our activation normalizer on the first batch before we start using it
-        if did_reinit and saes[target_layer].normalize_activations:
-            did_reinit = False
-            pos_ids = batch.position_ids[batch.token_mask.bool()].to(
-                saes[target_layer].device
-            )
-            target_norms = (
-                result[()][target_layer]
-                .norms[batch.token_mask.to(pos_ids.device).bool()]
-                .clone()
-                .detach()
-            )
-            saes[target_layer].normalizer.heuristic_init(pos_ids, target_norms)
-            for _ in range(10_000):
-                normalizer_optimizer.zero_grad()
-                (
-                    ((saes[target_layer].normalizer(pos_ids) - target_norms) ** 2).sum()
-                    / batch.num_tokens
-                ).backward()
-                normalizer_optimizer.step()
-
-            # Make sure our data uses the computed normalizations
-            result, original_logits = get_sae_data(
-                model,
-                saes,
-                batch,
-                target_layer,
-                target_layer + 1,
-                config.use_downstream_saes,
-                cache_dir,
-                step * config.training_batch_size,
-            )
-
-        idempotency_weight = (
-            config.idempotency_weight[target_layer]
-            if hasattr(config.idempotency_weight, "__getitem__")
-            else config.idempotency_weight
-        )
-        dense_weight = (
-            config.dense_weight[target_layer]
-            if hasattr(config.dense_weight, "__getitem__")
-            else config.dense_weight
-        )
         losses = sae_losses(
             batch,
             result[()][target_layer],
@@ -411,7 +286,6 @@ def train_one_layer(
             else [],
             saes[target_layer],
             config.use_downstream_saes,
-            want_idempotency=idempotency_weight > 0.0,
             want_mse=True,
         )
         reconstruction_weight, downstream_reconstruction_weight = (
@@ -429,8 +303,6 @@ def train_one_layer(
                 losses["reconstruction"] * reconstruction_weight,
                 sum(losses["downstream_reconstruction"])
                 * downstream_reconstruction_weight,
-                losses["idempotency"] * idempotency_weight,
-                losses["dense"] * dense_weight,
             )
         )
 
@@ -442,11 +314,6 @@ def train_one_layer(
             pg["lr"] = pg["base_lr"] * config.main_lr_schedule(
                 min(num_used_tokens / max_tokens, 1.0)
             )
-
-        if saes[target_layer].normalize_activations:
-            normalizer_optimizer.zero_grad()
-            losses["normalizer"].backward()
-            normalizer_optimizer.step()
 
         if num_used_tokens >= eval_threshold:
             evals = sae_evals(
@@ -486,7 +353,7 @@ def train_one_layer(
             )
 
             progress.set_postfix(
-                {k: v for k, v in evals.items() if k not in ("mse", "idm")},
+                evals,
                 refresh=False,
             )
             eval_threshold = min(eval_threshold + config.eval_interval, max_tokens)
@@ -508,9 +375,6 @@ def train_e2e(
     previous_trained_tokens: int = 0,
 ):
     train_result = defaultdict(list)
-    assert not any(sae.normalize_activations for sae in saes.values()), (
-        "Activation normalization not implemented for e2e training"
-    )
     optimizer = make_optimizer(saes, [target_layer], config)
 
     replacement_model = make_replacement_model(
@@ -545,7 +409,6 @@ def train_e2e(
             max_tokens=config.num_train_tokens - previous_trained_tokens,
             tokenizer_batch_size=config.tokenizer_batch_size,
             inference_batch_size=batch_size,
-            use_weighted_mask=config.use_weighted_mask,
         )
     ):
         optimizer.zero_grad()
@@ -595,7 +458,6 @@ def train_e2e(
             downstream_replacement,
             saes[target_layer],
             use_downstream_saes=config.use_downstream_saes,
-            want_idempotency=False,
             # Only finetuning looks at MSE of *this* layer
             want_mse=config.method is not TrainingMethod.e2e,
         )
@@ -603,31 +465,13 @@ def train_e2e(
         # Keep track of this separately from any sparsity / other losses, so we can rescale the KL
         mse_loss = torch.zeros((1,), device=model.device)
 
-        reconstruction_weight, downstream_reconstruction_weight = (
-            maybe_balance_reconstruction_weights(
-                # We will manually balance KL vs the sum of all MSE losses
-                False,
-                config.reconstruction_weight,
-                config.downstream_reconstruction_weight,
-                losses,
-                target_layer,
-            )
-        )
-        idempotency_weight = (
-            config.idempotency_weight[target_layer]
-            if hasattr(config.idempotency_weight, "__getitem__")
-            else config.idempotency_weight
-        )
-        dense_weight = (
-            config.dense_weight[target_layer]
-            if hasattr(config.dense_weight, "__getitem__")
-            else config.dense_weight
-        )
-        loss += sum(
-            (
-                losses["idempotency"] * idempotency_weight,
-                losses["dense"] * dense_weight,
-            )
+        reconstruction_weight, _ = maybe_balance_reconstruction_weights(
+            # We will manually balance KL vs the sum of all MSE losses
+            False,
+            config.reconstruction_weight,
+            config.downstream_reconstruction_weight,
+            losses,
+            target_layer,
         )
         mse_loss += losses["reconstruction"]
         # Last downstream recon term is actually KL
@@ -699,7 +543,7 @@ def train_e2e(
             )
 
             progress.set_postfix(
-                {k: v for k, v in evals.items() if k not in ("mse", "idm")},
+                evals,
                 refresh=False,
             )
             eval_threshold = min(
@@ -768,7 +612,11 @@ def train(
         else:
             num_tokens = start_at_token
 
-    if config.method in (TrainingMethod.e2e, TrainingMethod.finetuned, TrainingMethod.next_layer):
+    if config.method in (
+        TrainingMethod.e2e,
+        TrainingMethod.finetuned,
+        TrainingMethod.next_layer_finetuned,
+    ):
         for layer in sorted(config.train_layers, reverse=True):
             if reinit_weights and config.method is TrainingMethod.e2e:
                 saes[layer].init_weights(saes.get(layer + 1))

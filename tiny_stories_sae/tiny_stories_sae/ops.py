@@ -150,9 +150,6 @@ def clone_sae(sae):
         kind=sae.kind,
         topk=sae.topk,
         init_from=sae,
-        with_inhibition=sae.with_inhibition,
-        d_dense=sae.d_dense,
-        normalize_activations=sae.normalize_activations,
     )
 
     return result

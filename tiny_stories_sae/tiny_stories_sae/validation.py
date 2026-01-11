@@ -192,8 +192,7 @@ def sae_evals(
         next_norm = None
     relative_norm = (
         torch.linalg.vector_norm(
-            this_layer_baseline.denormalized_reconstruction
-            - this_layer_baseline.original,
+            this_layer_baseline.reconstruction - this_layer_baseline.original,
             dim=-1,
         )
         / torch.linalg.vector_norm(this_layer_baseline.original, dim=-1)[
@@ -201,14 +200,6 @@ def sae_evals(
         ].mean()
     ) * token_mask
     l0 = (this_layer_baseline.features > 0).to(torch.float32).sum(dim=-1)
-    reencode_result = sae.encode(this_layer_baseline.reconstruction)
-    if this_layer_baseline.dense_decoding is not None:
-        reencoded_features = reencode_result[0]
-    else:
-        reencoded_features = reencode_result
-    idempotency = ((this_layer_baseline.features - reencoded_features) ** 2).sum(
-        dim=-1
-    ) * token_mask
 
     if original_logits is None:
         original_logits = get_logits(
@@ -236,50 +227,21 @@ def sae_evals(
             next_norm = next_norm.sum().item() / batch.num_tokens
         relative_norm = relative_norm.sum().item() / batch.num_tokens
         l0 = l0[token_mask.bool()].sum().item() / batch.num_tokens
-        idempotency = idempotency.sum().item() / batch.num_tokens
         rep_kl = rep_kl.sum().item() / batch.num_tokens
-        if this_layer_baseline.dense_decoding is not None:
-            dense_l2 = (
-                (this_layer_baseline.dense_decoding**2).sum(dim=-1) * token_mask
-            ).sum().item() / batch.num_tokens
     else:
         if next_norm is not None:
             next_norm = next_norm[token_mask.bool()].flatten().cpu().numpy()
         relative_norm = relative_norm[token_mask.bool()].flatten().cpu().numpy()
         l0 = l0[token_mask.bool()].flatten().cpu().numpy()
-        idempotency = idempotency[token_mask.bool()].flatten().cpu().numpy()
         rep_kl = rep_kl[token_mask.bool()].flatten().cpu().numpy()
-        if this_layer_baseline.dense_decoding is not None:
-            dense_l2 = (
-                (this_layer_baseline.dense_decoding**2)
-                .sum(dim=-1)[token_mask.bool()]
-                .flatten()
-                .cpu()
-                .numpy()
-            )
 
     result = {
         "rcn": relative_norm,
         "next_rcn": next_norm,
-        "idm": idempotency,
         "L0": l0,
         "rep_kl": rep_kl,
     }
-    if this_layer_baseline.dense_decoding is not None:
-        result["dense"] = dense_l2
 
-    if sae.normalize_activations:
-        normalizer_loss = (
-            (
-                sae.normalizer(batch.position_ids.to(sae.device))
-                - this_layer_baseline.norms
-            )
-            ** 2
-        )[token_mask.bool()]
-        if aggregate:
-            result["nrm"] = normalizer_loss.sum().item() / batch.num_tokens
-        else:
-            result["nrm"] = normalizer_loss.flatten().cpu().numpy()
     return result
 
 
