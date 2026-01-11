@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
-from functools import partial
 from typing import Callable, Dict, List, Mapping, Optional
 
 import torch
@@ -55,6 +54,14 @@ class TrainingConfig:
     finetune_fraction: Optional[float] = None
 
 
+def _cos_dist(x: torch.Tensor, y: torch.Tensor):
+    return 1 - torch.nn.functional.cosine_similarity(x, y, dim=-1)
+
+
+def _mse(x: torch.Tensor, y: torch.Tensor):
+    return ((x - y) ** 2).mean(dim=-1)
+
+
 def sae_losses(
     batch: DataBatch,
     this_layer_baseline: SAEData,
@@ -84,20 +91,18 @@ def sae_losses(
             )
         else:
             if use_downstream_saes:
-                next_layer_attr = "features"
-                next_layer_fn = torch.abs
+                downstream_attr = "features"
+                downstream_fn = _cos_dist
             else:
-                next_layer_attr = "normalized_original"
-                next_layer_fn = partial(torch.pow, exponent=2)
+                downstream_attr = "normalized_original"
+                downstream_fn = _mse
 
             downstream_reconstruction_loss.append(
                 (
-                    next_layer_fn(
-                        (
-                            getattr(replacement, next_layer_attr)
-                            - getattr(baseline, next_layer_attr)
-                        )
-                    ).mean(dim=-1)
+                    downstream_fn(
+                        getattr(replacement, downstream_attr),
+                        getattr(baseline, downstream_attr),
+                    )
                     * token_mask
                 ).sum()
                 / batch.num_tokens
@@ -535,8 +540,9 @@ def train_e2e(
             dataset,
             # For the finetuning method, make sure it only sees the tokens at the end of the training set
             # We could also accomplish the same thing by adding a "finetune" split at the dataset level
-            offset=previous_trained_tokens,
-            max_tokens=config.num_train_tokens,
+            # XXX UNDO THIS
+            # offset=previous_trained_tokens,
+            max_tokens=config.num_train_tokens - previous_trained_tokens,
             tokenizer_batch_size=config.tokenizer_batch_size,
             inference_batch_size=batch_size,
             use_weighted_mask=config.use_weighted_mask,
@@ -551,34 +557,47 @@ def train_e2e(
             batch,
             target_layer,
             model.config.num_layers,
-            use_downstream_saes=False,
+            use_downstream_saes=config.use_downstream_saes,
             cache_dir=cache_dir,
             cache_offset=step * batch_size,
         )
+        if config.method is TrainingMethod.e2e:
+            downstream_baseline = [
+                result[()][layer]
+                for layer in sorted(result[()].keys())
+                if layer > target_layer
+            ]
+            downstream_replacement = [
+                result[(target_layer,)][layer]
+                for layer in sorted(result[(target_layer,)].keys())
+                if layer > target_layer
+            ]
+        elif config.method is TrainingMethod.finetuned:
+            downstream_baseline = [result[()][model.config.num_layers]]
+            downstream_replacement = [result[(target_layer,)][model.config.num_layers]]
+        else:
+            # next_layer finetune
+            downstream_baseline = [
+                result[()][(target_layer + 1)],
+                result[()][model.config.num_layers],
+            ]
+            downstream_replacement = [
+                result[(target_layer,)][(target_layer + 1)],
+                result[(target_layer,)][model.config.num_layers],
+            ]
+
         losses = sae_losses(
             batch,
             result[()][target_layer],
             # e2e looks at reconstruction at every later layer; fine-tuning only looks at this layer
             # and final KL
-            [
-                result[()][layer]
-                for layer in sorted(result[()].keys())
-                if layer > target_layer
-            ]
-            if config.method is TrainingMethod.e2e
-            else [result[()][model.config.num_layers]],
-            [
-                result[(target_layer,)][layer]
-                for layer in sorted(result[(target_layer,)].keys())
-                if layer > target_layer
-            ]
-            if config.method is TrainingMethod.e2e
-            else [result[(target_layer,)][model.config.num_layers]],
+            downstream_baseline,
+            downstream_replacement,
             saes[target_layer],
-            use_downstream_saes=False,
+            use_downstream_saes=config.use_downstream_saes,
             want_idempotency=False,
             # Only finetuning looks at MSE of *this* layer
-            want_mse=config.method is TrainingMethod.finetuned,
+            want_mse=config.method is not TrainingMethod.e2e,
         )
         loss = torch.zeros((1,), device=model.device)
         # Keep track of this separately from any sparsity / other losses, so we can rescale the KL
@@ -705,6 +724,7 @@ def train(
     cache_dir: Optional[str] = None,
     reinit_weights: bool = False,
     start_at_finetune: bool = False,
+    start_at_token: Optional[int] = None,
 ):
     train_result = {layer: defaultdict(list) for layer in saes.keys()}
     num_tokens = 0
@@ -743,11 +763,14 @@ def train(
                 train_result[layer][key].extend(value)
 
     if start_at_finetune:
-        num_tokens = int((1.0 - config.finetune_fraction) * config.num_train_tokens)
+        if start_at_token is None:
+            num_tokens = int((1.0 - config.finetune_fraction) * config.num_train_tokens)
+        else:
+            num_tokens = start_at_token
 
-    if config.method in (TrainingMethod.e2e, TrainingMethod.finetuned):
+    if config.method in (TrainingMethod.e2e, TrainingMethod.finetuned, TrainingMethod.next_layer):
         for layer in sorted(config.train_layers, reverse=True):
-            if reinit_weights and config.method is not TrainingMethod.finetuned:
+            if reinit_weights and config.method is TrainingMethod.e2e:
                 saes[layer].init_weights(saes.get(layer + 1))
             result, _ = train_e2e(
                 model,

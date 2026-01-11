@@ -72,7 +72,7 @@ def validate_saes(
             use_downstream_saes=False,
             cache_dir=cache_dir,
             cache_offset=step * inference_batch_size,
-            replace_previous_layer_only=True,
+            for_validation=True,
         )
         batch_replacement_evals = run_replacement_evals(model, saes, batch, base_logits)
         if "replacement_evals" not in locals():

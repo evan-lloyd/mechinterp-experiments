@@ -184,7 +184,7 @@ def get_sae_data(
     use_downstream_saes: bool = True,
     cache_dir: Optional[str] = None,
     cache_offset: Optional[int] = None,
-    replace_previous_layer_only: bool = False,
+    for_validation: bool = False,
 ) -> Tuple[Dict[Tuple[int, ...], Dict[int, SAEData]], Optional[torch.Tensor]]:
     if end_layer is None:
         end_layer = base_model.config.num_layers
@@ -305,7 +305,7 @@ def get_sae_data(
         prev_layer_attr = "original"
 
     for layer in range(start_layer + 1, end_layer + 1):
-        if replace_previous_layer_only:
+        if for_validation:
             layer_input = baseline_data[layer - 1].denormalized_reconstruction
         else:
             layer_input = getattr(
@@ -382,7 +382,7 @@ def get_sae_data(
             replacement_denormalized_reconstruction = None
             replacement_true_norms = None
         replacement_data[
-            (layer - 1,) if replace_previous_layer_only else (start_layer,)
+            (layer - 1,) if for_validation else (start_layer,)
         ][layer] = SAEData(
             target_layer=layer,
             original=replacement_original,

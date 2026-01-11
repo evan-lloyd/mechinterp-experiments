@@ -140,6 +140,24 @@ def save_demo_run(
     )
 
 
+def clone_sae(sae):
+    from .sae import SAE
+
+    result = SAE(
+        sae.d_model,
+        sae.d_sae,
+        device=sae.device,
+        kind=sae.kind,
+        topk=sae.topk,
+        init_from=sae,
+        with_inhibition=sae.with_inhibition,
+        d_dense=sae.d_dense,
+        normalize_activations=sae.normalize_activations,
+    )
+
+    return result
+
+
 def generate(
     inputs,
     model: AutoModel,
