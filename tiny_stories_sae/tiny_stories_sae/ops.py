@@ -190,3 +190,46 @@ def generate(
 
 def ensure_directory(path: str):
     os.makedirs(path, exist_ok=True)
+
+
+def splice_training_trajectory(t1, t2):
+    """
+    Splice together two training trajectories, taking elements from t1 that occur
+    before the earliest token position in t2, then all elements from t2.
+
+    Args:
+        t1, t2: Training results with structure {layer: {metric: [(token_pos, value), ...]}}
+
+    Returns:
+        Spliced training result with the same structure
+    """
+    result = {}
+
+    for layer in set(t1.keys()) | set(t2.keys()):
+        result[layer] = {}
+
+        # Get all metrics for this layer from both trajectories
+        layer_t1 = t1.get(layer, {})
+        layer_t2 = t2.get(layer, {})
+
+        for metric in set(layer_t1.keys()) | set(layer_t2.keys()):
+            metric_t1 = layer_t1.get(metric, [])
+            metric_t2 = layer_t2.get(metric, [])
+
+            if not metric_t2:
+                # If t2 has no data for this metric, just use t1
+                result[layer][metric] = metric_t1[:]
+            elif not metric_t1:
+                # If t1 has no data for this metric, just use t2
+                result[layer][metric] = metric_t2[:]
+            else:
+                # Find the earliest token position in t2
+                earliest_t2_token = metric_t2[0][0]
+
+                # Take elements from t1 that are before the earliest t2 token
+                t1_prefix = [item for item in metric_t1 if item[0] < earliest_t2_token]
+
+                # Combine with all of t2
+                result[layer][metric] = t1_prefix + metric_t2[:]
+
+    return result

@@ -223,9 +223,9 @@ def train_one_layer(
     dataset: IterableDataset,
     config: TrainingConfig,
     cache_dir: Optional[str],
-    did_reinit: bool,
     previous_trained_tokens: int = 0,
     max_tokens: Optional[int] = None,
+    post_step_hook: Optional[Callable[int]] = None,
 ):
     if max_tokens is None:
         max_tokens = config.num_train_tokens
@@ -328,28 +328,59 @@ def train_one_layer(
             )
             for k, v in evals.items():
                 train_result[k].append((num_used_tokens + previous_trained_tokens, v))
-            train_result["raw_loss.mse"].append(losses["reconstruction"].item())
+            train_result["raw_loss.mse"].append(
+                (
+                    num_used_tokens + previous_trained_tokens,
+                    losses["reconstruction"].item(),
+                )
+            )
             train_result["raw_loss.next_layer_mse"].append(
-                losses["downstream_reconstruction"][-1].item()
-                if config.method is TrainingMethod.next_layer
-                and target_layer <= model.config.num_layers - 1
-                else 0.0
+                (
+                    num_used_tokens + previous_trained_tokens,
+                    losses["downstream_reconstruction"][-1].item()
+                    if config.method is TrainingMethod.next_layer
+                    and target_layer <= model.config.num_layers - 1
+                    else 0.0,
+                )
             )
             train_result["raw_loss.kl"].append(
-                losses["downstream_reconstruction"][-1].item()
-                if config.method is TrainingMethod.next_layer
-                and target_layer == model.config.num_layers - 1
-                else 0.0
+                (
+                    num_used_tokens + previous_trained_tokens,
+                    losses["downstream_reconstruction"][-1].item()
+                    if config.method is TrainingMethod.next_layer
+                    and target_layer == model.config.num_layers - 1
+                    else 0.0,
+                )
             )
             train_result["weighted_loss.mse"].append(
-                train_result["raw_loss.mse"][-1] * reconstruction_weight
+                (
+                    num_used_tokens + previous_trained_tokens,
+                    losses["reconstruction"].item() * reconstruction_weight,
+                )
             )
             train_result["weighted_loss.next_layer_mse"].append(
-                train_result["raw_loss.next_layer_mse"][-1]
-                * downstream_reconstruction_weight
+                (
+                    num_used_tokens + previous_trained_tokens,
+                    (
+                        losses["downstream_reconstruction"][-1].item()
+                        if config.method is TrainingMethod.next_layer
+                        and target_layer <= model.config.num_layers - 1
+                        else 0.0
+                    )
+                    * downstream_reconstruction_weight,
+                )
             )
             train_result["weighted_loss.kl"].append(
-                train_result["raw_loss.kl"][-1] * downstream_reconstruction_weight
+                (
+                    num_used_tokens + previous_trained_tokens,
+                    (
+                        losses["downstream_reconstruction"][-1].item()
+                        if config.method is TrainingMethod.next_layer
+                        and target_layer == model.config.num_layers - 1
+                        else 0.0
+                    )
+                    * downstream_reconstruction_weight,
+                )
             )
 
             progress.set_postfix(
@@ -359,6 +390,9 @@ def train_one_layer(
             eval_threshold = min(eval_threshold + config.eval_interval, max_tokens)
         progress.total = max(max_tokens, num_used_tokens)
         progress.update(batch.num_tokens)
+
+        if post_step_hook:
+            post_step_hook(num_used_tokens)
 
     progress.close()
     return train_result, num_used_tokens
@@ -373,6 +407,7 @@ def train_e2e(
     config: TrainingConfig,
     cache_dir: Optional[str],
     previous_trained_tokens: int = 0,
+    post_step_hook: Optional[Callable[int]] = None,
 ):
     train_result = defaultdict(list)
     optimizer = make_optimizer(saes, [target_layer], config)
@@ -526,20 +561,38 @@ def train_e2e(
             )
             for k, v in evals.items():
                 train_result[k].append((num_used_tokens + previous_trained_tokens, v))
-            train_result["raw_loss.mse"].append(losses["reconstruction"].item())
-            train_result["raw_loss.kl"].append(kl_loss.item())
+            train_result["raw_loss.mse"].append(
+                (
+                    num_used_tokens + previous_trained_tokens,
+                    losses["reconstruction"].item(),
+                )
+            )
+            train_result["raw_loss.kl"].append(
+                (num_used_tokens + previous_trained_tokens, kl_loss.item())
+            )
             train_result["raw_loss.downstream"].append(
-                [ds.item() for ds in losses["downstream_reconstruction"]]
+                (
+                    num_used_tokens + previous_trained_tokens,
+                    [ds.item() for ds in losses["downstream_reconstruction"]],
+                )
             )
             train_result["weighted_loss.mse"].append(
-                losses["reconstruction"].item() * reconstruction_weight
+                (
+                    num_used_tokens + previous_trained_tokens,
+                    losses["reconstruction"].item() * reconstruction_weight,
+                )
             )
-            train_result["weighted_loss.kl"].append(kl_loss.item() * kl_scale)
+            train_result["weighted_loss.kl"].append(
+                (num_used_tokens + previous_trained_tokens, kl_loss.item() * kl_scale)
+            )
             train_result["weighted_loss.downstream"].append(
-                [
-                    ds.item() * reconstruction_weight
-                    for ds in losses["downstream_reconstruction"]
-                ]
+                (
+                    num_used_tokens + previous_trained_tokens,
+                    [
+                        ds.item() * reconstruction_weight
+                        for ds in losses["downstream_reconstruction"]
+                    ],
+                )
             )
 
             progress.set_postfix(
@@ -555,6 +608,9 @@ def train_e2e(
         )
         progress.update(batch.num_tokens)
 
+        if post_step_hook:
+            post_step_hook(num_used_tokens)
+
     progress.close()
     return train_result, num_used_tokens
 
@@ -569,6 +625,7 @@ def train(
     reinit_weights: bool = False,
     start_at_finetune: bool = False,
     start_at_token: Optional[int] = None,
+    post_step_hook: Optional[Callable[[int]]] = None,
 ):
     train_result = {layer: defaultdict(list) for layer in saes.keys()}
     num_tokens = 0
@@ -595,13 +652,13 @@ def train(
                 dataset,
                 config,
                 cache_dir,
-                reinit_weights,
                 previous_trained_tokens=0,
                 max_tokens=int(
                     (1.0 - config.finetune_fraction) * config.num_train_tokens
                 )
                 if config.finetune_fraction
                 else None,
+                post_step_hook=post_step_hook,
             )
             for key, value in result.items():
                 train_result[layer][key].extend(value)
@@ -629,6 +686,7 @@ def train(
                 config,
                 cache_dir,
                 previous_trained_tokens=num_tokens,
+                post_step_hook=post_step_hook,
             )
             for key, value in result.items():
                 train_result[layer][key].extend(value)
