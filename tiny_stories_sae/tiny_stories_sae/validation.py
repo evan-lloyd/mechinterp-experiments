@@ -34,6 +34,9 @@ def validate_saes(
     position_ids = np.empty((0,), dtype=np.float32)
     token_influence = np.zeros((CONTEXT_LENGTH,))
     num_inputs = 0
+    all_evals = {layer: defaultdict(list) for layer in saes.keys()}
+    replacement_evals = defaultdict(list)
+
     for step, batch in enumerate(
         input_generator(
             model,
@@ -69,21 +72,15 @@ def validate_saes(
             model,
             saes,
             batch,
-            use_downstream_saes=False,
+            use_downstream_saes=True,
             cache_dir=cache_dir,
             cache_offset=step * inference_batch_size,
             for_validation=True,
         )
         batch_replacement_evals = run_replacement_evals(model, saes, batch, base_logits)
-        if "replacement_evals" not in locals():
-            replacement_evals = {key: [] for key in batch_replacement_evals.keys()}
         for key, value in batch_replacement_evals.items():
-            if isinstance(value, np.ndarray):
-                replacement_evals[key] = np.concat(
-                    (batch_replacement_evals[key], value)
-                )
-            else:
-                replacement_evals[key].append(value)
+            replacement_evals[key] = np.concat((replacement_evals[key], value))
+
         for layer, sae in saes.items():
             batch_evals = sae_evals(
                 batch,
@@ -97,25 +94,8 @@ def validate_saes(
             )
 
             # Combine results across rows
-            if "all_evals" not in locals():
-                if len(saes) == 1:
-                    all_evals = {key: [] for key in batch_evals.keys()}
-                else:
-                    all_evals = {key: defaultdict(list) for key in batch_evals.keys()}
-
             for key, value in batch_evals.items():
-                if isinstance(value, np.ndarray):
-                    if len(saes) == 1:
-                        all_evals[key] = np.concat((all_evals[key], value))
-                    else:
-                        all_evals[key][layer] = np.concat(
-                            (all_evals[key][layer], value)
-                        )
-                else:
-                    if len(saes) == 1:
-                        all_evals[key].append(value)
-                    else:
-                        all_evals[key][layer].append(value)
+                all_evals[layer][key] = np.concat((all_evals[layer][key], value))
 
         num_tokens_consumed += batch.num_tokens
         progress.update(batch.num_tokens)
@@ -214,33 +194,36 @@ def sae_evals(
         batch.attention_mask.to(model.device),
     )
 
-    rep_kl = (
-        torch.nn.KLDivLoss(reduction="none", log_target=True)(
-            replacement_output.log_softmax(-1),
-            original_logits.log_softmax(-1),
-        ).sum(dim=-1)
-        * token_mask
-    )
+    rep_kl = torch.nn.KLDivLoss(reduction="none", log_target=True)(
+        replacement_output.log_softmax(-1),
+        original_logits.log_softmax(-1),
+    ).sum(dim=-1)[token_mask.bool()]
 
     if aggregate:
         if next_norm is not None:
             next_norm = next_norm.sum().item() / batch.num_tokens
         relative_norm = relative_norm.sum().item() / batch.num_tokens
         l0 = l0[token_mask.bool()].sum().item() / batch.num_tokens
-        rep_kl = rep_kl.sum().item() / batch.num_tokens
     else:
         if next_norm is not None:
             next_norm = next_norm[token_mask.bool()].flatten().cpu().numpy()
         relative_norm = relative_norm[token_mask.bool()].flatten().cpu().numpy()
         l0 = l0[token_mask.bool()].flatten().cpu().numpy()
-        rep_kl = rep_kl[token_mask.bool()].flatten().cpu().numpy()
 
     result = {
         "rcn": relative_norm,
-        "next_rcn": next_norm,
+        "next_rcn": next_norm
+        if next_norm is not None
+        else np.zeros_like(relative_norm),
         "L0": l0,
-        "rep_kl": rep_kl,
     }
+    if aggregate:
+        result["rep_kl"] = rep_kl.sum().item() / batch.num_tokens
+        result["geom_rep_kl"] = (
+            (rep_kl.clamp(min=1e-9).log().sum() / batch.num_tokens).exp().item()
+        )
+    else:
+        result["rep_kl"] = rep_kl = rep_kl.flatten().cpu().numpy()
 
     return result
 

@@ -1,9 +1,12 @@
 import os
 from collections import defaultdict
+from io import StringIO
 
 import cloudpickle
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from IPython.display import SVG, display
 from safetensors import safe_open
 from safetensors.numpy import save_file as save_file_numpy
 from safetensors.torch import save_file as save_file_torch
@@ -14,8 +17,8 @@ MAX_GENERATION = 2048
 
 
 def load_demo_run(from_dir, sae_args, sae_kwargs):
-    from .training import TrainingMethod
     from .sae import SAE
+    from .training import TrainingMethod
 
     saes = defaultdict(lambda: defaultdict(dict))
     loaded_saes = set()
@@ -233,3 +236,17 @@ def splice_training_trajectory(t1, t2):
                 result[layer][metric] = t1_prefix + metric_t2[:]
 
     return result
+
+
+def current_plot_to_svg(filename: str, plot_dir: str = "/tmp"):
+    plot_svg = StringIO()
+    plt.savefig(plot_svg, format="svg")
+    plt.close()
+    plot_svg.seek(0)
+    d = display(SVG(plot_svg.read()))
+
+    plot_svg.seek(0)
+    ensure_directory(plot_dir)
+    open(f"{plot_dir}/{filename}.svg", "w").write(plot_svg.read())
+
+    return d

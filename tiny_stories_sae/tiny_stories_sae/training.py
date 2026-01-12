@@ -106,9 +106,12 @@ def sae_losses(
         reconstruction_loss = (
             (this_layer_baseline.reconstruction - this_layer_baseline.original) ** 2
         ).mean(dim=-1)
+        reconstruction_loss = (
+            reconstruction_loss * token_mask
+        ).sum() / batch.num_tokens
 
     result = {
-        "reconstruction": (reconstruction_loss * token_mask).sum() / batch.num_tokens
+        "reconstruction": reconstruction_loss
         if want_mse
         else torch.zeros((1,), device=sae.device),
         "downstream_reconstruction": downstream_reconstruction_loss,
@@ -432,7 +435,6 @@ def train_e2e(
     eval_threshold = 0
 
     batch_size = config.e2e_batch_size
-    print("hello")
     for step, batch in enumerate(
         input_generator(
             model,
