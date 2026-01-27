@@ -11,6 +11,7 @@ class SAE(torch.nn.Module):
         device="cpu",
         kind="standard",
         topk=None,
+        use_interaction=False,
         init_from: Optional["SAE"] = None,
     ):
         super().__init__()
@@ -19,6 +20,7 @@ class SAE(torch.nn.Module):
         self.topk = topk
         self.d_model = d_model
         self.d_sae = d_sae
+        self.use_interaction = use_interaction
         self.init_weights(init_from)
 
     @torch.no_grad
@@ -35,6 +37,25 @@ class SAE(torch.nn.Module):
             self.encoder.bias = torch.nn.Parameter(
                 torch.zeros(self.d_sae, device=self.device)
             )
+            if self.use_interaction:
+                # interaction_weight = torch.empty((self.d_sae, self.d_sae), device=self.device)
+                # torch.nn.init.normal_(interaction_weight, mean=0.0, std=0.1)
+
+                # # Compute pairwise cosine similarity between encoder weight rows
+                # encoder_weights = self.encoder.weight  # shape: (d_sae, d_model)
+                # normalized_weights = torch.nn.functional.normalize(encoder_weights, p=2, dim=1)
+                # cosine_sim = normalized_weights @ normalized_weights.T  # shape: (d_sae, d_sae)
+                # # Initialize to negative cosine similarity
+                # interaction_weight = -cosine_sim
+
+                # interaction_weight.fill_diagonal_(1.0)
+                # self.interaction = torch.nn.Parameter(
+                #     interaction_weight
+                # )
+
+                self.interaction = torch.nn.Parameter(
+                    torch.eye(self.d_sae, device=self.device)
+                )
         else:
             self.decoder = torch.nn.Linear(self.d_sae, self.d_model, device="meta")
             self.encoder = torch.nn.Linear(self.d_model, self.d_sae, device="meta")
@@ -50,6 +71,10 @@ class SAE(torch.nn.Module):
             self.encoder.bias = torch.nn.Parameter(
                 init_from.encoder.bias.clone().detach().contiguous()
             )
+            if self.use_interaction:
+                self.interaction = torch.nn.Parameter(
+                    init_from.interaction.clone().detach().contiguous()
+                )
 
     def activation_fn(self, x: torch.Tensor):
         if self.kind == "standard":
@@ -66,7 +91,19 @@ class SAE(torch.nn.Module):
         return self.decoder(x)
 
     def encode(self, x: torch.Tensor):
-        return self.activation_fn(self.encoder(x))
+        if self.use_interaction:
+            # topk -> topk
+            # encoder_output = self.activation_fn(
+            #     self.activation_fn(self.encoder(x)) @ self.interaction
+            # )
+            # vanilla -> topk
+            encoder_output = self.activation_fn(
+                self.encoder(x).relu() @ self.interaction
+            )
+        else:
+            encoder_output = self.activation_fn(self.encoder(x))
+
+        return encoder_output
 
     def forward(self, x: torch.Tensor, *args, position_ids: torch.Tensor, **kwargs):
         return (self.decode(self.encode(x)),)

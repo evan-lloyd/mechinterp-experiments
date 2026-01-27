@@ -307,7 +307,7 @@ def get_sae_data(
             reconstruction_eval = "norm"
         if use_downstream_saes and sae is not None:
             replacement_features = sae.encode(replacement_original)
-            replacement_reconstruction = _ensure_tensor(sae.decode(features))
+            replacement_reconstruction = _ensure_tensor(sae.decode(replacement_features))
         else:
             replacement_features = None
             replacement_reconstruction = None

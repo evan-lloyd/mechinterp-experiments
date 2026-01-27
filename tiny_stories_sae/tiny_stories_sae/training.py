@@ -40,6 +40,7 @@ class TrainingConfig:
     lr: float = 1e-3
     decoder_lr: Optional[float] = None
     encoder_lr: Optional[float] = None
+    interaction_lr: Optional[float] = None
     # Default schedule is constant
     main_lr_schedule: Callable[[float], float] = lambda frac_trained: 1.0
     finetune_lr_schedule: Callable[[float], float] = lambda frac_trained: 1.0
@@ -174,6 +175,18 @@ def make_optimizer(saes: Dict[int, SAE], layers: List[int], config: TrainingConf
         },
     ]
 
+    if any(s.use_interaction for layer, s in saes.items() if layer in layers):
+        param_groups.append(
+            {
+                "params": [
+                    saes[layer].interaction
+                    for layer in layers
+                    if saes[layer].use_interaction
+                ],
+                "lr": config.interaction_lr or config.lr,
+            }
+        )
+
     for pg in param_groups:
         pg["base_lr"] = pg["lr"]
 
@@ -265,8 +278,6 @@ def train_one_layer(
     ):
         optimizer.zero_grad()
 
-        num_used_tokens += batch.num_tokens
-
         result, original_logits = get_sae_data(
             model,
             saes,
@@ -309,14 +320,16 @@ def train_one_layer(
             )
         )
 
-        loss.backward()
-
-        optimizer.step()
-
         for pg in optimizer.param_groups:
             pg["lr"] = pg["base_lr"] * config.main_lr_schedule(
                 min(num_used_tokens / max_tokens, 1.0)
             )
+
+        # After first batch, step before doing evals
+        if num_used_tokens > 0:
+            loss.backward()
+            optimizer.step()
+            num_used_tokens += batch.num_tokens
 
         if num_used_tokens >= eval_threshold:
             evals = sae_evals(
@@ -391,6 +404,13 @@ def train_one_layer(
                 refresh=False,
             )
             eval_threshold = min(eval_threshold + config.eval_interval, max_tokens)
+
+        # On the first batch only, we do evals before updating params
+        if num_used_tokens == 0:
+            loss.backward()
+            optimizer.step()
+            num_used_tokens += batch.num_tokens
+
         progress.total = max(max_tokens, num_used_tokens)
         progress.update(batch.num_tokens)
 
