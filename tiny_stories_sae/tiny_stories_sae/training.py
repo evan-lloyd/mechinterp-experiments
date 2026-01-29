@@ -17,6 +17,7 @@ from .sae import SAE
 from .sae_data import SAEData, cache_on_disk, get_sae_data, init_cache
 from .tokenization import CONTEXT_LENGTH, input_generator
 from .validation import sae_evals
+from .encoder import InteractionEncoder
 
 
 class TrainingMethod(Enum):
@@ -67,7 +68,7 @@ def sae_losses(
     use_downstream_saes: bool,
     want_mse: bool = True,
 ):
-    token_mask = batch.token_mask.to(sae.device)
+    token_mask = batch.token_mask.to(sae.config.device)
 
     downstream_reconstruction_loss = []
     for baseline, replacement in zip(
@@ -114,7 +115,7 @@ def sae_losses(
     result = {
         "reconstruction": reconstruction_loss
         if want_mse
-        else torch.zeros((1,), device=sae.device),
+        else torch.zeros((1,), device=sae.config.device),
         "downstream_reconstruction": downstream_reconstruction_loss,
     }
 
@@ -163,25 +164,33 @@ def make_optimizer(saes: Dict[int, SAE], layers: List[int], config: TrainingConf
     param_groups = [
         {
             "params": [
-                param for layer in layers for param in saes[layer].decoder.parameters()
+                param
+                for layer in layers
+                for param in saes[layer].decoder.linear.parameters()
             ],
             "lr": config.decoder_lr or config.lr,
         },
         {
             "params": [
-                param for layer in layers for param in saes[layer].encoder.parameters()
+                param
+                for layer in layers
+                for param in saes[layer].encoder.linear.parameters()
             ],
             "lr": config.encoder_lr or config.lr,
         },
     ]
 
-    if any(s.use_interaction for layer, s in saes.items() if layer in layers):
+    if any(
+        isinstance(s.encoder, InteractionEncoder)
+        for layer, s in saes.items()
+        if layer in layers
+    ):
         param_groups.append(
             {
                 "params": [
-                    saes[layer].interaction
+                    saes[layer].encoder.interaction
                     for layer in layers
-                    if saes[layer].use_interaction
+                    if isinstance(saes[layer].encoder, InteractionEncoder)
                 ],
                 "lr": config.interaction_lr or config.lr,
             }

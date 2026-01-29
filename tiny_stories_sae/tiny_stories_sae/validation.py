@@ -158,7 +158,7 @@ def sae_evals(
     # on steps where we're running evals
     if replacement_model is None:
         replacement_model = model
-    token_mask = batch.token_mask.to(sae.device).bool()
+    token_mask = batch.token_mask.to(sae.config.device).bool()
 
     # We don't want to calculate the rcn in the vocabulary space, since we're actually using KL (but that's
     # already reported elsewhere, so just skip)

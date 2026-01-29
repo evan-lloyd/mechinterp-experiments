@@ -149,7 +149,7 @@ def clone_sae(sae):
     result = SAE(
         sae.d_model,
         sae.d_sae,
-        device=sae.device,
+        device=sae.config.device,
         kind=sae.kind,
         topk=sae.topk,
         init_from=sae,
