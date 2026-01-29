@@ -28,6 +28,8 @@ def validate_saes(
     num_tokens: Optional[int] = None,
     num_batches: Optional[int] = None,
     cache_dir: Optional[str] = None,
+    start_layer: int = 0,
+    end_layer: Optional[int] = None,
 ):
     model.eval()
     num_tokens_consumed = 0
@@ -76,6 +78,8 @@ def validate_saes(
             cache_dir=cache_dir,
             cache_offset=step * inference_batch_size,
             for_validation=True,
+            start_layer=start_layer,
+            end_layer=end_layer,
         )
         batch_replacement_evals = run_replacement_evals(model, saes, batch, base_logits)
         for key, value in batch_replacement_evals.items():

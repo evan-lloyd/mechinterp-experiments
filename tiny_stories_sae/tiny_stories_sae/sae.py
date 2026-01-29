@@ -13,6 +13,7 @@ class SAE(torch.nn.Module):
         topk=None,
         use_interaction=False,
         init_from: Optional["SAE"] = None,
+        n_interaction_iterations=1,
     ):
         super().__init__()
         self.device = device
@@ -21,6 +22,7 @@ class SAE(torch.nn.Module):
         self.d_model = d_model
         self.d_sae = d_sae
         self.use_interaction = use_interaction
+        self.n_interaction_iterations = n_interaction_iterations
         self.init_weights(init_from)
 
     @torch.no_grad
@@ -38,21 +40,6 @@ class SAE(torch.nn.Module):
                 torch.zeros(self.d_sae, device=self.device)
             )
             if self.use_interaction:
-                # interaction_weight = torch.empty((self.d_sae, self.d_sae), device=self.device)
-                # torch.nn.init.normal_(interaction_weight, mean=0.0, std=0.1)
-
-                # # Compute pairwise cosine similarity between encoder weight rows
-                # encoder_weights = self.encoder.weight  # shape: (d_sae, d_model)
-                # normalized_weights = torch.nn.functional.normalize(encoder_weights, p=2, dim=1)
-                # cosine_sim = normalized_weights @ normalized_weights.T  # shape: (d_sae, d_sae)
-                # # Initialize to negative cosine similarity
-                # interaction_weight = -cosine_sim
-
-                # interaction_weight.fill_diagonal_(1.0)
-                # self.interaction = torch.nn.Parameter(
-                #     interaction_weight
-                # )
-
                 self.interaction = torch.nn.Parameter(
                     torch.eye(self.d_sae, device=self.device)
                 )
@@ -91,17 +78,16 @@ class SAE(torch.nn.Module):
         return self.decoder(x)
 
     def encode(self, x: torch.Tensor):
+        encoder_output = self.encoder(x)
         if self.use_interaction:
-            # topk -> topk
-            # encoder_output = self.activation_fn(
-            #     self.activation_fn(self.encoder(x)) @ self.interaction
-            # )
-            # vanilla -> topk
-            encoder_output = self.activation_fn(
-                self.encoder(x).relu() @ self.interaction
-            )
+            features = self.activation_fn(encoder_output)
+            for _ in range(self.n_interaction_iterations):
+                features = self.activation_fn(
+                    encoder_output + features @ self.interaction
+                )
+            encoder_output = features
         else:
-            encoder_output = self.activation_fn(self.encoder(x))
+            encoder_output = self.activation_fn(encoder_output)
 
         return encoder_output
 
