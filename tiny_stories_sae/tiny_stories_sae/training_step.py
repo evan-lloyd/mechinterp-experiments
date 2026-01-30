@@ -5,35 +5,9 @@ from typing import Callable, Dict, Optional
 import torch
 
 from .data_batch import DataBatch
+from .metrics import cos_dist_loss, kl_loss, mse_loss
 from .replacement_model import ReplacementModel, make_replacement_model
 from .sae import SAE
-
-
-def _batch_loss(fn):
-    def _inner(x: torch.Tensor, y: torch.Tensor, batch: DataBatch):
-        return (fn(x, y) * batch.token_mask).sum() / batch.num_tokens
-
-    return _inner
-
-
-def _cos_dist(x: torch.Tensor, y: torch.Tensor):
-    return 1 - torch.nn.functional.cosine_similarity(x, y, dim=-1)
-
-
-def _mse(x: torch.Tensor, y: torch.Tensor):
-    return ((x - y) ** 2).mean(dim=-1)
-
-
-def _kl(x: torch.Tensor, y: torch.Tensor):
-    return torch.nn.KLDivLoss(reduction="none", log_target=True)(
-        x.log_softmax(-1),
-        y.log_softmax(-1),
-    ).mean(dim=-1)
-
-
-cos_dist_loss = _batch_loss(_cos_dist)
-mse_loss = _batch_loss(_mse)
-kl_loss = _batch_loss(_kl)
 
 
 @dataclass(kw_only=True)
@@ -47,14 +21,14 @@ class ActivationBatch:
 @dataclass
 class TrainingBatch:
     input_data: DataBatch
-    baseline_activations: Dict[int, ActivationBatch]
     replacement_activations: Dict[int, ActivationBatch]
+    baseline_activations: Dict[int, ActivationBatch]
 
 
 def downstream_loss(
-    batch: DataBatch,
-    baseline: ActivationBatch,
     replacement: ActivationBatch,
+    baseline: ActivationBatch,
+    batch: DataBatch,
     downstream_attr: str,
     downstream_fn: Callable[[torch.Tensor, torch.Tensor, DataBatch], torch.Tensor],
 ) -> torch.Tensor:
@@ -74,16 +48,16 @@ def next_layer_losses(batch: TrainingBatch, target_layer: int):
         downstream_fn = cos_dist_loss
 
     downstream_reconstruction_loss = downstream_loss(
-        batch.input_data,
-        batch.baseline_activations[target_layer + 1],
         batch.replacement_activations[target_layer + 1],
+        batch.baseline_activations[target_layer + 1],
+        batch.input_data,
         downstream_attr,
         downstream_fn,
     )
 
     reconstruction_loss = mse_loss(
-        batch.baseline_activations[target_layer],
         batch.replacement_activations[target_layer],
+        batch.baseline_activations[target_layer],
         batch.input_data,
     )
     return {
@@ -103,9 +77,9 @@ def e2e_losses(batch: TrainingBatch, start_layer: int, end_layer: int):
             downstream_fn = mse_loss
         downstream_reconstruction_loss.append(
             downstream_loss(
-                batch.input_data,
-                batch.baseline_activations[layer + 1],
                 batch.replacement_activations[layer + 1],
+                batch.baseline_activations[layer + 1],
+                batch.input_data,
                 downstream_attr,
                 downstream_fn,
             )
@@ -116,15 +90,16 @@ def e2e_losses(batch: TrainingBatch, start_layer: int, end_layer: int):
 
 def kl_finetune_losses(batch: TrainingBatch, target_layer: int, logits_layer: int):
     downstream_reconstruction_loss = downstream_loss(
-        batch.baseline_activations[logits_layer],
         batch.replacement_activations[logits_layer],
+        batch.baseline_activations[logits_layer],
+        batch.input_data,
         "logits",
         kl_loss,
     )
 
     reconstruction_loss = mse_loss(
-        batch.baseline_activations[target_layer],
         batch.replacement_activations[target_layer],
+        batch.baseline_activations[target_layer],
         batch.input_data,
     )
     return {

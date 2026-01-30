@@ -37,7 +37,7 @@ def truncated_model(
             super().__init__()
 
         def forward(self, x: torch.Tensor, *args, **kwargs):
-            return model.transformer.h[start_layer].sae(x, position_ids=kwargs.get("position_ids"))
+            return model.transformer.h[start_layer].sae(x)
 
     patched_layers = torch.nn.ModuleList(
         model.transformer.h[max(start_layer, 0) : end_layer]
@@ -55,7 +55,6 @@ def truncated_model(
             for layer in patched_layers:
                 residual = layer(
                     residual,
-                    position_ids=kwargs.get("position_ids"),
                     attention_mask=kwargs.get("attention_mask"),
                     use_cache=kwargs.get("use_cache"),
                 )[0]

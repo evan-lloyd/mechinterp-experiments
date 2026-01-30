@@ -58,5 +58,5 @@ class SAE(torch.nn.Module):
     def encode(self, x: torch.Tensor):
         return self.encoder(x)
 
-    def forward(self, x: torch.Tensor, *args, position_ids: torch.Tensor, **kwargs):
+    def forward(self, x: torch.Tensor, *args, **kwargs):
         return (self.decode(self.encode(x)),)

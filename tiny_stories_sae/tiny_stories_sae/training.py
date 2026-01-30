@@ -137,7 +137,7 @@ def build_cache(
     init_cache(
         model,
         cache_dir,
-        model.config.num_layers + 1,
+        model.config.num_layers,
         inference_batch_size,
         1,
         CONTEXT_LENGTH,
@@ -730,6 +730,7 @@ def train(
     start_at_token: Optional[int] = None,
     post_step_hook: Optional[Callable[[int, int]]] = None,
 ):
+    model.eval()
     train_result = {layer: defaultdict(list) for layer in saes.keys()}
 
     num_tokens = 0

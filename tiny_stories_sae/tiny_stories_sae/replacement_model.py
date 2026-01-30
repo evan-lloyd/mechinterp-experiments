@@ -16,13 +16,6 @@ class GenericReplacementLayer(torch.nn.Module):
 
     def forward(self, *args, **kwargs):
         original_output, *rest = self.original_layer(*args, **kwargs)
-        if "position_ids" not in kwargs:
-            if "cache_position" in kwargs:
-                kwargs["position_ids"] = kwargs["cache_position"].unsqueeze(0)
-            else:
-                kwargs["position_ids"] = torch.arange(
-                    args[0].shape[-2], device=args[0].device, dtype=torch.int64
-                ).unsqueeze(0)
         reconstruction = self.sae(original_output, *args, **kwargs)
         if not isinstance(reconstruction, tuple):
             reconstruction = (reconstruction,)

@@ -238,15 +238,16 @@ def splice_training_trajectory(t1, t2):
     return result
 
 
-def current_plot_to_svg(filename: str, plot_dir: str = "/tmp"):
+def current_plot_to_svg(filename: str | None = None, plot_dir: str = "/tmp"):
     plot_svg = StringIO()
     plt.savefig(plot_svg, format="svg")
     plt.close()
     plot_svg.seek(0)
     d = display(SVG(plot_svg.read()))
 
-    plot_svg.seek(0)
-    ensure_directory(plot_dir)
-    open(f"{plot_dir}/{filename}.svg", "w").write(plot_svg.read())
+    if filename:
+        plot_svg.seek(0)
+        ensure_directory(plot_dir)
+        open(f"{plot_dir}/{filename}.svg", "w").write(plot_svg.read())
 
     return d

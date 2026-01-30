@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -9,12 +10,238 @@ from datasets import IterableDataset
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
+from tiny_stories_sae.training_step import ActivationBatch, TrainingBatch
+
 from .data_batch import DataBatch
+from .metrics import kl_eval, rre_eval
 from .ops import generate
 from .replacement_model import make_replacement_model
 from .sae import SAE
-from .sae_data import SAEData, get_logits, get_sae_data
+from .sae_data import (
+    SAEData,
+    _ensure_tensor,
+    get_logits,
+    get_sae_data,
+    load_cache,
+    run_replacement_model,
+)
 from .tokenization import CONTEXT_LENGTH, input_generator
+
+
+@dataclass(kw_only=True)
+class AggregatedLayerEval:
+    rre: float | None = None
+    kl: float | None = None
+
+
+@dataclass(kw_only=True)
+class LayerEval:
+    rre: np.ndarray | None = None
+    kl: np.ndarray | None = None
+
+    def update(self, other: "AggregatedLayerEval"):
+        for attr in self.__class__.__dataclass_fields__:
+            if getattr(self, attr) is None:
+                setattr(self, attr, getattr(other, attr))
+            elif getattr(other, attr) is not None:
+                setattr(
+                    self, attr, np.concat((getattr(self, attr), getattr(other, attr)))
+                )
+
+
+@dataclass(kw_only=True)
+class ValidationResult:
+    layer_results: Dict[int, LayerEval]
+    position_ids: np.ndarray
+
+
+@torch.no_grad
+def run_validations(
+    model: torch.nn.Module,
+    tokenizer: AutoTokenizer,
+    saes: Dict[int, SAE],
+    dataset: IterableDataset,
+    tokenizer_batch_size: int,
+    inference_batch_size: int,
+    num_tokens: Optional[int] = None,
+    num_batches: Optional[int] = None,
+    cache_dir: Optional[str] = None,
+    start_layer: int = 0,
+    end_layer: Optional[int] = None,
+):
+    if end_layer is None:
+        end_layer = model.config.num_layers + 1
+    full_replacement_model = make_replacement_model(
+        model, {f"transformer.h.{layer}": sae for layer, sae in saes.items()}
+    )
+    model.eval()
+    num_tokens_consumed = 0
+    num_inputs = 0
+    results = ValidationResult(
+        layer_results={layer: LayerEval() for layer in range(start_layer, end_layer)},
+        position_ids=np.empty((0,)),
+    )
+
+    for step, batch in enumerate(
+        input_generator(
+            model,
+            tokenizer,
+            dataset,
+            max_tokens=num_tokens,
+            tokenizer_batch_size=tokenizer_batch_size,
+            inference_batch_size=inference_batch_size,
+            max_batches=num_batches,
+        )
+    ):
+        if "progress" not in locals():
+            progress = tqdm(
+                total=num_tokens
+                or num_batches * inference_batch_size * batch.position_ids.shape[1],
+                desc="Running SAE evals",
+            )
+        results.position_ids = np.concatenate(
+            (
+                results.position_ids,
+                batch.position_ids[batch.token_mask.bool()].flatten().cpu().numpy(),
+            ),
+            axis=0,
+        )
+
+        batch.token_mask = batch.token_mask.to(model.device)
+        if cache_dir is not None:
+            baseline_run = load_cache(
+                model.config.num_layers,
+                cache_dir,
+                step * inference_batch_size,
+                batch,
+            )
+        else:
+            baseline_run = run_replacement_model(
+                model,
+                {
+                    layer: model.transformer.h[layer]
+                    if layer < model.config.num_layers
+                    else model.lm_head
+                    for layer in range(start_layer, end_layer)
+                },
+                batch,
+                start_layer=-1,
+                end_layer=end_layer,
+            )
+        baseline_activations = {
+            layer: ActivationBatch(
+                layer_output=_ensure_tensor(
+                    baseline_run[layer],
+                ).to(model.device)
+            )
+            if layer < model.config.num_layers
+            else ActivationBatch(
+                logits=_ensure_tensor(
+                    baseline_run[layer],
+                ).to(model.device)
+            )
+            for layer in baseline_run
+            if layer in range(start_layer, end_layer)
+        }
+        # If we loaded from disk, we didn't cache logits
+        if (
+            model.config.num_layers not in baseline_activations
+            and end_layer > model.config.num_layers
+        ):
+            baseline_activations[model.config.num_layers] = ActivationBatch(
+                logits=_ensure_tensor(
+                    run_replacement_model(
+                        model,
+                        {"logits": model.lm_head},
+                        batch,
+                        start_layer=max(baseline_activations.keys()) + 1,
+                        end_layer=model.config.num_layers + 1,
+                        start_input=baseline_activations[
+                            max(baseline_activations.keys())
+                        ].layer_output,
+                    )["logits"]
+                )
+            )
+        full_replacement_run = run_replacement_model(
+            full_replacement_model,
+            {
+                layer: full_replacement_model.transformer.h[layer].sae
+                if layer < model.config.num_layers
+                else full_replacement_model.lm_head
+                for layer in range(start_layer, end_layer)
+            },
+            batch,
+            start_input=baseline_activations[start_layer].layer_output,
+            start_layer=start_layer,
+            end_layer=end_layer,
+            start_at_sae=True,
+        )
+        full_replacement_activations = {
+            layer: ActivationBatch(
+                sae_output=_ensure_tensor(full_replacement_run[layer])
+            )
+            if layer < model.config.num_layers
+            else ActivationBatch(logits=_ensure_tensor(full_replacement_run[layer]))
+            for layer in range(start_layer, end_layer)
+        }
+        evals = run_evals(
+            TrainingBatch(batch, full_replacement_activations, baseline_activations),
+            aggregate=False,
+        )
+
+        for layer in evals.keys():
+            results.layer_results[layer].update(evals[layer])
+
+        num_tokens_consumed += batch.num_tokens
+        progress.update(batch.num_tokens)
+
+    progress.total = num_tokens_consumed
+    progress.refresh()
+    progress.close()
+
+    return results
+
+
+@torch.no_grad
+def run_evals(
+    batch: TrainingBatch,
+    aggregate: bool = True,
+) -> Dict[int, AggregatedLayerEval | LayerEval]:
+    assert set(batch.baseline_activations.keys()) == set(
+        batch.replacement_activations.keys()
+    ), "Missing activations for evaluation"
+
+    if aggregate:
+        eval_class = AggregatedLayerEval
+        eval_type = "float"
+    else:
+        eval_class = LayerEval
+        eval_type = "np"
+
+    result = {}
+    for layer in batch.baseline_activations.keys():
+        replacement = batch.replacement_activations[layer]
+        baseline = batch.baseline_activations[layer]
+        if baseline.logits is not None:
+            result[layer] = eval_class(
+                kl=kl_eval(
+                    replacement.logits,
+                    baseline.logits,
+                    batch.input_data,
+                    eval_type,
+                )
+            )
+        else:
+            result[layer] = eval_class(
+                rre=rre_eval(
+                    replacement.sae_output,
+                    baseline.layer_output,
+                    batch.input_data,
+                    eval_type,
+                )
+            )
+
+    return result
 
 
 @torch.no_grad

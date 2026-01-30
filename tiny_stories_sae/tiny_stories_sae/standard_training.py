@@ -4,12 +4,13 @@ from typing import Dict, Optional
 import torch
 
 from .data_batch import DataBatch
+from .metrics import mse_loss
 from .replacement_model import (
     make_replacement_model,
 )
 from .sae import SAE
 from .sae_data import _ensure_tensor, run_replacement_model
-from .training_step import ActivationBatch, Stepper, TrainingBatch, mse_loss
+from .training_step import ActivationBatch, Stepper, TrainingBatch
 
 
 class StandardTrainingStepper(Stepper):
@@ -32,16 +33,16 @@ class StandardTrainingStepper(Stepper):
         self, batch: DataBatch, cache: Optional[Dict[str, torch.Tensor]]
     ) -> TrainingBatch:
         if cache is not None:
-            baseline_activations = cache
+            baseline_run = cache
         else:
-            baseline_activations = run_replacement_model(
+            baseline_run = run_replacement_model(
                 self.base_model,
                 {self.target_layer: self.base_model.transformer.h[self.target_layer]},
                 batch,
                 start_layer=-1,  # not cached, so we start from raw input
                 end_layer=self.target_layer + 1,  # non-inclusive range
             )
-        replacement_activations = run_replacement_model(
+        replacement_run = run_replacement_model(
             self.replacement_model,
             {
                 "sae_output": self.replacement_model.transformer.h[
@@ -50,7 +51,7 @@ class StandardTrainingStepper(Stepper):
             },
             batch,
             start_input=_ensure_tensor(
-                baseline_activations[self.target_layer].to(self.base_model.device)
+                baseline_run[self.target_layer].to(self.base_model.device)
             ),
             start_layer=self.target_layer,
             end_layer=self.target_layer + 1,
@@ -58,23 +59,23 @@ class StandardTrainingStepper(Stepper):
         )
         return TrainingBatch(
             batch,
-            baseline_activations={
-                k: ActivationBatch(layer_output=_ensure_tensor(v))
-                for k, v in baseline_activations.items()
-            },
             replacement_activations={
                 self.target_layer: ActivationBatch(
-                    sae_output=_ensure_tensor(replacement_activations["sae_output"])
+                    sae_output=_ensure_tensor(replacement_run["sae_output"])
                 )
+            },
+            baseline_activations={
+                k: ActivationBatch(layer_output=_ensure_tensor(v))
+                for k, v in baseline_run.items()
             },
         )
 
     def step(self, training_batch: TrainingBatch) -> Dict[str, torch.Tensor]:
         reconstruction_loss = mse_loss(
+            training_batch.replacement_activations[self.target_layer].sae_output,
             training_batch.baseline_activations[self.target_layer].layer_output.to(
                 self.base_model.device
             ),
-            training_batch.replacement_activations[self.target_layer].sae_output,
             training_batch.input_data,
         )
 
@@ -150,6 +151,6 @@ class StandardTrainingStepper(Stepper):
             )
         return TrainingBatch(
             training_batch.input_data,
-            baseline_activations,
             full_replacement_activations,
+            baseline_activations,
         )

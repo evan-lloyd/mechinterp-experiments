@@ -88,7 +88,7 @@ def init_cache(
         "overwrite": True,
         "compressors": None,
     }
-    metadata = {"num_tokens": 0, "num_rows": 0}
+    metadata = {"num_tokens": 0, "num_rows": 0, "num_layers": num_layers}
     ensure_directory(cache_dir)
     zarr.create_array(
         cache_dir,
@@ -107,7 +107,7 @@ def init_cache(
             model.config.hidden_size,
         ),
         shards=(
-            model.config.num_layers + 1,
+            model.config.num_layers,
             batches_per_file * inference_batch_size,
             tokens_per_row,
             model.config.hidden_size,
@@ -132,12 +132,7 @@ def cache_on_disk(cache_dir: str, model: torch.nn.Module, batch: DataBatch):
     activations, _ = _run_base_model(
         model,
         batch,
-        {
-            layer: model.transformer.h[layer]
-            if layer < model.config.num_layers
-            else model.transformer.ln_f
-            for layer in range(model.config.num_layers + 1)
-        },
+        {layer: model.transformer.h[layer] for layer in range(model.config.num_layers)},
     )
 
     cache = zarr.open_group(cache_dir, mode="r+")
