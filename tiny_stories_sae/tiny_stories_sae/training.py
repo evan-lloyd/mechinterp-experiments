@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
+from functools import partial
 from typing import Callable, Dict, List, Mapping, Optional
 
 import torch
@@ -11,13 +12,21 @@ from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
 from .data_batch import DataBatch
+from .encoder import InteractionEncoder
 from .multiline_progress import MultilineProgress
 from .replacement_model import make_replacement_model
 from .sae import SAE
-from .sae_data import SAEData, cache_on_disk, get_sae_data, init_cache
+from .sae_data import (
+    SAEData,
+    cache_on_disk,
+    get_sae_data,
+    init_cache,
+    load_cache,
+)
+from .standard_training import StandardTrainingStepper
 from .tokenization import CONTEXT_LENGTH, input_generator
+from .training_step import Stepper
 from .validation import sae_evals
-from .encoder import InteractionEncoder
 
 
 class TrainingMethod(Enum):
@@ -49,14 +58,6 @@ class TrainingConfig:
     balance_reconstruction_losses: bool = False | Mapping[int, bool]
     finetune_fraction: Optional[float] = None
     method: TrainingMethod
-
-
-def _cos_dist(x: torch.Tensor, y: torch.Tensor):
-    return 1 - torch.nn.functional.cosine_similarity(x, y, dim=-1)
-
-
-def _mse(x: torch.Tensor, y: torch.Tensor):
-    return ((x - y) ** 2).mean(dim=-1)
 
 
 def sae_losses(
@@ -238,6 +239,77 @@ def maybe_balance_reconstruction_weights(
         )
 
     return reconstruction_weight, downstream_reconstruction_weight
+
+
+def training_loop(
+    stepper: Stepper,
+    tokenizer: AutoTokenizer,
+    dataset: IterableDataset,
+    config: TrainingConfig,
+    cache_dir: Optional[str],
+    optimizer: torch.optim.Optimizer,
+    progress_desc: str,
+    previous_trained_tokens: int = 0,
+    max_tokens: Optional[int] = None,
+    post_step_hook: Optional[Callable[[int]]] = None,
+):
+    if max_tokens is None:
+        max_tokens = config.num_train_tokens
+
+    num_used_tokens = 0
+    eval_threshold = 0
+    progress = MultilineProgress(
+        total=max_tokens,
+        desc=[progress_desc],
+        num_header_lines=1,
+    )
+    train_result = {}
+    for step, batch in enumerate(
+        input_generator(
+            stepper.base_model,
+            tokenizer,
+            dataset,
+            max_tokens=max_tokens,
+            tokenizer_batch_size=config.tokenizer_batch_size,
+            inference_batch_size=config.training_batch_size,
+        )
+    ):
+        optimizer.zero_grad()
+        if cache_dir is not None:
+            cache = load_cache(
+                stepper.base_model.config.num_layers,
+                cache_dir,
+                step * config.training_batch_size,
+                batch,
+            )
+        else:
+            cache = None
+        batch.token_mask = batch.token_mask.to(stepper.base_model.device)
+        training_batch = stepper.make_batch(batch, cache)
+        losses = stepper.step(training_batch)
+
+        # After first batch, step before doing evals
+        if num_used_tokens > 0:
+            optimizer.step()
+            num_used_tokens += batch.num_tokens
+
+        if num_used_tokens >= eval_threshold:
+            progress.set_postfix(losses, refresh=False)
+            eval_threshold = min(eval_threshold + config.eval_interval, max_tokens)
+
+        # On the first batch only, we do evals before updating params
+        if num_used_tokens == 0:
+            optimizer.step()
+            num_used_tokens += batch.num_tokens
+
+        progress.total = max(max_tokens, num_used_tokens)
+        progress.update(batch.num_tokens)
+
+        if post_step_hook:
+            post_step_hook(num_used_tokens)
+
+    progress.close()
+    return train_result, num_used_tokens
 
 
 def train_one_layer(
@@ -659,67 +731,95 @@ def train(
     post_step_hook: Optional[Callable[[int, int]]] = None,
 ):
     train_result = {layer: defaultdict(list) for layer in saes.keys()}
+
     num_tokens = 0
-    if (
-        config.method
-        in (
-            TrainingMethod.standard,
-            TrainingMethod.next_layer,
-            TrainingMethod.finetuned,
+    # Always train later layers first
+    for layer in sorted(config.train_layers, reverse=True):
+        if reinit_weights:
+            saes[layer].init_weights(saes.get(layer + 1))
+        optimizer = make_optimizer(saes, [layer], config)
+        stepper = StandardTrainingStepper(model, layer, saes)
+        result, num_tokens = training_loop(
+            stepper,
+            tokenizer,
+            dataset,
+            config,
+            cache_dir,
+            optimizer,
+            f"Layer {layer}",
+            previous_trained_tokens=0,
+            max_tokens=int((1.0 - config.finetune_fraction) * config.num_train_tokens)
+            if config.finetune_fraction
+            else None,
+            post_step_hook=partial(post_step_hook, layer)
+            if post_step_hook is not None
+            else None,
         )
-        and not start_at_finetune
-    ):
-        # Always train later layers first
-        for layer in sorted(config.train_layers, reverse=True):
-            if reinit_weights:
-                saes[layer].init_weights(saes.get(layer + 1))
-            # NB: yeah, we're overwriting num_tokens, we have the same number for each layer though
-            # so it doesn't matter.
-            result, num_tokens = train_one_layer(
-                model,
-                tokenizer,
-                saes,
-                layer,
-                dataset,
-                config,
-                cache_dir,
-                previous_trained_tokens=0,
-                max_tokens=int(
-                    (1.0 - config.finetune_fraction) * config.num_train_tokens
-                )
-                if config.finetune_fraction
-                else None,
-                post_step_hook=post_step_hook,
-            )
-            for key, value in result.items():
-                train_result[layer][key].extend(value)
-
-    if start_at_finetune:
-        if start_at_token is None:
-            num_tokens = int((1.0 - config.finetune_fraction) * config.num_train_tokens)
-        else:
-            num_tokens = start_at_token
-
-    if config.method in (
-        TrainingMethod.e2e,
-        TrainingMethod.finetuned,
-        TrainingMethod.next_layer_finetuned,
-    ):
-        for layer in sorted(config.train_layers, reverse=True):
-            if reinit_weights and config.method is TrainingMethod.e2e:
-                saes[layer].init_weights(saes.get(layer + 1))
-            result, _ = train_e2e(
-                model,
-                tokenizer,
-                saes,
-                layer,
-                dataset,
-                config,
-                cache_dir,
-                previous_trained_tokens=num_tokens,
-                post_step_hook=post_step_hook,
-            )
-            for key, value in result.items():
-                train_result[layer][key].extend(value)
+        for key, value in result.items():
+            train_result[layer][key].extend(value)
 
     return train_result
+    # num_tokens = 0
+    # if (
+    #     config.method
+    #     in (
+    #         TrainingMethod.standard,
+    #         TrainingMethod.next_layer,
+    #         TrainingMethod.finetuned,
+    #     )
+    #     and not start_at_finetune
+    # ):
+    #     # Always train later layers first
+    #     for layer in sorted(config.train_layers, reverse=True):
+    #         if reinit_weights:
+    #             saes[layer].init_weights(saes.get(layer + 1))
+    #         # NB: yeah, we're overwriting num_tokens, we have the same number for each layer though
+    #         # so it doesn't matter.
+    #         result, num_tokens = train_one_layer(
+    #             model,
+    #             tokenizer,
+    #             saes,
+    #             layer,
+    #             dataset,
+    #             config,
+    #             cache_dir,
+    #             previous_trained_tokens=0,
+    #             max_tokens=int(
+    #                 (1.0 - config.finetune_fraction) * config.num_train_tokens
+    #             )
+    #             if config.finetune_fraction
+    #             else None,
+    #             post_step_hook=post_step_hook,
+    #         )
+    #         for key, value in result.items():
+    #             train_result[layer][key].extend(value)
+
+    # if start_at_finetune:
+    #     if start_at_token is None:
+    #         num_tokens = int((1.0 - config.finetune_fraction) * config.num_train_tokens)
+    #     else:
+    #         num_tokens = start_at_token
+
+    # if config.method in (
+    #     TrainingMethod.e2e,
+    #     TrainingMethod.finetuned,
+    #     TrainingMethod.next_layer_finetuned,
+    # ):
+    #     for layer in sorted(config.train_layers, reverse=True):
+    #         if reinit_weights and config.method is TrainingMethod.e2e:
+    #             saes[layer].init_weights(saes.get(layer + 1))
+    #         result, _ = train_e2e(
+    #             model,
+    #             tokenizer,
+    #             saes,
+    #             layer,
+    #             dataset,
+    #             config,
+    #             cache_dir,
+    #             previous_trained_tokens=num_tokens,
+    #             post_step_hook=post_step_hook,
+    #         )
+    #         for key, value in result.items():
+    #             train_result[layer][key].extend(value)
+
+    # return train_result

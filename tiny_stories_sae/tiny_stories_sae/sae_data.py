@@ -14,7 +14,9 @@ import zarr
 
 from .data_batch import DataBatch
 from .ops import ensure_directory
+from .replacement_model import ReplacementModel
 from .sae import SAE
+from .truncated_model import truncated_model
 
 
 @dataclass(kw_only=True)
@@ -170,6 +172,67 @@ def _ensure_tensor(
     return maybe_tensor
 
 
+def run_replacement_model(
+    model: ReplacementModel,
+    hooks: Dict[str, torch.nn.Module],
+    batch: DataBatch,
+    start_input: Optional[torch.Tensor] = None,
+    start_layer: int = -1,
+    end_layer: Optional[int] = None,
+    start_at_sae: bool = False,
+):
+    if start_layer == -1:
+        input_args = []
+        input_kwargs = dict(
+            input_ids=batch.input_ids.to(model.device),
+            position_ids=batch.position_ids.to(model.device),
+            attention_mask=batch.attention_mask.to(model.device),
+        )
+    else:
+        assert start_input is not None, (
+            "Must provide first layer's input if not starting from embedding"
+        )
+        input_args = [start_input]
+        input_kwargs = {}
+
+    activation_cache = {}
+
+    def _hook_output(probe_key, _module, _args, out):
+        activation_cache[probe_key] = out
+
+    if end_layer is None:
+        end_layer = model.config.num_layers + 1
+    with (
+        ExitStack() as hook_stack,
+        truncated_model(model, start_layer, end_layer, start_at_sae) as model_to_run,
+    ):
+        for hook_name, module in hooks.items():
+            hook_stack.enter_context(
+                module.register_forward_hook(partial(_hook_output, hook_name))
+            )
+        model_to_run(
+            *input_args,
+            **input_kwargs,
+            use_cache=False,
+        )
+
+    return activation_cache
+
+
+def load_cache(num_layers: int, cache_dir: str, cache_offset: int, batch: DataBatch):
+    # TODO: we should reconstruct the batch from cache, rather than needing the
+    # batch object here
+    cache = zarr.open_group(cache_dir, mode="r")
+    return {
+        layer: torch.tensor(
+            cache["activations"][
+                layer, cache_offset : cache_offset + batch.batch_size, :, :
+            ]
+        )
+        for layer in range(0, num_layers)
+    }
+
+
 def get_sae_data(
     base_model: torch.nn.Module,
     saes: Dict[int, SAE],
@@ -307,7 +370,9 @@ def get_sae_data(
             reconstruction_eval = "norm"
         if use_downstream_saes and sae is not None:
             replacement_features = sae.encode(replacement_original)
-            replacement_reconstruction = _ensure_tensor(sae.decode(replacement_features))
+            replacement_reconstruction = _ensure_tensor(
+                sae.decode(replacement_features)
+            )
         else:
             replacement_features = None
             replacement_reconstruction = None
