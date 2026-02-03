@@ -8,7 +8,7 @@ import torch
 from .sae import SAE
 
 
-class GenericReplacementLayer(torch.nn.Module):
+class SAEReplacementLayer(torch.nn.Module):
     def __init__(self, original_layer: torch.nn.Module, sae: torch.nn.Module):
         super().__init__()
         self.original_layer = original_layer
@@ -23,7 +23,7 @@ class GenericReplacementLayer(torch.nn.Module):
 
 
 class ReplacementModel:
-    sae_layers: Dict[str, SAE]
+    sae_layers: Dict[int, SAE]
 
     def __init__(self):
         raise NotImplementedError(
@@ -46,7 +46,8 @@ def _shallow_copy_model(source: torch.nn.Module):
 
 def make_replacement_model(
     original: torch.nn.Module,
-    sae_layers: Dict[str, SAE],
+    sae_layers: Dict[int, SAE],
+    module_path_prefix: str = "transformer.h."
 ) -> ReplacementModel:
     # Shallow copy into a new module instance, adding ReplacementModel as a mixin
     new_instance = _shallow_copy_model(original)
@@ -54,9 +55,10 @@ def make_replacement_model(
         "ReplacementModel", (ReplacementModel, original.__class__), {}
     )
     replacement_layers = {}
-    for module_path, sae in sae_layers.items():
+    for target_layer, sae in sae_layers.items():
+        module_path = f"{module_path_prefix}{target_layer}"
         original_layer = original.get_submodule(module_path)
-        replacement_layer = GenericReplacementLayer(original_layer, sae)
+        replacement_layer = SAEReplacementLayer(original_layer, sae)
         new_instance.set_submodule(module_path, replacement_layer)
         replacement_layers[module_path] = replacement_layer
 

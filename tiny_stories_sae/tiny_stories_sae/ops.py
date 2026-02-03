@@ -1,6 +1,7 @@
 import os
 from collections import defaultdict
 from io import StringIO
+from typing import Tuple
 
 import cloudpickle
 import matplotlib.pyplot as plt
@@ -251,3 +252,11 @@ def current_plot_to_svg(filename: str | None = None, plot_dir: str = "/tmp"):
         open(f"{plot_dir}/{filename}.svg", "w").write(plot_svg.read())
 
     return d
+
+
+def ensure_tensor(
+    maybe_tensor: Tuple[torch.Tensor, ...] | torch.Tensor,
+) -> torch.Tensor:
+    if isinstance(maybe_tensor, tuple):
+        return maybe_tensor[0]
+    return maybe_tensor

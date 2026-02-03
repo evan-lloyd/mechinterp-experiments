@@ -11,9 +11,11 @@ from datasets import IterableDataset
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
+from .activation_data import TrainingBatch, make_batch_for_evals
 from .data_batch import DataBatch
 from .encoder import InteractionEncoder
 from .multiline_progress import MultilineProgress
+from .next_layer_training import NextLayerTrainingStepper
 from .replacement_model import make_replacement_model
 from .sae import SAE
 from .sae_data import (
@@ -26,7 +28,7 @@ from .sae_data import (
 from .standard_training import StandardTrainingStepper
 from .tokenization import CONTEXT_LENGTH, input_generator
 from .training_step import Stepper
-from .validation import sae_evals
+from .validation import run_evals, sae_evals
 
 
 class TrainingMethod(Enum):
@@ -44,20 +46,35 @@ class TrainingConfig:
     training_batch_size: int
     e2e_batch_size: int
     eval_interval: int
-    reconstruction_weight: float | Mapping[int, float]
-    downstream_reconstruction_weight: float | Mapping[int, float]
+    reconstruction_weight: Mapping[int, float]
+    downstream_reconstruction_weight: Mapping[int, float]
     train_layers: List[int]
     lr: float = 1e-3
-    decoder_lr: Optional[float] = None
-    encoder_lr: Optional[float] = None
-    interaction_lr: Optional[float] = None
+    decoder_lr: Mapping[int, float | None] = None
+    encoder_lr: Mapping[int, float | None] = None
+    interaction_lr: Mapping[int, float | None] = None
     # Default schedule is constant
     main_lr_schedule: Callable[[float], float] = lambda frac_trained: 1.0
     finetune_lr_schedule: Callable[[float], float] = lambda frac_trained: 1.0
     use_downstream_saes: bool = True
-    balance_reconstruction_losses: bool = False | Mapping[int, bool]
+    balance_reconstruction_losses: bool | Mapping[int, bool] = False
     finetune_fraction: Optional[float] = None
     method: TrainingMethod
+
+    def __post_init__(self):
+        """Simplify accessing per-layer parameters; non-mappings are treated as if they are constant across
+        layers."""
+        for attr in (
+            "reconstruction_weight",
+            "downstream_reconstruction_weight",
+            "balance_reconstruction_losses",
+            "decoder_lr",
+            "encoder_lr",
+            "interaction_lr",
+        ):
+            val = getattr(self, attr)
+            if not isinstance(val, Mapping):
+                setattr(self, attr, defaultdict(lambda v=val: v))
 
 
 def sae_losses(
@@ -243,6 +260,7 @@ def maybe_balance_reconstruction_weights(
 
 def training_loop(
     stepper: Stepper,
+    eval_fn: Callable[[TrainingBatch], Dict[str, float]],
     tokenizer: AutoTokenizer,
     dataset: IterableDataset,
     config: TrainingConfig,
@@ -286,7 +304,7 @@ def training_loop(
             cache = None
         batch.token_mask = batch.token_mask.to(stepper.base_model.device)
         training_batch = stepper.make_batch(batch, cache)
-        losses = stepper.step(training_batch)
+        losses = stepper.step(training_batch, config)
 
         # After first batch, step before doing evals
         if num_used_tokens > 0:
@@ -294,7 +312,8 @@ def training_loop(
             num_used_tokens += batch.num_tokens
 
         if num_used_tokens >= eval_threshold:
-            progress.set_postfix(losses, refresh=False)
+            evals = eval_fn(training_batch)
+            progress.set_postfix(evals, refresh=False)
             eval_threshold = min(eval_threshold + config.eval_interval, max_tokens)
 
         # On the first batch only, we do evals before updating params
@@ -330,11 +349,7 @@ def train_one_layer(
     train_result = defaultdict(list)
     replacement_model = make_replacement_model(
         model,
-        {
-            f"transformer.h.{layer}": sae
-            for layer, sae in saes.items()
-            if layer >= target_layer
-        },
+        {layer: sae for layer, sae in saes.items() if layer >= target_layer},
     )
     optimizer = make_optimizer(saes, [target_layer], config)
 
@@ -518,11 +533,7 @@ def train_e2e(
 
     replacement_model = make_replacement_model(
         model,
-        {
-            f"transformer.h.{layer}": sae
-            for layer, sae in saes.items()
-            if layer >= target_layer
-        },
+        {layer: sae for layer, sae in saes.items() if layer >= target_layer},
     )
 
     progress = MultilineProgress(
@@ -718,6 +729,32 @@ def train_e2e(
     return train_result, num_used_tokens
 
 
+def _train_evals(model: torch.nn.Module, saes: Dict[int, SAE], target_layer: int):
+    """For consistency across methods, we always run our evals with the full replacement model
+    starting from the target layer."""
+    eval_model = make_replacement_model(model, saes)
+
+    def eval_fn(training_batch: TrainingBatch) -> Dict[str, float]:
+        result = run_evals(
+            make_batch_for_evals(
+                model,
+                eval_model,
+                training_batch,
+                start_layer=target_layer,
+            ),
+            # Want evals for this layer, next layer, and/or on logits
+            list({target_layer, target_layer + 1, model.config.num_layers}),
+            aggregate=True,
+        )
+        return {
+            "rre": result[target_layer].rre,
+            "next_rre": result[target_layer+1].rre,
+            "rep_kl": result[model.config.num_layers].kl,
+        }
+
+    return eval_fn
+
+
 def train(
     model: torch.nn.Module,
     tokenizer: AutoTokenizer,
@@ -739,9 +776,16 @@ def train(
         if reinit_weights:
             saes[layer].init_weights(saes.get(layer + 1))
         optimizer = make_optimizer(saes, [layer], config)
-        stepper = StandardTrainingStepper(model, layer, saes)
+        if config.method in (TrainingMethod.standard, TrainingMethod.finetuned):
+            stepper = StandardTrainingStepper(model, layer, saes)
+        elif config.method in (
+            TrainingMethod.next_layer,
+            TrainingMethod.next_layer_finetuned,
+        ):
+            stepper = NextLayerTrainingStepper(model, layer, saes)
         result, num_tokens = training_loop(
             stepper,
+            _train_evals(model, saes, layer),
             tokenizer,
             dataset,
             config,

@@ -1,9 +1,9 @@
-from enum import Enum
-from typing import Literal
+from typing import Callable, Literal
 
 import numpy as np
 import torch
 
+from .activation_data import ActivationBatch
 from .sae_data import DataBatch
 
 """NB: The losses here are deliberately taking a mean, rather than sum, on the final dimension, to factor out
@@ -66,4 +66,18 @@ def kl_eval(actual: torch.Tensor, target: torch.Tensor):
 def rre_eval(actual: torch.Tensor, target: torch.Tensor):
     return torch.linalg.vector_norm(actual - target, dim=-1) / (
         torch.linalg.vector_norm(target, dim=-1) + 1e-8
+    )
+
+
+def downstream_loss(
+    replacement: ActivationBatch,
+    baseline: ActivationBatch,
+    batch: DataBatch,
+    downstream_attr: str,
+    downstream_fn: Callable[[torch.Tensor, torch.Tensor, DataBatch], torch.Tensor],
+) -> torch.Tensor:
+    return downstream_fn(
+        getattr(replacement, downstream_attr),
+        getattr(baseline, downstream_attr),
+        batch,
     )

@@ -13,7 +13,7 @@ import torch
 import zarr
 
 from .data_batch import DataBatch
-from .ops import ensure_directory
+from .ops import ensure_directory, ensure_tensor
 from .replacement_model import ReplacementModel
 from .sae import SAE
 from .truncated_model import truncated_model
@@ -159,61 +159,6 @@ def cache_on_disk(cache_dir: str, model: torch.nn.Module, batch: DataBatch):
     json.dump(metadata, open(f"{cache_dir}/{CACHE_METADATA_FILENAME}", "w"))
 
 
-def _ensure_tensor(
-    maybe_tensor: Tuple[torch.Tensor, ...] | torch.Tensor,
-) -> torch.Tensor:
-    if isinstance(maybe_tensor, tuple):
-        return maybe_tensor[0]
-    return maybe_tensor
-
-
-def run_replacement_model(
-    model: ReplacementModel,
-    hooks: Dict[str, torch.nn.Module],
-    batch: DataBatch,
-    start_input: Optional[torch.Tensor] = None,
-    start_layer: int = -1,
-    end_layer: Optional[int] = None,
-    start_at_sae: bool = False,
-):
-    if start_layer == -1:
-        input_args = []
-        input_kwargs = dict(
-            input_ids=batch.input_ids.to(model.device),
-            position_ids=batch.position_ids.to(model.device),
-            attention_mask=batch.attention_mask.to(model.device),
-        )
-    else:
-        assert start_input is not None, (
-            "Must provide first layer's input if not starting from embedding"
-        )
-        input_args = [start_input]
-        input_kwargs = {}
-
-    activation_cache = {}
-
-    def _hook_output(probe_key, _module, _args, out):
-        activation_cache[probe_key] = out
-
-    if end_layer is None:
-        end_layer = model.config.num_layers + 1
-    with (
-        ExitStack() as hook_stack,
-        truncated_model(model, start_layer, end_layer, start_at_sae) as model_to_run,
-    ):
-        for hook_name, module in hooks.items():
-            hook_stack.enter_context(
-                module.register_forward_hook(partial(_hook_output, hook_name))
-            )
-        model_to_run(
-            *input_args,
-            **input_kwargs,
-            use_cache=False,
-        )
-
-    return activation_cache
-
-
 def load_cache(num_layers: int, cache_dir: str, cache_offset: int, batch: DataBatch):
     # TODO: we should reconstruct the batch from cache, rather than needing the
     # batch object here
@@ -286,7 +231,7 @@ def get_sae_data(
     # Handle model output as the n+1th "layer"
     if end_layer == base_model.config.num_layers:
         if logits is None:
-            layer_norm_output = _ensure_tensor(activation_cache[end_layer])
+            layer_norm_output = ensure_tensor(activation_cache[end_layer])
             logits = base_model.lm_head(
                 layer_norm_output.view(
                     (-1, layer_norm_output.shape[-2], layer_norm_output.shape[-1])
@@ -305,9 +250,9 @@ def get_sae_data(
         min(end_layer, base_model.config.num_layers - 1), start_layer - 1, -1
     ):
         sae = saes[layer]
-        original = _ensure_tensor(activation_cache[layer])
+        original = ensure_tensor(activation_cache[layer])
         features = sae.encode(original)
-        reconstruction = _ensure_tensor(sae.decode(features))
+        reconstruction = ensure_tensor(sae.decode(features))
 
         baseline_data[layer] = SAEData(
             target_layer=layer,
@@ -341,7 +286,7 @@ def get_sae_data(
             )
         sae = saes.get(layer)
         if layer == base_model.config.num_layers:
-            replacement_original = _ensure_tensor(
+            replacement_original = ensure_tensor(
                 base_model.transformer.ln_f(layer_input)
             )
             replacement_original = base_model.lm_head(
@@ -355,7 +300,7 @@ def get_sae_data(
             )
             reconstruction_eval = "KL"
         else:
-            replacement_original = _ensure_tensor(
+            replacement_original = ensure_tensor(
                 base_model.transformer.h[layer](
                     layer_input,
                     attention_mask=batch.attention_mask.to(base_model.device),
@@ -365,9 +310,7 @@ def get_sae_data(
             reconstruction_eval = "norm"
         if use_downstream_saes and sae is not None:
             replacement_features = sae.encode(replacement_original)
-            replacement_reconstruction = _ensure_tensor(
-                sae.decode(replacement_features)
-            )
+            replacement_reconstruction = ensure_tensor(sae.decode(replacement_features))
         else:
             replacement_features = None
             replacement_reconstruction = None

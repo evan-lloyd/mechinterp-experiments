@@ -12,18 +12,17 @@ from transformers import AutoTokenizer
 
 from tiny_stories_sae.training_step import ActivationBatch, TrainingBatch
 
+from .activation_data import make_batch_for_evals, run_replacement_model
 from .data_batch import DataBatch
 from .metrics import kl_eval, rre_eval
-from .ops import generate
+from .ops import ensure_tensor, generate
 from .replacement_model import make_replacement_model
 from .sae import SAE
 from .sae_data import (
     SAEData,
-    _ensure_tensor,
     get_logits,
     get_sae_data,
     load_cache,
-    run_replacement_model,
 )
 from .tokenization import CONTEXT_LENGTH, input_generator
 
@@ -72,11 +71,15 @@ def run_validations(
     if end_layer is None:
         end_layer = model.config.num_layers + 1
     full_replacement_model = make_replacement_model(
-        model, {f"transformer.h.{layer}": sae for layer, sae in saes.items()}
+        model,
+        {
+            layer: saes[layer]
+            for layer in range(start_layer, end_layer)
+            if layer in saes
+        },
     )
     model.eval()
     num_tokens_consumed = 0
-    num_inputs = 0
     results = ValidationResult(
         layer_results={layer: LayerEval() for layer in range(start_layer, end_layer)},
         position_ids=np.empty((0,)),
@@ -130,62 +133,28 @@ def run_validations(
             )
         baseline_activations = {
             layer: ActivationBatch(
-                layer_output=_ensure_tensor(
+                layer_output=ensure_tensor(
                     baseline_run[layer],
                 ).to(model.device)
             )
             if layer < model.config.num_layers
             else ActivationBatch(
-                logits=_ensure_tensor(
+                logits=ensure_tensor(
                     baseline_run[layer],
                 ).to(model.device)
             )
             for layer in baseline_run
             if layer in range(start_layer, end_layer)
         }
-        # If we loaded from disk, we didn't cache logits
-        if (
-            model.config.num_layers not in baseline_activations
-            and end_layer > model.config.num_layers
-        ):
-            baseline_activations[model.config.num_layers] = ActivationBatch(
-                logits=_ensure_tensor(
-                    run_replacement_model(
-                        model,
-                        {"logits": model.lm_head},
-                        batch,
-                        start_layer=max(baseline_activations.keys()) + 1,
-                        end_layer=model.config.num_layers + 1,
-                        start_input=baseline_activations[
-                            max(baseline_activations.keys())
-                        ].layer_output,
-                    )["logits"]
-                )
-            )
-        full_replacement_run = run_replacement_model(
-            full_replacement_model,
-            {
-                layer: full_replacement_model.transformer.h[layer].sae
-                if layer < model.config.num_layers
-                else full_replacement_model.lm_head
-                for layer in range(start_layer, end_layer)
-            },
-            batch,
-            start_input=baseline_activations[start_layer].layer_output,
-            start_layer=start_layer,
-            end_layer=end_layer,
-            start_at_sae=True,
-        )
-        full_replacement_activations = {
-            layer: ActivationBatch(
-                sae_output=_ensure_tensor(full_replacement_run[layer])
-            )
-            if layer < model.config.num_layers
-            else ActivationBatch(logits=_ensure_tensor(full_replacement_run[layer]))
-            for layer in range(start_layer, end_layer)
-        }
         evals = run_evals(
-            TrainingBatch(batch, full_replacement_activations, baseline_activations),
+            make_batch_for_evals(
+                model,
+                full_replacement_model,
+                TrainingBatch(batch, {}, baseline_activations, replacement_layers=[]),
+                start_layer,
+                end_layer,
+            ),
+            list(range(start_layer, end_layer)),
             aggregate=False,
         )
 
@@ -205,6 +174,7 @@ def run_validations(
 @torch.no_grad
 def run_evals(
     batch: TrainingBatch,
+    layers: List[int],
     aggregate: bool = True,
 ) -> Dict[int, AggregatedLayerEval | LayerEval]:
     assert set(batch.baseline_activations.keys()) == set(
@@ -219,7 +189,7 @@ def run_evals(
         eval_type = "np"
 
     result = {}
-    for layer in batch.baseline_activations.keys():
+    for layer in layers:
         replacement = batch.replacement_activations[layer]
         baseline = batch.baseline_activations[layer]
         if baseline.logits is not None:
@@ -346,7 +316,7 @@ def run_replacement_evals(
 ):
     token_mask = batch.token_mask.to(base_model.device)
     replacement_model = make_replacement_model(
-        base_model, {f"transformer.h.{layer}": sae for layer, sae in saes.items()}
+        base_model, {layer: sae for layer, sae in saes.items()}
     )
     replacement_logits = replacement_model(
         input_ids=batch.input_ids.to(replacement_model.device),
@@ -468,7 +438,7 @@ def generate_with_replacement(
     stream: bool = True,
 ):
     replacement_model = make_replacement_model(
-        model, {f"transformer.h.{layer}": sae for layer, sae in saes.items()}
+        model, {layer: sae for layer, sae in saes.items()}
     )
     return generate(
         input,
