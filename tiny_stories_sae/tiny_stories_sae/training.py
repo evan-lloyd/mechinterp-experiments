@@ -749,6 +749,7 @@ def _train_evals(model: torch.nn.Module, saes: Dict[int, SAE], target_layer: int
         return {
             "rre": result[target_layer].rre,
             "next_rre": result[target_layer+1].rre,
+            "L0": result[target_layer].l0,
             "rep_kl": result[model.config.num_layers].kl,
         }
 

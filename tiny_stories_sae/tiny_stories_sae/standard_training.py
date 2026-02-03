@@ -1,8 +1,8 @@
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Dict
 
 import torch
 
-from .activation_data import TrainingBatch, make_activation_batch
+from .activation_data import ActivationBatch, TrainingBatch, make_activation_batch
 from .data_batch import DataBatch
 from .metrics import mse_loss
 from .replacement_model import (
@@ -29,24 +29,17 @@ class StandardTrainingStepper(Stepper):
         self.target_layer = target_layer
         self.sae = saes[target_layer]
 
-    def make_batch(
-        self, batch: DataBatch, cache: Optional[Dict[str, torch.Tensor]]
-    ) -> TrainingBatch:
-        baseline_activations = self.run_baseline([self.target_layer], batch, cache)
-        replacement_activations = make_activation_batch(
-            self.train_model,
+    def run_replacement(
+        self, batch: DataBatch, baseline_activations: ActivationBatch
+    ) -> Dict[int, ActivationBatch]:
+        return make_activation_batch(
+            self.replacement_model,
             [(self.target_layer, "sae")],
             batch,
             start_input=baseline_activations[self.target_layer].layer_output,
             start_layer=self.target_layer,
             end_layer=self.target_layer + 1,
             start_at_sae=True,
-        )
-        return TrainingBatch(
-            batch,
-            replacement_activations=replacement_activations,
-            baseline_activations=baseline_activations,
-            replacement_layers=[self.target_layer],
         )
 
     def step(

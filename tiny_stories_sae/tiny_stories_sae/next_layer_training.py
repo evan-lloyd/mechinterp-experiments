@@ -1,11 +1,8 @@
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import torch
 
-from .activation_data import (
-    TrainingBatch,
-    make_activation_batch,
-)
+from .activation_data import ActivationBatch, TrainingBatch, make_activation_batch
 from .data_batch import DataBatch
 from .metrics import cos_dist_loss, downstream_loss, kl_loss, mse_loss
 from .replacement_model import (
@@ -36,27 +33,15 @@ class NextLayerTrainingStepper(Stepper):
         self.target_layer = target_layer
         self.sae = saes[target_layer]
 
-    def make_batch(
-        self, batch: DataBatch, cache: Optional[Dict[str, torch.Tensor]]
-    ) -> TrainingBatch:
-        relevant_layers = [self.target_layer, self.target_layer + 1]
-        baseline_activations = self.run_baseline(relevant_layers, batch, cache)
-
-        # Need SAE features for next layer?
-        if self.target_layer + 1 < self.train_model.config.num_layers:
-            with torch.no_grad():
-                baseline_activations[
-                    self.target_layer + 1
-                ].sae_features = self.train_model.transformer.h[
-                    self.target_layer + 1
-                ].sae.encode(baseline_activations[self.target_layer + 1].layer_output)
-
-        replacement_activations = make_activation_batch(
-            self.train_model,
+    def run_replacement(
+        self, batch: DataBatch, baseline_activations: ActivationBatch
+    ) -> Dict[int, ActivationBatch]:
+        return make_activation_batch(
+            self.replacement_model,
             [
                 (self.target_layer, "sae"),
                 (self.target_layer + 1, "layer")
-                if self.target_layer + 1 >= self.train_model.config.num_layers
+                if self.target_layer + 1 >= self.replacement_model.config.num_layers
                 else (self.target_layer + 1, "sae"),
             ],
             batch,
@@ -65,12 +50,26 @@ class NextLayerTrainingStepper(Stepper):
             end_layer=self.target_layer + 2,
             start_at_sae=True,
         )
-        return TrainingBatch(
-            batch,
-            replacement_activations=replacement_activations,
-            baseline_activations=baseline_activations,
-            replacement_layers=[self.target_layer, self.target_layer + 1],
-        )
+
+    @property
+    def run_layers(self) -> List[int]:
+        return [self.target_layer, self.target_layer + 1]
+
+    def run_baseline(
+        self, batch: DataBatch, cache: torch.Tensor | None
+    ) -> Dict[int, ActivationBatch]:
+        baseline_activations = super().run_baseline(batch, cache)
+
+        # Need SAE features for next layer?
+        if self.target_layer + 1 < self.replacement_model.config.num_layers:
+            with torch.no_grad():
+                baseline_activations[
+                    self.target_layer + 1
+                ].sae_features = self.replacement_model.transformer.h[
+                    self.target_layer + 1
+                ].sae.encode(baseline_activations[self.target_layer + 1].layer_output)
+
+        return baseline_activations
 
     def step(
         self, training_batch: TrainingBatch, config: "TrainingConfig"

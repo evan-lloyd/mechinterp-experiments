@@ -17,7 +17,7 @@ from .activation_data import (
     make_batch_for_evals,
 )
 from .data_batch import DataBatch
-from .metrics import kl_eval, rre_eval
+from .metrics import kl_eval, l0_eval, rre_eval
 from .ops import generate
 from .replacement_model import make_replacement_model
 from .sae import SAE
@@ -31,21 +31,19 @@ from .tokenization import CONTEXT_LENGTH, input_generator
 
 
 @dataclass(kw_only=True)
-class AggregatedLayerEval:
-    rre: float | None = None
-    kl: float | None = None
-
-
-@dataclass(kw_only=True)
 class LayerEval:
-    rre: np.ndarray | None = None
-    kl: np.ndarray | None = None
+    rre: np.ndarray | float | None = None
+    kl: np.ndarray | float | None = None
+    l0: np.ndarray | float | None = None
 
-    def update(self, other: "AggregatedLayerEval"):
+    def update(self, other: "LayerEval"):
         for attr in self.__class__.__dataclass_fields__:
             if getattr(self, attr) is None:
                 setattr(self, attr, getattr(other, attr))
             elif getattr(other, attr) is not None:
+                assert isinstance(getattr(self, attr), np.ndarray) and isinstance(
+                    getattr(other, attr), np.ndarray
+                ), "Trying to combine non-aggregated LayerEval"
                 setattr(
                     self, attr, np.concat((getattr(self, attr), getattr(other, attr)))
                 )
@@ -163,7 +161,7 @@ def run_evals(
     batch: TrainingBatch,
     layers: List[int],
     aggregate: bool = True,
-) -> Dict[int, AggregatedLayerEval | LayerEval]:
+) -> Dict[int, LayerEval]:
     assert set(batch.baseline_activations.keys()) == set(
         batch.replacement_activations.keys()
     ), (
@@ -171,10 +169,8 @@ def run_evals(
     )
 
     if aggregate:
-        eval_class = AggregatedLayerEval
         eval_type = "float"
     else:
-        eval_class = LayerEval
         eval_type = "np"
 
     result = {}
@@ -182,7 +178,7 @@ def run_evals(
         replacement = batch.replacement_activations[layer]
         baseline = batch.baseline_activations[layer]
         if baseline.logits is not None:
-            result[layer] = eval_class(
+            result[layer] = LayerEval(
                 kl=kl_eval(
                     replacement.logits,
                     baseline.logits,
@@ -191,13 +187,19 @@ def run_evals(
                 )
             )
         else:
-            result[layer] = eval_class(
+            result[layer] = LayerEval(
                 rre=rre_eval(
                     replacement.sae_output,
                     baseline.layer_output,
                     batch.input_data,
                     eval_type,
-                )
+                ),
+                l0=l0_eval(
+                    replacement.sae_features,
+                    None,
+                    batch.input_data,
+                    eval_type,
+                ),
             )
 
     return result

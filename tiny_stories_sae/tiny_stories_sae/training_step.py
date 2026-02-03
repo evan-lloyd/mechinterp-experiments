@@ -5,7 +5,6 @@ import torch
 
 from .activation_data import ActivationBatch, TrainingBatch, make_activation_batch
 from .data_batch import DataBatch
-from .ops import ensure_tensor
 from .replacement_model import ReplacementModel
 
 if TYPE_CHECKING:
@@ -56,7 +55,7 @@ if TYPE_CHECKING:
 
 class Stepper(ABC):
     base_model: torch.nn.Module
-    train_model: ReplacementModel
+    replacement_model: ReplacementModel
 
     def __init__(
         self,
@@ -64,20 +63,36 @@ class Stepper(ABC):
         train_model: torch.nn.Module,
     ):
         self.base_model = base_model
-        self.train_model = train_model
+        self.replacement_model = train_model
 
-    @abstractmethod
+    @property
+    def run_layers(self) -> List[int]:
+        return sorted(list(self.replacement_model.sae_layers.keys()))
+
     def make_batch(
         self, batch: DataBatch, cache: Optional[Dict[str, torch.Tensor]]
-    ) -> TrainingBatch: ...
+    ) -> TrainingBatch:
+        baseline_activations = self.run_baseline(batch, cache)
+        replacement_activations = self.run_replacement(batch, baseline_activations)
+        return TrainingBatch(
+            batch,
+            replacement_activations=replacement_activations,
+            baseline_activations=baseline_activations,
+            replacement_layers=self.run_layers,
+        )
 
     @abstractmethod
     def step(
         self, training_batch: TrainingBatch, config: "TrainingConfig"
     ) -> Dict[str, torch.Tensor]: ...
 
+    @abstractmethod
+    def run_replacement(
+        self, batch: DataBatch, baseline_activations: ActivationBatch
+    ) -> Dict[int, ActivationBatch]: ...
+
     def run_baseline(
-        self, wanted_layers: List[int], batch: DataBatch, cache: torch.Tensor | None
+        self, batch: DataBatch, cache: torch.Tensor | None
     ) -> Dict[int, ActivationBatch]:
         if cache is not None:
             base_run = cache
@@ -87,15 +102,15 @@ class Stepper(ABC):
             with torch.no_grad():
                 base_run = make_activation_batch(
                     self.base_model,
-                    [(layer, "layer") for layer in wanted_layers],
+                    [(layer, "layer") for layer in self.run_layers],
                     batch,
                     start_layer=-1,  # not cached, so we start from raw input
-                    end_layer=max(wanted_layers) + 1,  # non-inclusive range
+                    end_layer=max(self.run_layers) + 1,  # non-inclusive range
                 )
 
         # We don't cache logits, so we may need to reconstruct them if loading from cache.
         if (
-            self.base_model.config.num_layers in wanted_layers
+            self.base_model.config.num_layers in self.run_layers
             and self.base_model.config.num_layers not in base_run
         ):
             with torch.no_grad():
@@ -110,4 +125,4 @@ class Stepper(ABC):
                     + 1,  # non-inclusive range
                 )[self.base_model.config.num_layers]
 
-        return {k: v for k, v in base_run.items() if k in wanted_layers}
+        return {k: v for k, v in base_run.items() if k in self.run_layers}
