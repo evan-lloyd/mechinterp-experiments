@@ -47,7 +47,7 @@ def _shallow_copy_model(source: torch.nn.Module):
 def make_replacement_model(
     original: torch.nn.Module,
     sae_layers: Dict[int, SAE],
-    module_path_prefix: str = "transformer.h."
+    module_path_prefix: str = "transformer.h.",
 ) -> ReplacementModel:
     # Shallow copy into a new module instance, adding ReplacementModel as a mixin
     new_instance = _shallow_copy_model(original)
@@ -60,7 +60,7 @@ def make_replacement_model(
         original_layer = original.get_submodule(module_path)
         replacement_layer = SAEReplacementLayer(original_layer, sae)
         new_instance.set_submodule(module_path, replacement_layer)
-        replacement_layers[module_path] = replacement_layer
+        replacement_layers[target_layer] = replacement_layer
 
     object.__setattr__(new_instance, "sae_layers", replacement_layers)
 

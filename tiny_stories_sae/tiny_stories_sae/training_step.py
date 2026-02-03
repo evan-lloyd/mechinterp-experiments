@@ -1,11 +1,11 @@
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import torch
 
-from .activation_data import ActivationBatch, TrainingBatch, run_replacement_model
+from .activation_data import ActivationBatch, TrainingBatch, make_activation_batch
 from .data_batch import DataBatch
-from .metrics import cos_dist_loss, kl_loss, mse_loss
+from .ops import ensure_tensor
 from .replacement_model import ReplacementModel
 
 if TYPE_CHECKING:
@@ -78,35 +78,36 @@ class Stepper(ABC):
 
     def run_baseline(
         self, wanted_layers: List[int], batch: DataBatch, cache: torch.Tensor | None
-    ):
+    ) -> Dict[int, ActivationBatch]:
         if cache is not None:
             base_run = cache
-            for k, v in base_run.items():
-                base_run[k] = v.to(self.base_model.device)
+            for k, v in list(base_run.items()):
+                base_run[k] = ActivationBatch(layer_output=v.to(self.base_model.device))
         else:
-            base_run = run_replacement_model(
-                self.base_model,
-                {
-                    layer: self.base_model.transformer.h[layer]
-                    if layer < self.base_model.config.num_layers
-                    else self.base_model.lm_head
-                    for layer in wanted_layers
-                },
-                batch,
-                start_layer=-1,  # not cached, so we start from raw input
-                end_layer=max(wanted_layers) + 1,  # non-inclusive range
-            )
+            with torch.no_grad():
+                base_run = make_activation_batch(
+                    self.base_model,
+                    [(layer, "layer") for layer in wanted_layers],
+                    batch,
+                    start_layer=-1,  # not cached, so we start from raw input
+                    end_layer=max(wanted_layers) + 1,  # non-inclusive range
+                )
 
         # We don't cache logits, so we may need to reconstruct them if loading from cache.
         if (
             self.base_model.config.num_layers in wanted_layers
             and self.base_model.config.num_layers not in base_run
         ):
-            base_run[self.base_model.config.num_layers] = run_replacement_model(
-                self.base_model,
-                {self.base_model.config.num_layers: self.base_model.lm_head},
-                batch,
-                start_layer=-1,  # not cached, so we start from raw input
-                end_layer=max(wanted_layers) + 1,  # non-inclusive range
-            )[self.base_model.config.num_layers]
-        return base_run
+            with torch.no_grad():
+                start_layer = max(k for k in base_run)
+                base_run[self.base_model.config.num_layers] = make_activation_batch(
+                    self.base_model,
+                    [(self.base_model.config.num_layers, "layer")],
+                    batch,
+                    start_layer=start_layer + 1,
+                    start_input=base_run[start_layer].layer_output,
+                    end_layer=self.base_model.config.num_layers
+                    + 1,  # non-inclusive range
+                )[self.base_model.config.num_layers]
+
+        return {k: v for k, v in base_run.items() if k in wanted_layers}

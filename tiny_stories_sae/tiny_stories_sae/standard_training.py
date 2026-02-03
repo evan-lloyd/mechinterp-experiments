@@ -2,10 +2,9 @@ from typing import TYPE_CHECKING, Dict, Optional
 
 import torch
 
-from .activation_data import ActivationBatch, TrainingBatch, run_replacement_model
+from .activation_data import TrainingBatch, make_activation_batch
 from .data_batch import DataBatch
 from .metrics import mse_loss
-from .ops import ensure_tensor
 from .replacement_model import (
     make_replacement_model,
 )
@@ -33,34 +32,20 @@ class StandardTrainingStepper(Stepper):
     def make_batch(
         self, batch: DataBatch, cache: Optional[Dict[str, torch.Tensor]]
     ) -> TrainingBatch:
-        baseline_run = self.run_baseline([self.target_layer], batch, cache)
-        replacement_run = run_replacement_model(
+        baseline_activations = self.run_baseline([self.target_layer], batch, cache)
+        replacement_activations = make_activation_batch(
             self.train_model,
-            {
-                "sae_output": self.train_model.transformer.h[
-                    self.target_layer
-                ].sae,
-            },
+            [(self.target_layer, "sae")],
             batch,
-            start_input=ensure_tensor(
-                baseline_run[self.target_layer].to(self.base_model.device)
-            ),
+            start_input=baseline_activations[self.target_layer].layer_output,
             start_layer=self.target_layer,
             end_layer=self.target_layer + 1,
             start_at_sae=True,
         )
         return TrainingBatch(
             batch,
-            replacement_activations={
-                self.target_layer: ActivationBatch(
-                    sae_output=ensure_tensor(replacement_run["sae_output"])
-                )
-            },
-            baseline_activations={
-                self.target_layer: ActivationBatch(
-                    layer_output=ensure_tensor(baseline_run[self.target_layer])
-                )
-            },
+            replacement_activations=replacement_activations,
+            baseline_activations=baseline_activations,
             replacement_layers=[self.target_layer],
         )
 

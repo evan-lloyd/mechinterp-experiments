@@ -1,12 +1,13 @@
-from itertools import product
 from typing import TYPE_CHECKING, Dict, Optional
 
 import torch
 
-from .activation_data import ActivationBatch, TrainingBatch, run_replacement_model
+from .activation_data import (
+    TrainingBatch,
+    make_activation_batch,
+)
 from .data_batch import DataBatch
 from .metrics import cos_dist_loss, downstream_loss, kl_loss, mse_loss
-from .ops import ensure_tensor
 from .replacement_model import (
     make_replacement_model,
 )
@@ -39,66 +40,37 @@ class NextLayerTrainingStepper(Stepper):
         self, batch: DataBatch, cache: Optional[Dict[str, torch.Tensor]]
     ) -> TrainingBatch:
         relevant_layers = [self.target_layer, self.target_layer + 1]
-        baseline_run = self.run_baseline(relevant_layers, batch, cache)
+        baseline_activations = self.run_baseline(relevant_layers, batch, cache)
 
-        hooks = {
-            (self.target_layer, "sae_output"): self.train_model.transformer.h[
-                self.target_layer
-            ].sae,
-            (self.target_layer, "sae_features"): self.train_model.transformer.h[
-                self.target_layer
-            ].sae.encoder,
-        }
-        if self.target_layer + 1 >= self.train_model.config.num_layers:
-            hooks[self.target_layer + 1] = self.train_model.lm_head
-        else:
-            hooks[(self.target_layer + 1, "sae_output")] = (
-                self.train_model.transformer.h[self.target_layer + 1].sae
-            )
+        # Need SAE features for next layer?
+        if self.target_layer + 1 < self.train_model.config.num_layers:
+            with torch.no_grad():
+                baseline_activations[
+                    self.target_layer + 1
+                ].sae_features = self.train_model.transformer.h[
+                    self.target_layer + 1
+                ].sae.encode(baseline_activations[self.target_layer + 1].layer_output)
 
-            hooks[(self.target_layer + 1, "sae_features")] = (
-                self.train_model.transformer.h[self.target_layer + 1].sae.encoder
-            )
-        replacement_run = run_replacement_model(
+        replacement_activations = make_activation_batch(
             self.train_model,
-            hooks,
+            [
+                (self.target_layer, "sae"),
+                (self.target_layer + 1, "layer")
+                if self.target_layer + 1 >= self.train_model.config.num_layers
+                else (self.target_layer + 1, "sae"),
+            ],
             batch,
-            start_input=ensure_tensor(
-                baseline_run[self.target_layer].to(self.base_model.device)
-            ),
+            start_input=baseline_activations[self.target_layer].layer_output,
             start_layer=self.target_layer,
             end_layer=self.target_layer + 2,
             start_at_sae=True,
         )
-        result = TrainingBatch(
+        return TrainingBatch(
             batch,
-            replacement_activations={
-                layer: ActivationBatch(
-                    sae_features=ensure_tensor(
-                        replacement_run[(layer, "sae_features")]
-                    ),
-                    sae_output=ensure_tensor(replacement_run[(layer, "sae_output")]),
-                )
-                if layer < self.train_model.config.num_layers
-                else ActivationBatch(logits=ensure_tensor(replacement_run[layer]))
-                for layer in relevant_layers
-            },
-            baseline_activations={
-                layer: ActivationBatch(layer_output=ensure_tensor(baseline_run[layer]))
-                if layer < self.base_model.config.num_layers
-                else ActivationBatch(logits=ensure_tensor(baseline_run[layer]))
-                for layer in relevant_layers
-            },
-            replacement_layers=[self.target_layer],
+            replacement_activations=replacement_activations,
+            baseline_activations=baseline_activations,
+            replacement_layers=[self.target_layer, self.target_layer + 1],
         )
-        # Need SAE features for next layer?
-        if self.target_layer + 1 < self.train_model.config.num_layers:
-            result.baseline_activations[
-                self.target_layer + 1
-            ].sae_features = self.train_model.transformer.h[
-                self.target_layer + 1
-            ].sae.encode(baseline_run[self.target_layer + 1])
-        return result
 
     def step(
         self, training_batch: TrainingBatch, config: "TrainingConfig"

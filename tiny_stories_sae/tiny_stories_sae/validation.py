@@ -10,12 +10,15 @@ from datasets import IterableDataset
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
-from tiny_stories_sae.training_step import ActivationBatch, TrainingBatch
-
-from .activation_data import make_batch_for_evals, run_replacement_model
+from .activation_data import (
+    ActivationBatch,
+    TrainingBatch,
+    make_activation_batch,
+    make_batch_for_evals,
+)
 from .data_batch import DataBatch
 from .metrics import kl_eval, rre_eval
-from .ops import ensure_tensor, generate
+from .ops import generate
 from .replacement_model import make_replacement_model
 from .sae import SAE
 from .sae_data import (
@@ -112,40 +115,24 @@ def run_validations(
 
         batch.token_mask = batch.token_mask.to(model.device)
         if cache_dir is not None:
-            baseline_run = load_cache(
+            baseline_activations = load_cache(
                 model.config.num_layers,
                 cache_dir,
                 step * inference_batch_size,
                 batch,
             )
+            for k, v in list(baseline_activations.items()):
+                baseline_activations[k] = ActivationBatch(
+                    layer_output=v.to(model.device)
+                )
         else:
-            baseline_run = run_replacement_model(
+            baseline_activations = make_activation_batch(
                 model,
-                {
-                    layer: model.transformer.h[layer]
-                    if layer < model.config.num_layers
-                    else model.lm_head
-                    for layer in range(start_layer, end_layer)
-                },
+                [(layer, "layer") for layer in range(start_layer, end_layer)],
                 batch,
-                start_layer=-1,
+                start_layer=-1,  # not cached, so we start from raw input
                 end_layer=end_layer,
             )
-        baseline_activations = {
-            layer: ActivationBatch(
-                layer_output=ensure_tensor(
-                    baseline_run[layer],
-                ).to(model.device)
-            )
-            if layer < model.config.num_layers
-            else ActivationBatch(
-                logits=ensure_tensor(
-                    baseline_run[layer],
-                ).to(model.device)
-            )
-            for layer in baseline_run
-            if layer in range(start_layer, end_layer)
-        }
         evals = run_evals(
             make_batch_for_evals(
                 model,
@@ -179,7 +166,9 @@ def run_evals(
 ) -> Dict[int, AggregatedLayerEval | LayerEval]:
     assert set(batch.baseline_activations.keys()) == set(
         batch.replacement_activations.keys()
-    ), "Missing activations for evaluation"
+    ), (
+        f"Missing activations for evaluation: {batch.baseline_activations.keys()} != {batch.replacement_activations.keys()}"
+    )
 
     if aggregate:
         eval_class = AggregatedLayerEval

@@ -1,8 +1,9 @@
+from collections import defaultdict
 from contextlib import ExitStack
 from copy import copy
 from dataclasses import dataclass
 from functools import partial
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional, Tuple
 
 import torch
 
@@ -28,7 +29,7 @@ class TrainingBatch:
     replacement_layers: List[int]
 
 
-def run_replacement_model(
+def _run_replacement_model(
     model: ReplacementModel,
     hooks: Dict[str, torch.nn.Module],
     batch: DataBatch,
@@ -72,7 +73,63 @@ def run_replacement_model(
             use_cache=False,
         )
 
-    return activation_cache
+    return {k: ensure_tensor(v) for k, v in activation_cache.items()}
+
+
+def make_activation_batch(
+    replacement_model: torch.nn.Module,
+    request_spec: List[Tuple[int, Literal["layer", "sae"]]],
+    batch: DataBatch,
+    start_input: Optional[torch.Tensor] = None,
+    start_layer: int = -1,
+    end_layer: Optional[int] = None,
+    start_at_sae: bool = False,
+) -> Dict[int, ActivationBatch]:
+    hooks = {}
+    request_attrs_by_layer = defaultdict(list)
+    for r in request_spec:
+        if r[0] == replacement_model.config.num_layers:
+            attrs = ("logits",)
+            submodule_paths = ("lm_head",)
+        else:
+            if r[1] == "sae":
+                assert r[0] in replacement_model.sae_layers, f"No SAE at layer {r[0]}"
+                attrs = ("sae_output", "sae_features")
+                submodule_paths = (
+                    f"transformer.h.{r[0]}.sae",
+                    f"transformer.h.{r[0]}.sae.encoder",
+                )
+            elif r[1] == "layer":
+                attrs = ("layer_output",)
+                if (
+                    hasattr(replacement_model, "sae_layers")
+                    and r[0] in replacement_model.sae_layers
+                ):
+                    submodule_paths = (f"transformer.h.{r[0]}.original_layer",)
+                else:
+                    submodule_paths = (f"transformer.h.{r[0]}",)
+        for attr, submodule in zip(attrs, submodule_paths):
+            hooks[(r[0], attr)] = replacement_model.get_submodule(submodule)
+        request_attrs_by_layer[r[0]].extend(attrs)
+
+    model_run = _run_replacement_model(
+        replacement_model,
+        hooks,
+        batch,
+        start_input,
+        start_layer,
+        end_layer,
+        start_at_sae,
+    )
+    result = {}
+    for layer in sorted(list(request_attrs_by_layer.keys())):
+        result[layer] = ActivationBatch(
+            **{
+                k: ensure_tensor(model_run[(layer, k)])
+                for k in request_attrs_by_layer[layer]
+            }
+        )
+    return result
 
 
 def make_batch_for_evals(
@@ -102,7 +159,7 @@ def make_batch_for_evals(
             ].layer_output
         else:
             prev_layer_data = None
-        new_baseline_run = run_replacement_model(
+        new_baseline_run = _run_replacement_model(
             base_model,
             {
                 layer: base_model.transformer.h[layer]
@@ -118,11 +175,11 @@ def make_batch_for_evals(
         for layer in needs_baseline_layers:
             if layer == base_model.config.num_layers:
                 baseline_activations[layer] = ActivationBatch(
-                    logits=ensure_tensor(new_baseline_run[layer])
+                    logits=new_baseline_run[layer]
                 )
             else:
                 baseline_activations[layer] = ActivationBatch(
-                    layer_output=ensure_tensor(new_baseline_run[layer])
+                    layer_output=new_baseline_run[layer]
                 )
 
     # The existing batch may have not been a full replacement model. We can still shave off time
@@ -174,7 +231,7 @@ def make_batch_for_evals(
             ].layer_output
             replacement_start_at_sae = True
 
-        new_replacement_run = run_replacement_model(
+        new_replacement_run = _run_replacement_model(
             full_replacement_model,
             hooks,
             training_batch.input_data,
@@ -191,19 +248,13 @@ def make_batch_for_evals(
         for layer in needs_replacement_layers:
             if layer == base_model.config.num_layers:
                 replacement_activations[layer] = ActivationBatch(
-                    logits=ensure_tensor(new_replacement_run[layer])
+                    logits=new_replacement_run[layer],
                 )
             else:
                 replacement_activations[layer] = ActivationBatch(
-                    layer_output=ensure_tensor(
-                        new_replacement_run[(layer, "layer_output")]
-                    ),
-                    sae_features=ensure_tensor(
-                        new_replacement_run[(layer, "sae_features")]
-                    ),
-                    sae_output=ensure_tensor(
-                        new_replacement_run[(layer, "sae_output")]
-                    ),
+                    layer_output=new_replacement_run[(layer, "layer_output")],
+                    sae_features=new_replacement_run[(layer, "sae_features")],
+                    sae_output=new_replacement_run[(layer, "sae_output")],
                 )
 
     return TrainingBatch(
