@@ -113,16 +113,18 @@ def run_validations(
 
         batch.token_mask = batch.token_mask.to(model.device)
         if cache_dir is not None:
-            baseline_activations = load_cache(
+            baseline_run = load_cache(
                 model.config.num_layers,
                 cache_dir,
                 step * inference_batch_size,
                 batch,
             )
-            for k, v in list(baseline_activations.items()):
-                baseline_activations[k] = ActivationBatch(
-                    layer_output=v.to(model.device)
-                )
+            baseline_activations = {}
+            for k, v in baseline_run.items():
+                if k in range(start_layer, end_layer):
+                    baseline_activations[k] = ActivationBatch(
+                        layer_output=v.to(model.device)
+                    )
         else:
             baseline_activations = make_activation_batch(
                 model,

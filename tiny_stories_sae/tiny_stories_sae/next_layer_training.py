@@ -1,10 +1,10 @@
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List
 
 import torch
 
 from .activation_data import ActivationBatch, TrainingBatch, make_activation_batch
 from .data_batch import DataBatch
-from .metrics import cos_dist_loss, downstream_loss, kl_loss, mse_loss
+from .metrics import cos_dist_loss, kl_loss, mse_loss
 from .replacement_model import (
     make_replacement_model,
 )
@@ -78,19 +78,19 @@ class NextLayerTrainingStepper(Stepper):
             training_batch.baseline_activations[self.target_layer + 1].logits
             is not None
         ):
-            downstream_attr = "logits"
-            downstream_fn = kl_loss
+            downstream_reconstruction_loss = kl_loss(
+                training_batch.replacement_activations[self.target_layer + 1].logits,
+                training_batch.baseline_activations[self.target_layer + 1].logits,
+                training_batch.input_data,
+            )
         else:
-            downstream_attr = "sae_features"
-            downstream_fn = cos_dist_loss
-
-        downstream_reconstruction_loss = downstream_loss(
-            training_batch.replacement_activations[self.target_layer + 1],
-            training_batch.baseline_activations[self.target_layer + 1],
-            training_batch.input_data,
-            downstream_attr,
-            downstream_fn,
-        )
+            downstream_reconstruction_loss = cos_dist_loss(
+                training_batch.replacement_activations[
+                    self.target_layer + 1
+                ].sae_features,
+                training_batch.baseline_activations[self.target_layer + 1].sae_features,
+                training_batch.input_data,
+            )
 
         reconstruction_loss = mse_loss(
             training_batch.replacement_activations[self.target_layer].sae_output,

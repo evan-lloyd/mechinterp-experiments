@@ -72,17 +72,3 @@ def rre_eval(actual: torch.Tensor, target: torch.Tensor):
 @_handle_batch
 def l0_eval(features: torch.Tensor, _):
     return (features > 0).to(torch.float32).sum(dim=-1)
-
-
-def downstream_loss(
-    replacement: ActivationBatch,
-    baseline: ActivationBatch,
-    batch: DataBatch,
-    downstream_attr: str,
-    downstream_fn: Callable[[torch.Tensor, torch.Tensor, DataBatch], torch.Tensor],
-) -> torch.Tensor:
-    return downstream_fn(
-        getattr(replacement, downstream_attr),
-        getattr(baseline, downstream_attr),
-        batch,
-    )

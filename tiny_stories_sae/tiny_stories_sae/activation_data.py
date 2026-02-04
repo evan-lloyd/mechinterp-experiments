@@ -220,10 +220,19 @@ def make_batch_for_evals(
         # if we have the data. Otherwise, we need to start at the start_layer from baseline data.
         if needs_replacement_layers[0] - 1 in replacement_activations:
             replacement_start_at_layer = needs_replacement_layers[0]
-            replacement_start_input = replacement_activations[
-                needs_replacement_layers[0] - 1
-            ].sae_output
-            replacement_start_at_sae = False
+            if (
+                replacement_activations[needs_replacement_layers[0] - 1].sae_output
+                is not None
+            ):
+                replacement_start_input = replacement_activations[
+                    needs_replacement_layers[0] - 1
+                ].sae_output
+                replacement_start_at_sae = False
+            else:
+                replacement_start_input = replacement_activations[
+                    needs_replacement_layers[0] - 1
+                ].layer_output
+                replacement_start_at_sae = True
         else:
             replacement_start_at_layer = start_layer
             replacement_start_input = baseline_activations[

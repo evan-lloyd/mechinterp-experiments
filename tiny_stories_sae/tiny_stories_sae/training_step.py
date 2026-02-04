@@ -11,28 +11,6 @@ if TYPE_CHECKING:
     from .training import TrainingConfig
 
 
-# def e2e_losses(batch: TrainingBatch, start_layer: int, end_layer: int):
-#     downstream_reconstruction_loss = []
-#     for layer in range(start_layer, end_layer):
-#         if batch.baseline_activations[layer].logits is not None:
-#             downstream_attr = "logits"
-#             downstream_fn = kl_loss
-#         else:
-#             downstream_attr = "layer_output"
-#             downstream_fn = mse_loss
-#         downstream_reconstruction_loss.append(
-#             downstream_loss(
-#                 batch.replacement_activations[layer + 1],
-#                 batch.baseline_activations[layer + 1],
-#                 batch.input_data,
-#                 downstream_attr,
-#                 downstream_fn,
-#             )
-#         )
-
-#     return {"downstream_reconstruction": downstream_reconstruction_loss}
-
-
 # def kl_finetune_losses(batch: TrainingBatch, target_layer: int, logits_layer: int):
 #     downstream_reconstruction_loss = downstream_loss(
 #         batch.replacement_activations[logits_layer],
@@ -66,6 +44,10 @@ class Stepper(ABC):
         self.replacement_model = train_model
 
     @property
+    def replacement_layers(self) -> List[int]:
+        return sorted(list(self.replacement_model.sae_layers.keys()))
+
+    @property
     def run_layers(self) -> List[int]:
         return sorted(list(self.replacement_model.sae_layers.keys()))
 
@@ -78,7 +60,7 @@ class Stepper(ABC):
             batch,
             replacement_activations=replacement_activations,
             baseline_activations=baseline_activations,
-            replacement_layers=self.run_layers,
+            replacement_layers=self.replacement_layers,
         )
 
     @abstractmethod
