@@ -88,6 +88,7 @@ class EndToEndTrainingStepper(Stepper):
                         training_batch.baseline_activations[
                             self.target_layer
                         ].layer_output,
+                        training_batch.input_data,
                     ).item()
             else:
                 mse_scale = (

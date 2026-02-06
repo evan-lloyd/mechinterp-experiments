@@ -12,6 +12,10 @@ from datasets import IterableDataset
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
+from tiny_stories_sae.next_layer_finetuned_training import (
+    NextLayerFinetunedTrainingStepper,
+)
+
 from .activation_cache import (
     cache_on_disk,
     init_cache,
@@ -143,6 +147,9 @@ class TrainingResult:
 
     def get(self, layer: int, default=None):
         return self._layer_results.get(layer, default)
+
+    def __repr__(self) -> str:
+        return repr(self._layer_results)
 
     @property
     def final_saes(self) -> Dict[int, SAE]:
@@ -456,6 +463,9 @@ def fine_tune(
         optimizer = make_optimizer(training_saes, [layer], config)
         if config.method is TrainingMethod.finetuned:
             stepper = KLFinetuneTrainingStepper(model, layer, training_saes)
+        elif config.method is TrainingMethod.next_layer_finetuned:
+            stepper = NextLayerFinetunedTrainingStepper(model, layer, training_saes)
+
         training_loop(
             stepper,
             train_result[layer],
