@@ -5,30 +5,12 @@ import torch
 
 from .activation_data import ActivationBatch, TrainingBatch, make_activation_batch
 from .data_batch import DataBatch
+from .ops import clone_sae
 from .replacement_model import ReplacementModel
+from .sae import SAE
 
 if TYPE_CHECKING:
     from .training import TrainingConfig
-
-
-# def kl_finetune_losses(batch: TrainingBatch, target_layer: int, logits_layer: int):
-#     downstream_reconstruction_loss = downstream_loss(
-#         batch.replacement_activations[logits_layer],
-#         batch.baseline_activations[logits_layer],
-#         batch.input_data,
-#         "logits",
-#         kl_loss,
-#     )
-
-#     reconstruction_loss = mse_loss(
-#         batch.replacement_activations[target_layer],
-#         batch.baseline_activations[target_layer],
-#         batch.input_data,
-#     )
-#     return {
-#         "reconstruction": reconstruction_loss,
-#         "downstream_reconstruction": downstream_reconstruction_loss,
-#     }
 
 
 class Stepper(ABC):
@@ -38,10 +20,10 @@ class Stepper(ABC):
     def __init__(
         self,
         base_model: torch.nn.Module,
-        train_model: torch.nn.Module,
+        replacement_model: torch.nn.Module,
     ):
         self.base_model = base_model
-        self.replacement_model = train_model
+        self.replacement_model = replacement_model
 
     @property
     def replacement_layers(self) -> List[int]:
@@ -62,6 +44,12 @@ class Stepper(ABC):
             baseline_activations=baseline_activations,
             replacement_layers=self.replacement_layers,
         )
+
+    def make_checkpoint(self, offload_to_cpu: bool = True) -> SAE:
+        assert hasattr(self, "sae"), (
+            f"{self.__class__} needs to override make_checkpoint"
+        )
+        return clone_sae(self.sae, to_device="cpu" if offload_to_cpu else None)
 
     @abstractmethod
     def step(

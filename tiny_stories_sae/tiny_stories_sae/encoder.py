@@ -50,7 +50,11 @@ class Encoder(torch.nn.Module):
         self.config = config
         self.linear = torch.nn.Linear(config.d_model, config.d_sae, device="meta")
 
-    def init_weights(self, init_from: Union["Encoder", "Decoder", None] = None):
+    def init_weights(
+        self,
+        init_from: Union["Encoder", "Decoder", None] = None,
+        to_device: str | None = None,
+    ):
         from .decoder import Decoder
 
         if init_from is None:
@@ -60,17 +64,23 @@ class Encoder(torch.nn.Module):
 
         if isinstance(init_from, Encoder):
             self.linear.weight = torch.nn.Parameter(
-                init_from.linear.weight.clone().detach().contiguous()
+                init_from.linear.weight.to(to_device or self.config.device, copy=True)
+                .detach()
+                .contiguous()
             )
             self.linear.bias = torch.nn.Parameter(
-                init_from.linear.bias.clone().detach().contiguous()
+                init_from.linear.bias.to(to_device or self.config.device, copy=True)
+                .detach()
+                .contiguous()
             )
         elif isinstance(init_from, Decoder):
             self.linear.weight = torch.nn.Parameter(
-                init_from.linear.weight.T.clone().detach().contiguous()
+                init_from.linear.weight.T.to(to_device or self.config.device, copy=True)
+                .detach()
+                .contiguous()
             )
             self.linear.bias = torch.nn.Parameter(
-                torch.zeros(self.config.d_sae, device=self.config.device)
+                torch.zeros(self.config.d_sae, device=to_device or self.config.device)
             )
         else:
             raise ValueError(f"Invalid initialization source: {type(init_from)}")
@@ -100,18 +110,24 @@ class InteractionEncoder(Encoder):
         super().__init__(config)
 
     @torch.no_grad
-    def init_weights(self, init_from: Union["Encoder", "Decoder", None] = None):
+    def init_weights(
+        self,
+        init_from: Union["Encoder", "Decoder", None] = None,
+        to_device: str | None = None,
+    ):
         from .decoder import Decoder
 
-        super().init_weights(init_from)
+        super().init_weights(init_from, to_device)
 
         if isinstance(init_from, InteractionEncoder):
             self.interaction = torch.nn.Parameter(
-                init_from.interaction.clone().detach().contiguous()
+                init_from.interaction.to(to_device or self.config.device, copy=True)
+                .detach()
+                .contiguous()
             )
         elif isinstance(init_from, Decoder):
             self.interaction = torch.nn.Parameter(
-                torch.eye(self.config.d_sae, device=self.config.device)
+                torch.eye(self.config.d_sae, device=to_device or self.config.device)
             )
         else:
             raise ValueError(f"Invalid initialization source: {type(init_from)}")

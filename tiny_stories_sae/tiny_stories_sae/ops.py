@@ -1,7 +1,7 @@
 import os
 from collections import defaultdict
 from io import StringIO
-from typing import Tuple
+from typing import Tuple, TYPE_CHECKING
 
 import cloudpickle
 import matplotlib.pyplot as plt
@@ -12,6 +12,9 @@ from safetensors import safe_open
 from safetensors.numpy import save_file as save_file_numpy
 from safetensors.torch import save_file as save_file_torch
 from transformers import AutoModel, AutoTokenizer, TextStreamer
+
+if TYPE_CHECKING:
+    from .sae import SAE
 
 # TinyStories33M max_position_embeddings
 MAX_GENERATION = 2048
@@ -144,17 +147,11 @@ def save_demo_run(
     )
 
 
-def clone_sae(sae):
+def clone_sae(sae: "SAE", to_device: str | None = None):
     from .sae import SAE
 
-    result = SAE(
-        sae.d_model,
-        sae.d_sae,
-        device=sae.config.device,
-        kind=sae.kind,
-        topk=sae.topk,
-        init_from=sae,
-    )
+    result = SAE(sae.config)
+    result.init_weights(sae, to_device)
 
     return result
 

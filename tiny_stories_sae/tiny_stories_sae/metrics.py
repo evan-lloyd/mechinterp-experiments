@@ -1,10 +1,9 @@
-from typing import Callable, Literal
+from typing import Literal
 
 import numpy as np
 import torch
 
-from .activation_data import ActivationBatch
-from .sae_data import DataBatch
+from .activation_data import DataBatch
 
 """NB: The losses here are deliberately taking a mean, rather than sum, on the final dimension, to factor out
 the implicit dependence on d_model (mse) or d_vocab (kl). This is probably non-standard, but is effectively

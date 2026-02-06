@@ -10,6 +10,7 @@ from datasets import IterableDataset
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
+from .activation_cache import load_cache
 from .activation_data import (
     ActivationBatch,
     TrainingBatch,
@@ -21,12 +22,6 @@ from .metrics import kl_eval, l0_eval, rre_eval
 from .ops import generate
 from .replacement_model import make_replacement_model
 from .sae import SAE
-from .sae_data import (
-    SAEData,
-    get_logits,
-    get_sae_data,
-    load_cache,
-)
 from .tokenization import CONTEXT_LENGTH, input_generator
 
 
