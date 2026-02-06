@@ -9,29 +9,23 @@ from typing import Callable, Dict, List, Mapping, Optional
 import numpy as np
 import torch
 from datasets import IterableDataset
-from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
-from tiny_stories_sae.next_layer_finetuned_training import (
-    NextLayerFinetunedTrainingStepper,
-)
-
-from .activation_cache import (
-    cache_on_disk,
-    init_cache,
-    load_cache,
-)
+from .activation_cache import load_cache
 from .activation_data import TrainingBatch, make_batch_for_evals
 from .encoder import InteractionEncoder
-from .end_to_end_training import EndToEndTrainingStepper
-from .kl_finetune_training import KLFinetuneTrainingStepper
 from .multiline_progress import MultilineProgress
-from .next_layer_training import NextLayerTrainingStepper
 from .replacement_model import ReplacementModel, make_replacement_model
 from .sae import SAE
-from .standard_training import StandardTrainingStepper
-from .tokenization import CONTEXT_LENGTH, input_generator
-from .training_step import Stepper
+from .tokenization import input_generator
+from .training_step import (
+    EndToEndTrainingStepper,
+    KLFinetuneTrainingStepper,
+    NextLayerFinetunedTrainingStepper,
+    NextLayerTrainingStepper,
+    StandardTrainingStepper,
+    Stepper,
+)
 from .validation import run_evals
 
 
@@ -173,44 +167,6 @@ class TrainingResult:
         return result
 
 
-def build_cache(
-    cache_dir: str,
-    model: torch.nn.Module,
-    tokenizer: AutoTokenizer,
-    dataset: IterableDataset,
-    num_tokens: int,
-    tokenizer_batch_size: int,
-    inference_batch_size: int,
-):
-    progress = tqdm(total=num_tokens, desc="Building activation cache")
-
-    init_cache(
-        model,
-        cache_dir,
-        model.config.num_layers,
-        inference_batch_size,
-        1,
-        CONTEXT_LENGTH,
-        model.config.hidden_size,
-    )
-    num_used_tokens = 0
-
-    model.eval()
-    for batch in input_generator(
-        model,
-        tokenizer,
-        dataset,
-        max_tokens=num_tokens,
-        tokenizer_batch_size=tokenizer_batch_size,
-        inference_batch_size=inference_batch_size,
-    ):
-        cache_on_disk(cache_dir, model, batch)
-        num_used_tokens += batch.num_tokens
-        progress.total = max(num_tokens, num_used_tokens)
-        progress.update(batch.num_tokens)
-    progress.close()
-
-
 def make_optimizer(saes: Dict[int, SAE], layers: List[int], config: TrainingConfig):
     param_groups = [
         {
@@ -251,44 +207,6 @@ def make_optimizer(saes: Dict[int, SAE], layers: List[int], config: TrainingConf
         pg["base_lr"] = pg["lr"]
 
     return torch.optim.Adam(param_groups, lr=config.lr)
-
-
-def maybe_balance_reconstruction_weights(
-    balance_reconstruction_losses: List[bool] | bool,
-    reconstruction_weight: List[float] | float,
-    downstream_reconstruction_weight: List[float] | float,
-    losses: Dict[str, torch.Tensor],
-    target_layer: int,
-):
-    balance_reconstruction_losses = (
-        balance_reconstruction_losses[target_layer]
-        if hasattr(balance_reconstruction_losses, "__getitem__")
-        else balance_reconstruction_losses
-    )
-    reconstruction_weight = (
-        reconstruction_weight[target_layer]
-        if hasattr(reconstruction_weight, "__getitem__")
-        else reconstruction_weight
-    )
-    downstream_reconstruction_weight = (
-        downstream_reconstruction_weight[target_layer]
-        if hasattr(downstream_reconstruction_weight, "__getitem__")
-        else downstream_reconstruction_weight
-    )
-    if balance_reconstruction_losses:
-        target_scale = (reconstruction_weight + downstream_reconstruction_weight) * max(
-            losses["reconstruction"].item(),
-            sum(losses["downstream_reconstruction"]).item(),
-            1e-8,
-        )
-        reconstruction_weight = target_scale / max(
-            losses["reconstruction"].item(), 1e-8
-        )
-        downstream_reconstruction_weight = target_scale / max(
-            sum(losses["downstream_reconstruction"]).item(), 1e-8
-        )
-
-    return reconstruction_weight, downstream_reconstruction_weight
 
 
 def training_loop(

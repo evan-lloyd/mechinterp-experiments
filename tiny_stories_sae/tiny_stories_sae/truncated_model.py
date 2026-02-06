@@ -2,7 +2,7 @@ from contextlib import contextmanager
 
 import torch
 
-from .replacement_model import ReplacementModel, SAEReplacementLayer
+from .replacement_model import ReplacementModel
 
 
 @contextmanager

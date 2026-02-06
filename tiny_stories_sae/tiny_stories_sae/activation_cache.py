@@ -8,9 +8,13 @@ from typing import Dict
 import numpy as np
 import torch
 import zarr
+from datasets import IterableDataset
+from tqdm.auto import tqdm
+from transformers import AutoTokenizer
 
 from .data_batch import DataBatch
 from .ops import ensure_directory
+from .tokenization import CONTEXT_LENGTH, input_generator
 
 
 @torch.no_grad
@@ -124,6 +128,44 @@ def cache_on_disk(cache_dir: str, model: torch.nn.Module, batch: DataBatch):
     metadata["num_rows"] = new_num_rows
 
     json.dump(metadata, open(f"{cache_dir}/{CACHE_METADATA_FILENAME}", "w"))
+
+
+def build_cache(
+    cache_dir: str,
+    model: torch.nn.Module,
+    tokenizer: AutoTokenizer,
+    dataset: IterableDataset,
+    num_tokens: int,
+    tokenizer_batch_size: int,
+    inference_batch_size: int,
+):
+    progress = tqdm(total=num_tokens, desc="Building activation cache")
+
+    init_cache(
+        model,
+        cache_dir,
+        model.config.num_layers,
+        inference_batch_size,
+        1,
+        CONTEXT_LENGTH,
+        model.config.hidden_size,
+    )
+    num_used_tokens = 0
+
+    model.eval()
+    for batch in input_generator(
+        model,
+        tokenizer,
+        dataset,
+        max_tokens=num_tokens,
+        tokenizer_batch_size=tokenizer_batch_size,
+        inference_batch_size=inference_batch_size,
+    ):
+        cache_on_disk(cache_dir, model, batch)
+        num_used_tokens += batch.num_tokens
+        progress.total = max(num_tokens, num_used_tokens)
+        progress.update(batch.num_tokens)
+    progress.close()
 
 
 def load_cache(num_layers: int, cache_dir: str, cache_offset: int, batch: DataBatch):

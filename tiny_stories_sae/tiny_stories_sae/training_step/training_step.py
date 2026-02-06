@@ -3,14 +3,14 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 
 import torch
 
-from .activation_data import ActivationBatch, TrainingBatch, make_activation_batch
-from .data_batch import DataBatch
-from .ops import clone_sae
-from .replacement_model import ReplacementModel
-from .sae import SAE
+from ..activation_data import ActivationBatch, TrainingBatch, make_activation_batch
+from ..data_batch import DataBatch
+from ..ops import clone_sae
+from ..replacement_model import ReplacementModel
+from ..sae import SAE
 
 if TYPE_CHECKING:
-    from .training import TrainingConfig
+    from ..training import TrainingConfig
 
 
 class Stepper(ABC):

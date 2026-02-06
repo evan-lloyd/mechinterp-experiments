@@ -2,17 +2,17 @@ from typing import TYPE_CHECKING, Dict, List
 
 import torch
 
-from .activation_data import ActivationBatch, TrainingBatch, make_activation_batch
-from .data_batch import DataBatch
-from .metrics import kl_loss, mse_loss
-from .replacement_model import (
+from ..activation_data import ActivationBatch, TrainingBatch, make_activation_batch
+from ..data_batch import DataBatch
+from ..metrics import kl_loss, mse_loss
+from ..replacement_model import (
     make_replacement_model,
 )
-from .sae import SAE
+from ..sae import SAE
 from .training_step import Stepper
 
 if TYPE_CHECKING:
-    from .training import TrainingConfig
+    from ..training import TrainingConfig
 
 
 class KLFinetuneTrainingStepper(Stepper):

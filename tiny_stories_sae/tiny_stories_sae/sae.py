@@ -4,14 +4,14 @@ from typing import Optional
 import torch
 
 from .decoder import Decoder, DecoderConfig
-from .encoder import (
+from .encoder import (  # noqa: F401
     Encoder,
     EncoderConfig,
     InteractionEncoder,
     InteractionEncoderConfig,
     ReluActivationFunctionConfig,
     TopKActivationFunctionConfig,
-)  # noqa: F401
+)
 
 
 @dataclass
