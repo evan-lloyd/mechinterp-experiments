@@ -108,6 +108,9 @@ class InteractionEncoder(Encoder):
         config: InteractionEncoderConfig,
     ):
         super().__init__(config)
+        self.interaction = torch.nn.Parameter(
+            torch.empty((config.d_sae, config.d_sae), device="meta")
+        )
 
     @torch.no_grad
     def init_weights(
