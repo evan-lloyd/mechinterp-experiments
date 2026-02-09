@@ -42,7 +42,6 @@ class TrainingConfig:
     num_train_tokens: int
     tokenizer_batch_size: int
     training_batch_size: int
-    e2e_batch_size: int
     eval_interval: int
     train_layers: List[int]
     lr: float = 1e-3

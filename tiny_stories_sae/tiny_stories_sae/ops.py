@@ -1,15 +1,16 @@
 import os
 import tempfile
+import uuid
 import zipfile
 from collections import defaultdict
 from io import StringIO
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING, Sequence, Tuple
 
 import cloudpickle
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from IPython.display import SVG, display
+from IPython.display import HTML, SVG, display
 from safetensors import safe_open
 from safetensors.numpy import save_file as save_file_numpy
 from safetensors.torch import save_file as save_file_torch
@@ -352,3 +353,90 @@ def ensure_tensor(
     if isinstance(maybe_tensor, tuple):
         return maybe_tensor[0]
     return maybe_tensor
+
+
+def _sortable_table_html(
+    table_id: str, sort_fn: str, header_row: str, data_rows: list[str]
+) -> str:
+    """Build the full HTML + inline script for a sortable table."""
+    return f"""
+<table id="{table_id}" border="1" style="border-collapse: collapse;">
+{header_row}
+{"".join(data_rows)}
+</table>
+<script>
+(function() {{
+    var table = document.getElementById("{table_id}");
+    var sortDirections = {{}};
+
+    window.{sort_fn} = function(columnIndex) {{
+        var rows = Array.from(table.rows).slice(1);
+        var dir = sortDirections[columnIndex] || 'asc';
+
+        rows.sort(function(a, b) {{
+            var aVal = a.cells[columnIndex].innerText;
+            var bVal = b.cells[columnIndex].innerText;
+            var aNum = parseFloat(aVal);
+            var bNum = parseFloat(bVal);
+
+            if (!isNaN(aNum) && !isNaN(bNum)) {{
+                return dir === 'asc' ? aNum - bNum : bNum - aNum;
+            }}
+            return dir === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+        }});
+
+        rows.forEach(function(row) {{ table.appendChild(row); }});
+        sortDirections[columnIndex] = dir === 'asc' ? 'desc' : 'asc';
+    }};
+}})();
+</script>
+"""
+
+
+def render_sortable_html_table(
+    headers: Sequence[str],
+    rows: Sequence[Sequence],
+    table_id: str | None = None,
+) -> str:
+    """Render a sortable HTML table from headers and row data.
+
+    Args:
+        headers: Column header labels.
+        rows: List of row tuples/lists. Each row should have one value per column.
+              Values are rendered as-is; numbers and strings both work for sorting.
+        table_id: Optional unique ID for the table element. If not provided,
+                  a UUID-based ID is generated.
+
+    Returns:
+        Complete HTML string including the table and inline sort script.
+        Use with IPython: ``display(HTML(render_sortable_html_table(...)))``.
+    """
+    if table_id is None:
+        table_id = f"sortable_table_{uuid.uuid4().hex[:8]}"
+    sort_fn = f"sortTable_{table_id.replace('-', '_')}"
+
+    header_cells = "".join(
+        f'<th onclick="{sort_fn}({i})" style="cursor:pointer">{h} ⇅</th>'
+        for i, h in enumerate(headers)
+    )
+    header_row = f"<tr>{header_cells}</tr>"
+
+    data_rows = []
+    for row in rows:
+        cells = "".join(f"<td>{cell}</td>" for cell in row)
+        data_rows.append(f"<tr>{cells}</tr>")
+
+    return _sortable_table_html(table_id, sort_fn, header_row, data_rows)
+
+
+def display_sortable_html_table(
+    headers: Sequence[str],
+    rows: Sequence[Sequence],
+    table_id: str | None = None,
+):
+    """Display a sortable HTML table in a Jupyter notebook.
+
+    Convenience wrapper around ``render_sortable_html_table`` that displays
+    the result. Same arguments as ``render_sortable_html_table``.
+    """
+    display(HTML(render_sortable_html_table(headers, rows, table_id)))
