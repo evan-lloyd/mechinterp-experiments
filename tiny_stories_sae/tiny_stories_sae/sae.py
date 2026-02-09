@@ -76,6 +76,16 @@ class SAE(torch.nn.Module):
                 torch.empty((0,), device=to_device or self.config.device)
             )
 
+    def change_configured_device(self, device: torch.device | str):
+        """Change our configured device, and move to it."""
+        if isinstance(device, str):
+            device = torch.device(device)
+        self.config.device = device
+        self.config.encoder.device = device
+        self.config.decoder.device = device
+        self.to(device)
+        return self
+
     @_check_device
     def decode(self, x: torch.Tensor):
         return self.decoder(x)

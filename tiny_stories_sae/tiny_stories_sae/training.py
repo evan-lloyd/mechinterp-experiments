@@ -258,7 +258,7 @@ def training_loop(
             )
         else:
             cache = None
-        batch.token_mask = batch.token_mask.to(stepper.base_model.device)
+        batch.to(stepper.base_model.device)
         training_batch = stepper.make_batch(batch, cache)
 
         losses = stepper.step(training_batch, config)

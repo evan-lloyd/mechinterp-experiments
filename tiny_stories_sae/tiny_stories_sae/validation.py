@@ -104,7 +104,7 @@ def run_validations(
             axis=0,
         )
 
-        batch.token_mask = batch.token_mask.to(model.device)
+        batch.to(model.device)
         if cache_dir is not None:
             baseline_run = load_cache(
                 model.config.num_layers,

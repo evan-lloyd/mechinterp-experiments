@@ -40,17 +40,13 @@ def _run_replacement_model(
 ):
     if start_layer == -1:
         input_args = []
-        input_kwargs = dict(
-            input_ids=batch.input_ids.to(model.device),
-            position_ids=batch.position_ids.to(model.device),
-            attention_mask=batch.attention_mask.to(model.device),
-        )
+        input_kwargs = batch.model_kwargs()
     else:
         assert start_input is not None, (
             "Must provide first layer's input if not starting from embedding"
         )
         input_args = [start_input]
-        input_kwargs = {}
+        input_kwargs = {"attention_mask": batch.attention_mask}
 
     activation_cache = {}
 
