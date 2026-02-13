@@ -34,8 +34,10 @@ class KLFinetuneTrainingStepper(Stepper):
     ) -> Dict[int, ActivationBatch]:
         return make_activation_batch(
             self.replacement_model,
-            [(layer, "layer") for layer in self.run_layers[1:]]
-            + [(self.target_layer, "sae")],
+            [
+                (self.target_layer, "sae"),
+                (self.replacement_model.config.num_layers, "layer"),
+            ],
             batch,
             start_input=baseline_activations[self.target_layer].layer_output,
             start_layer=self.target_layer,
@@ -61,9 +63,7 @@ class KLFinetuneTrainingStepper(Stepper):
         )
         reconstruction_loss = mse_loss(
             training_batch.replacement_activations[self.target_layer].sae_output,
-            training_batch.baseline_activations[self.target_layer].layer_output.to(
-                self.base_model.device
-            ),
+            training_batch.baseline_activations[self.target_layer].layer_output,
             training_batch.input_data,
         )
 
@@ -76,7 +76,7 @@ class KLFinetuneTrainingStepper(Stepper):
         weighted_kl_loss = kl_scale * downstream_kl_loss
         weighted_reconstruction_loss = reconstruction_scale * reconstruction_loss
 
-        loss = weighted_kl_loss + weighted_reconstruction_loss
+        loss = (weighted_kl_loss + weighted_reconstruction_loss) / 2
         loss.backward()
 
         return {

@@ -49,7 +49,7 @@ class NextLayerFinetunedTrainingStepper(Stepper):
             batch,
             start_input=baseline_activations[self.target_layer].layer_output,
             start_layer=self.target_layer,
-            end_layer=self.replacement_model.config.num_layers+1,
+            end_layer=self.replacement_model.config.num_layers + 1,
             start_at_sae=True,
         )
 
@@ -100,6 +100,7 @@ class NextLayerFinetunedTrainingStepper(Stepper):
             downstream_reconstruction_loss = torch.zeros(
                 (1,), device=self.replacement_model.device
             )
+            effective_loss_terms = 2
         else:
             downstream_reconstruction_loss = cos_dist_loss(
                 training_batch.replacement_activations[
@@ -108,12 +109,11 @@ class NextLayerFinetunedTrainingStepper(Stepper):
                 training_batch.baseline_activations[self.target_layer + 1].sae_features,
                 training_batch.input_data,
             )
+            effective_loss_terms = 3
 
         reconstruction_loss = mse_loss(
             training_batch.replacement_activations[self.target_layer].sae_output,
-            training_batch.baseline_activations[self.target_layer].layer_output.to(
-                self.base_model.device
-            ),
+            training_batch.baseline_activations[self.target_layer].layer_output,
             training_batch.input_data,
         )
 
@@ -135,7 +135,7 @@ class NextLayerFinetunedTrainingStepper(Stepper):
             weighted_reconstruction_loss
             + weighted_downstream_reconstruction_loss
             + weighted_downstream_kl_loss
-        )
+        ) / effective_loss_terms
         loss.backward()
 
         return {

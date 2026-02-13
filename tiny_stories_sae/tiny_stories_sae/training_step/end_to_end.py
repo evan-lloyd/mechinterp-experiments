@@ -101,7 +101,7 @@ class EndToEndTrainingStepper(Stepper):
             downstream_scale * downstream_reconstruction_loss
         )
 
-        loss = weighted_kl_loss + weighted_downstream_reconstruction_loss
+        loss = (weighted_kl_loss + weighted_downstream_reconstruction_loss) / 2
         loss.backward()
 
         return {

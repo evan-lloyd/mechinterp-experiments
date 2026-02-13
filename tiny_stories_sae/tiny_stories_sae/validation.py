@@ -21,6 +21,7 @@ from .ops import generate
 from .replacement_model import make_replacement_model
 from .sae import SAE
 from .tokenization import input_generator
+from .training_step import KLFinetuneTrainingStepper
 
 
 @dataclass(kw_only=True)
@@ -152,6 +153,90 @@ def run_validations(
 
 
 @torch.no_grad
+def run_single_layer_replacements(
+    model: torch.nn.Module,
+    tokenizer: AutoTokenizer,
+    saes: Dict[int, SAE],
+    dataset: IterableDataset,
+    tokenizer_batch_size: int,
+    inference_batch_size: int,
+    num_tokens: Optional[int] = None,
+    num_batches: Optional[int] = None,
+    cache_dir: Optional[str] = None,
+    start_layer: int = 0,
+    end_layer: Optional[int] = None,
+):
+    if end_layer is None:
+        end_layer = model.config.num_layers + 1
+
+    results = ValidationResult(
+        layer_results={layer: LayerEval() for layer in range(start_layer, end_layer)},
+        position_ids=np.empty((0,)),
+    )
+    for layer in range(start_layer, end_layer):
+        if layer not in saes:
+            continue
+
+        # This happens to run exactly the right replacement models we need
+        stepper = KLFinetuneTrainingStepper(model, layer, saes)
+
+        num_tokens_consumed = 0
+
+        for step, batch in enumerate(
+            input_generator(
+                model,
+                tokenizer,
+                dataset,
+                max_tokens=num_tokens,
+                tokenizer_batch_size=tokenizer_batch_size,
+                inference_batch_size=inference_batch_size,
+                max_batches=num_batches,
+            )
+        ):
+            if cache_dir is not None:
+                cache = load_cache(
+                    stepper.base_model.config.num_layers,
+                    cache_dir,
+                    step * inference_batch_size,
+                    batch,
+                )
+            else:
+                cache = None
+            if "progress" not in locals():
+                progress = tqdm(
+                    total=num_tokens
+                    or num_batches * inference_batch_size * batch.position_ids.shape[1],
+                    desc=f"Running SAE evals (layer {layer})",
+                )
+            results.position_ids = np.concatenate(
+                (
+                    results.position_ids,
+                    batch.position_ids[batch.token_mask.bool()].flatten().cpu().numpy(),
+                ),
+                axis=0,
+            )
+
+            batch.to(model.device)
+            evals = run_evals(
+                stepper.make_batch(batch, cache),
+                [model.config.num_layers],
+                aggregate=False,
+            )
+
+            results.layer_results[layer].update(evals[model.config.num_layers])
+
+            num_tokens_consumed += batch.num_tokens
+            progress.update(batch.num_tokens)
+
+        progress.total = num_tokens_consumed
+        progress.refresh()
+        progress.close()
+        del progress
+
+    return results
+
+
+@torch.no_grad
 def run_evals(
     batch: TrainingBatch,
     layers: List[int],
@@ -173,13 +258,14 @@ def run_evals(
         replacement = batch.replacement_activations[layer]
         baseline = batch.baseline_activations[layer]
         if baseline.logits is not None:
+            kl = kl_eval(
+                replacement.logits,
+                baseline.logits,
+                batch.input_data,
+                "np",
+            )
             result[layer] = LayerEval(
-                kl=kl_eval(
-                    replacement.logits,
-                    baseline.logits,
-                    batch.input_data,
-                    eval_type,
-                )
+                kl=np.exp(np.mean(np.log(kl[kl > 0]))).item() if aggregate else kl,
             )
         else:
             result[layer] = LayerEval(

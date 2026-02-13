@@ -94,9 +94,7 @@ class NextLayerTrainingStepper(Stepper):
 
         reconstruction_loss = mse_loss(
             training_batch.replacement_activations[self.target_layer].sae_output,
-            training_batch.baseline_activations[self.target_layer].layer_output.to(
-                self.base_model.device
-            ),
+            training_batch.baseline_activations[self.target_layer].layer_output,
             training_batch.input_data,
         )
 
@@ -112,7 +110,9 @@ class NextLayerTrainingStepper(Stepper):
             downstream_scale * downstream_reconstruction_loss
         )
 
-        loss = weighted_reconstruction_loss + weighted_downstream_reconstruction_loss
+        loss = (
+            weighted_reconstruction_loss + weighted_downstream_reconstruction_loss
+        ) / 2
         loss.backward()
 
         return {

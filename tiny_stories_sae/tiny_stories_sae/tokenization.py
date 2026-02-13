@@ -10,14 +10,8 @@ from .data_batch import DataBatch
 
 # from model card, value used in training
 CONTEXT_LENGTH = 512
-
-
-def _attention_mask_row(dtype):
-    return torch.full(
-        (1, CONTEXT_LENGTH, CONTEXT_LENGTH),
-        fill_value=torch.finfo(dtype).min,
-        dtype=dtype,
-    )
+_ONES = torch.ones((CONTEXT_LENGTH, CONTEXT_LENGTH))
+_ZEROS = torch.zeros((CONTEXT_LENGTH, CONTEXT_LENGTH))
 
 
 def _ensure_tokenized(
@@ -157,13 +151,38 @@ def tokenize_strings(
                     ),
                 )
             )
-        attention_mask_stack.append(_attention_mask_row(model.dtype))
-        cur_token = 0
-        # TODO: should be vectorizable
-        for cur_input in input_batch:
-            for j in range(cur_token, cur_token + len(cur_input)):
-                attention_mask_stack[-1][0, j, cur_token : j + 1] = 0.0
-            cur_token += len(cur_input)
+        # Set causal mask, with additional constraint to ignore tokens from other inputs.
+        # Eg, if we have inputs of length 4, 3, 2, 4, we want our mask to look like,
+        # before replacing ones with the minimum value for our dtype:
+        # x, y, z, w = torch.ones((4, 4)), torch.ones((3, 3)), torch.ones((2, 2)), torch.ones((4, 4))
+        # 1 - torch.block_diag(x.tril(), y.tril(), z.tril(), w.tril())
+        # > tensor([[0., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1.],
+        #           [0., 0., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1.],
+        #           [0., 0., 0., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1.],
+        #           [0., 0., 0., 0., 1., 1., 1., 1., 1., 1., 1., 1., 1.],
+        #           [1., 1., 1., 1., 0., 1., 1., 1., 1., 1., 1., 1., 1.],
+        #           [1., 1., 1., 1., 0., 0., 1., 1., 1., 1., 1., 1., 1.],
+        #           [1., 1., 1., 1., 0., 0., 0., 1., 1., 1., 1., 1., 1.],
+        #           [1., 1., 1., 1., 1., 1., 1., 0., 1., 1., 1., 1., 1.],
+        #           [1., 1., 1., 1., 1., 1., 1., 0., 0., 1., 1., 1., 1.],
+        #           [1., 1., 1., 1., 1., 1., 1., 1., 1., 0., 1., 1., 1.],
+        #           [1., 1., 1., 1., 1., 1., 1., 1., 1., 0., 0., 1., 1.],
+        #           [1., 1., 1., 1., 1., 1., 1., 1., 1., 0., 0., 0., 1.],
+        #           [1., 1., 1., 1., 1., 1., 1., 1., 1., 0., 0., 0., 0.]])
+        mask_blocks = [_ONES[0 : len(i), 0 : len(i)] for i in input_batch]
+        # Pad?
+        if new_tokens < CONTEXT_LENGTH:
+            mask_blocks.append(
+                _ZEROS[0 : CONTEXT_LENGTH - new_tokens, 0 : CONTEXT_LENGTH - new_tokens]
+            )
+
+        # TODO: how hard would it be to write a custom kernel for this, or find some other way to
+        # speed it up? Profiler shows this taking up a significant amount of time, ~twice that for tokenization.
+        attention_mask_stack.append(
+            (
+                (1.0 - torch.block_diag(*mask_blocks)) * torch.finfo(model.dtype).min
+            ).unsqueeze(0)
+        )
 
     unused_inputs = list(token_ids.values())
     position_ids = torch.stack(position_id_stack)
@@ -259,6 +278,11 @@ def input_generator(
             inference_batch_size,
             offset - state.num_tokens_generated,
         )
+        # TODO: we should find a way to not have to tokenize everything up until this point. Unfortunately
+        # we can't really just skip to a particular row of the dataset because of the way we pack into
+        # batches. Possibly we can live with this being slightly non-deterministic, or maybe there's some
+        # simple bit of info we could pass along that would still keep determinism (eg, greatest row i
+        # such that we have definitely already used all tokens for rows < i)
         if state.num_tokens_generated + batch.num_tokens > offset:
             # NB: this should maybe technically discard some rows from the start, since we'll effectively
             # be training on the overlapping tokens twice, but I doubt this matters much.

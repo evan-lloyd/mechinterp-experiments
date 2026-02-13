@@ -51,10 +51,8 @@ class TrainingConfig:
     encoder_lr: Mapping[int, float | None] = None
     interaction_lr: Mapping[int, float | None] = None
     # Default schedule is constant
-    main_lr_schedule: Callable[[float], float] = lambda frac_trained: 1.0
-    finetune_lr_schedule: Callable[[float], float] = lambda frac_trained: 1.0
-    use_downstream_saes: bool = True
-    balance_reconstruction_losses: bool | Mapping[int, bool] = False
+    lr_schedule: Callable[[float], float] = lambda frac_trained: 1.0
+    balance_reconstruction_losses: bool | Mapping[int, bool] = True
     finetune_fraction: Optional[float] = None
     method: TrainingMethod
 
@@ -315,6 +313,15 @@ def training_loop(
                 )
             )
 
+        for pg in optimizer.param_groups:
+            pg["lr"] = pg["base_lr"] * config.lr_schedule(
+                min(
+                    (num_used_tokens + previous_trained_tokens)
+                    / config.num_train_tokens,
+                    1.0,
+                )
+            )
+
         progress.total = max(max_tokens - previous_trained_tokens, num_used_tokens)
         progress.update(batch.num_tokens)
 
@@ -347,7 +354,7 @@ def _train_evals(
             )
             | {
                 "L0": result[target_layer].l0,
-                "rep_kl": result[base_model.config.num_layers].kl,
+                "kl": result[base_model.config.num_layers].kl,
             }
         )
 

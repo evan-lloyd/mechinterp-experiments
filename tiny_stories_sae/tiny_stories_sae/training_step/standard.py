@@ -47,14 +47,13 @@ class StandardTrainingStepper(Stepper):
     ) -> Dict[str, torch.Tensor]:
         reconstruction_loss = mse_loss(
             training_batch.replacement_activations[self.target_layer].sae_output,
-            training_batch.baseline_activations[self.target_layer].layer_output.to(
-                self.base_model.device
-            ),
+            training_batch.baseline_activations[self.target_layer].layer_output,
             training_batch.input_data,
         )
 
         reconstruction_loss.backward()
 
         return {
+            "total_loss": reconstruction_loss.item(),
             "raw_loss.reconstruction": reconstruction_loss.item(),
         }
