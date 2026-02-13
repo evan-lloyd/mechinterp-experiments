@@ -269,7 +269,10 @@ def training_loop(
         if num_used_tokens >= eval_threshold:
             evals = eval_fn(training_batch)
             progress.set_postfix(evals, refresh=False)
-            eval_threshold = min(eval_threshold + config.eval_interval, max_tokens)
+            eval_threshold = min(
+                eval_threshold + config.eval_interval,
+                max_tokens - previous_trained_tokens,
+            )
 
             # Update train results, only on eval steps
             checkpoints[-1].step_tokens_trained = np.append(

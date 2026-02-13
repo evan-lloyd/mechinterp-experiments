@@ -5,6 +5,7 @@ dependencies = [
     "cloudpickle>=3.1.2",
     "datasets>=4.4.2",
     "jupyter>=1.1.1",
+    "jupyterlab>=4.5.1",
     "matplotlib>=3.10.8",
     "safetensors>=0.7.0",
     "scipy>=1.17.0",
@@ -15,11 +16,7 @@ dependencies = [
 version = "0.0.0"
 
 [dependency-groups]
-dev = [
-    "jurigged>=0.6.1",
-    "line-profiler>=5.0.1",
- "ruff>=0.14.10",
-]
+dev = ["jurigged>=0.6.1", "line-profiler>=5.0.1", "ruff>=0.14.10"]
 
 [[tool.uv.index]]
 name = "pytorch-cu126"
