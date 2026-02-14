@@ -175,6 +175,7 @@ def run_single_layer_replacements(
     cache_dir: Optional[str] = None,
     start_layer: int = 0,
     end_layer: Optional[int] = None,
+    offload: bool = True,
 ):
     if end_layer is None:
         end_layer = model.config.num_layers + 1
@@ -183,6 +184,11 @@ def run_single_layer_replacements(
         layer_results={layer: LayerEval() for layer in range(start_layer, end_layer)},
         position_ids=np.empty((0,)),
     )
+
+    for layer in range(start_layer, end_layer):
+        if layer in saes:
+            saes[layer].onload()
+
     for layer in range(start_layer, end_layer):
         if layer not in saes:
             continue
@@ -242,6 +248,11 @@ def run_single_layer_replacements(
         progress.refresh()
         progress.close()
         del progress
+
+    if offload:
+        for layer in range(start_layer, end_layer):
+            if layer in saes:
+                saes[layer].offload()
 
     return results
 
