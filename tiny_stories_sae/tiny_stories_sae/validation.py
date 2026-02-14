@@ -62,6 +62,7 @@ def run_validations(
     cache_dir: Optional[str] = None,
     start_layer: int = 0,
     end_layer: Optional[int] = None,
+    offload: bool = True,
 ):
     if end_layer is None:
         end_layer = model.config.num_layers + 1
@@ -79,6 +80,10 @@ def run_validations(
         layer_results={layer: LayerEval() for layer in range(start_layer, end_layer)},
         position_ids=np.empty((0,)),
     )
+
+    for layer in range(start_layer, end_layer):
+        if layer in saes:
+            saes[layer].onload()
 
     for step, batch in enumerate(
         input_generator(
@@ -148,6 +153,11 @@ def run_validations(
     progress.total = num_tokens_consumed
     progress.refresh()
     progress.close()
+
+    if offload:
+        for layer in range(start_layer, end_layer):
+            if layer in saes:
+                saes[layer].offload()
 
     return results
 
@@ -265,7 +275,9 @@ def run_evals(
                 "np",
             )
             result[layer] = LayerEval(
-                kl=np.exp(np.mean(np.log(kl[kl > 0]))).item() if aggregate else kl,
+                kl=np.exp(np.mean(np.log(np.clip(kl, min=1e-9)))).item()
+                if aggregate
+                else kl,
             )
         else:
             result[layer] = LayerEval(
@@ -293,11 +305,15 @@ def generate_with_replacement(
     saes: Dict[int, SAE],
     do_sample: bool = False,
     stream: bool = True,
+    offload: bool = True,
 ):
+    for sae in saes.values():
+        sae.onload()
+
     replacement_model = make_replacement_model(
         model, {layer: sae for layer, sae in saes.items()}
     )
-    return generate(
+    result = generate(
         input,
         replacement_model,
         tokenizer,
@@ -305,3 +321,9 @@ def generate_with_replacement(
         temperature=0.5,
         stream=stream,
     )
+
+    if offload:
+        for sae in saes.values():
+            sae.offload()
+
+    return result

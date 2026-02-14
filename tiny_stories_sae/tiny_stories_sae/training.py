@@ -155,7 +155,8 @@ class TrainingResult:
         saes = self.checkpoint_saes(checkpoint_index)
         for layer, sae in list(saes.items()):
             saes[layer] = SAE(sae.config)
-            saes[layer].init_weights(sae)
+            if sae._device_tracker.device != torch.device("meta"):
+                saes[layer].init_weights(sae)
         result = TrainingResult(saes)
         for layer, lr in result.items():
             lr[0].total_tokens_trained = self[layer][
@@ -318,10 +319,13 @@ def training_loop(
 
         for pg in optimizer.param_groups:
             pg["lr"] = pg["base_lr"] * config.lr_schedule(
-                min(
-                    (num_used_tokens + previous_trained_tokens)
-                    / config.num_train_tokens,
-                    1.0,
+                max(
+                    min(
+                        (num_used_tokens + previous_trained_tokens)
+                        / config.num_train_tokens,
+                        1.0,
+                    ),
+                    0.0,
                 )
             )
 
@@ -373,6 +377,7 @@ def fine_tune(
     config: TrainingConfig,
     cache_dir: Optional[str] = None,
     checkpoints_at: Optional[List[int]] = None,
+    offload_after_training: bool = True,
 ):
     if config.method not in (
         TrainingMethod.finetuned,
@@ -383,10 +388,12 @@ def fine_tune(
     train_result = train_result.clone_from_checkpoint(checkpoint_index)
     training_saes = train_result.checkpoint_saes(0)
 
+
     # For consistency across methods, we always run our evals with the full replacement model
     # starting from the target layer
     eval_model = make_replacement_model(model, training_saes)
     for layer in sorted(config.train_layers, reverse=True):
+        training_saes[layer].onload()
         optimizer = make_optimizer(training_saes, [layer], config)
         if config.method is TrainingMethod.finetuned:
             stepper = KLFinetuneTrainingStepper(model, layer, training_saes)
@@ -407,6 +414,10 @@ def fine_tune(
             previous_trained_tokens=train_result[layer][0].total_tokens_trained,
         )
 
+    if offload_after_training:
+        for sae in train_result.final_saes.values():
+            sae.offload()
+
     return train_result
 
 
@@ -418,6 +429,7 @@ def train(
     config: TrainingConfig,
     cache_dir: Optional[str] = None,
     checkpoints_at: Optional[List[int]] = None,
+    offload_after_training: bool = True,
 ) -> TrainingResult:
     if config.method not in (
         TrainingMethod.standard,
@@ -459,5 +471,9 @@ def train(
             previous_trained_tokens=0,
             make_checkpoints_at=checkpoints_at,
         )
+
+    if offload_after_training:
+        for sae in train_result.final_saes.values():
+            sae.offload()
 
     return train_result

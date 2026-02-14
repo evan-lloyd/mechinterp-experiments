@@ -86,6 +86,14 @@ class SAE(torch.nn.Module):
         self.to(device)
         return self
 
+    def offload(self):
+        if self._device_tracker.device != torch.device("meta"):
+            self.to(torch.device("cpu"))
+
+    def onload(self):
+        if self._device_tracker.device != torch.device("meta"):
+            self.to(self.config.device)
+
     @_check_device
     def decode(self, x: torch.Tensor):
         return self.decoder(x)
