@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from ..training import TrainingConfig
 
 
-class EndToEndTrainingStepper(Stepper):
+class EndToEndFullTrainingStepper(Stepper):
     sae: SAE
     target_layer: int
 
@@ -24,7 +24,13 @@ class EndToEndTrainingStepper(Stepper):
     ):
         super().__init__(
             base_model,
-            make_replacement_model(base_model, {target_layer: saes[target_layer]}),
+            make_replacement_model(
+                base_model,
+                {
+                    layer: saes[layer]
+                    for layer in range(target_layer, base_model.config.num_layers)
+                },
+            ),
         )
         self.target_layer = target_layer
         self.sae = saes[target_layer]
@@ -34,8 +40,11 @@ class EndToEndTrainingStepper(Stepper):
     ) -> Dict[int, ActivationBatch]:
         return make_activation_batch(
             self.replacement_model,
-            [(layer, "layer") for layer in self.run_layers[1:]]
-            + [(self.target_layer, "sae")],
+            [
+                (layer, "sae")
+                for layer in range(self.target_layer, self.base_model.config.num_layers)
+            ]
+            + [(self.replacement_model.config.num_layers, "layer")],
             batch,
             start_input=baseline_activations[self.target_layer].layer_output,
             start_layer=self.target_layer,
@@ -55,7 +64,7 @@ class EndToEndTrainingStepper(Stepper):
         )
         for layer in range(self.target_layer + 1, self.base_model.config.num_layers):
             downstream_reconstruction_loss += mse_loss(
-                training_batch.replacement_activations[layer].layer_output,
+                training_batch.replacement_activations[layer].sae_output,
                 training_batch.baseline_activations[layer].layer_output,
                 training_batch.input_data,
             )

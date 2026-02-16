@@ -11,6 +11,8 @@ import torch
 from datasets import IterableDataset
 from transformers import AutoTokenizer
 
+from tiny_stories_sae.training_step.end_to_end_full import EndToEndFullTrainingStepper
+
 from .activation_cache import load_cache
 from .activation_data import TrainingBatch, make_batch_for_evals
 from .encoder import InteractionEncoder
@@ -35,6 +37,7 @@ class TrainingMethod(Enum):
     e2e = "End-to-end"
     finetuned = "KL Fine-tuning"
     next_layer_finetuned = "Next Layer + Fine-Tuning"
+    e2e_full = "End-to-end Full Replacement"
 
 
 @dataclass(kw_only=True)
@@ -388,7 +391,6 @@ def fine_tune(
     train_result = train_result.clone_from_checkpoint(checkpoint_index)
     training_saes = train_result.checkpoint_saes(0)
 
-
     # For consistency across methods, we always run our evals with the full replacement model
     # starting from the target layer
     eval_model = make_replacement_model(model, training_saes)
@@ -435,6 +437,7 @@ def train(
         TrainingMethod.standard,
         TrainingMethod.next_layer,
         TrainingMethod.e2e,
+        TrainingMethod.e2e_full,
     ):
         raise ValueError(
             f"Training method {config.method.value} must be finetuned from a checkpoint of another method"
@@ -458,6 +461,8 @@ def train(
             stepper = NextLayerTrainingStepper(model, layer, training_saes)
         elif config.method is TrainingMethod.e2e:
             stepper = EndToEndTrainingStepper(model, layer, training_saes)
+        elif config.method is TrainingMethod.e2e_full:
+            stepper = EndToEndFullTrainingStepper(model, layer, training_saes)
         training_loop(
             stepper,
             train_result[layer],
