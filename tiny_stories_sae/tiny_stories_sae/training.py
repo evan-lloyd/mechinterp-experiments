@@ -388,39 +388,42 @@ def fine_tune(
     ):
         raise ValueError(f"{config.method.value} is not a valid method for finetuning")
 
-    train_result = train_result.clone_from_checkpoint(checkpoint_index)
-    training_saes = train_result.checkpoint_saes(0)
+    try:
+        train_result = train_result.clone_from_checkpoint(checkpoint_index)
+        training_saes = train_result.checkpoint_saes(0)
 
-    # For consistency across methods, we always run our evals with the full replacement model
-    # starting from the target layer
-    eval_model = make_replacement_model(model, training_saes)
-    for layer in sorted(config.train_layers, reverse=True):
-        training_saes[layer].onload()
-        optimizer = make_optimizer(training_saes, [layer], config)
-        if config.method is TrainingMethod.finetuned:
-            stepper = KLFinetuneTrainingStepper(model, layer, training_saes)
-        elif config.method is TrainingMethod.next_layer_finetuned:
-            stepper = NextLayerFinetunedTrainingStepper(model, layer, training_saes)
+        # For consistency across methods, we always run our evals with the full replacement model
+        # starting from the target layer
+        eval_model = make_replacement_model(model, training_saes)
+        for layer in sorted(config.train_layers, reverse=True):
+            training_saes[layer].onload()
+            optimizer = make_optimizer(training_saes, [layer], config)
+            if config.method is TrainingMethod.finetuned:
+                stepper = KLFinetuneTrainingStepper(model, layer, training_saes)
+            elif config.method is TrainingMethod.next_layer_finetuned:
+                stepper = NextLayerFinetunedTrainingStepper(model, layer, training_saes)
 
-        training_loop(
-            stepper,
-            train_result[layer],
-            _train_evals(model, eval_model, layer),
-            tokenizer,
-            dataset,
-            config,
-            cache_dir,
-            optimizer,
-            f"Layer {layer}",
-            make_checkpoints_at=checkpoints_at,
-            previous_trained_tokens=train_result[layer][0].total_tokens_trained,
-        )
-
-    if offload_after_training:
-        for sae in train_result.final_saes.values():
-            sae.offload()
-
-    return train_result
+            training_loop(
+                stepper,
+                train_result[layer],
+                _train_evals(model, eval_model, layer),
+                tokenizer,
+                dataset,
+                config,
+                cache_dir,
+                optimizer,
+                f"Layer {layer}",
+                make_checkpoints_at=checkpoints_at,
+                previous_trained_tokens=train_result[layer][0].total_tokens_trained,
+            )
+        return train_result
+    finally:
+        if offload_after_training:
+            try:
+                for sae in train_result.final_saes.values():
+                    sae.offload()
+            except Exception:
+                pass
 
 
 def train(
@@ -442,43 +445,46 @@ def train(
         raise ValueError(
             f"Training method {config.method.value} must be finetuned from a checkpoint of another method"
         )
-    model.eval()
-    training_saes = {
-        layer: SAE(initial_saes[layer].config) for layer in config.train_layers
-    }
-    train_result = TrainingResult(training_saes)
+    try:
+        model.eval()
+        training_saes = {
+            layer: SAE(initial_saes[layer].config) for layer in config.train_layers
+        }
+        train_result = TrainingResult(training_saes)
 
-    # For consistency across methods, we always run our evals with the full replacement model
-    # starting from the target layer
-    eval_model = make_replacement_model(model, training_saes)
-    for layer in sorted(config.train_layers, reverse=True):
-        # Init weights from next layer, if it exists
-        training_saes[layer].init_weights(training_saes.get(layer + 1))
-        optimizer = make_optimizer(training_saes, [layer], config)
-        if config.method is TrainingMethod.standard:
-            stepper = StandardTrainingStepper(model, layer, training_saes)
-        elif config.method is TrainingMethod.next_layer:
-            stepper = NextLayerTrainingStepper(model, layer, training_saes)
-        elif config.method is TrainingMethod.e2e:
-            stepper = EndToEndTrainingStepper(model, layer, training_saes)
-        elif config.method is TrainingMethod.e2e_full:
-            stepper = EndToEndFullTrainingStepper(model, layer, training_saes)
-        training_loop(
-            stepper,
-            train_result[layer],
-            _train_evals(model, eval_model, layer),
-            tokenizer,
-            dataset,
-            config,
-            cache_dir,
-            optimizer,
-            f"Layer {layer}",
-            previous_trained_tokens=0,
-            make_checkpoints_at=checkpoints_at,
-        )
-
-    if offload_after_training:
-        for sae in train_result.final_saes.values():
-            sae.offload()
-
-    return train_result
+        # For consistency across methods, we always run our evals with the full replacement model
+        # starting from the target layer
+        eval_model = make_replacement_model(model, training_saes)
+        for layer in sorted(config.train_layers, reverse=True):
+            # Init weights from next layer, if it exists
+            training_saes[layer].init_weights(training_saes.get(layer + 1))
+            optimizer = make_optimizer(training_saes, [layer], config)
+            if config.method is TrainingMethod.standard:
+                stepper = StandardTrainingStepper(model, layer, training_saes)
+            elif config.method is TrainingMethod.next_layer:
+                stepper = NextLayerTrainingStepper(model, layer, training_saes)
+            elif config.method is TrainingMethod.e2e:
+                stepper = EndToEndTrainingStepper(model, layer, training_saes)
+            elif config.method is TrainingMethod.e2e_full:
+                stepper = EndToEndFullTrainingStepper(model, layer, training_saes)
+            training_loop(
+                stepper,
+                train_result[layer],
+                _train_evals(model, eval_model, layer),
+                tokenizer,
+                dataset,
+                config,
+                cache_dir,
+                optimizer,
+                f"Layer {layer}",
+                previous_trained_tokens=0,
+                make_checkpoints_at=checkpoints_at,
+            )
+        return train_result
+    finally:
+        if offload_after_training:
+            try:
+                for sae in train_result.final_saes.values():
+                    sae.offload()
+            except Exception:
+                pass

@@ -64,102 +64,111 @@ def run_validations(
     end_layer: Optional[int] = None,
     offload: bool = True,
 ):
-    if end_layer is None:
-        end_layer = model.config.num_layers + 1
-    full_replacement_model = make_replacement_model(
-        model,
-        {
-            layer: saes[layer]
-            for layer in range(start_layer, end_layer)
-            if layer in saes
-        },
-    )
-    model.eval()
-    num_tokens_consumed = 0
-    results = ValidationResult(
-        layer_results={layer: LayerEval() for layer in range(start_layer, end_layer)},
-        position_ids=np.empty((0,)),
-    )
-
-    for layer in range(start_layer, end_layer):
-        if layer in saes:
-            saes[layer].onload()
-
-    for step, batch in enumerate(
-        input_generator(
+    try:
+        if end_layer is None:
+            end_layer = model.config.num_layers + 1
+        full_replacement_model = make_replacement_model(
             model,
-            tokenizer,
-            dataset,
-            max_tokens=num_tokens,
-            tokenizer_batch_size=tokenizer_batch_size,
-            inference_batch_size=inference_batch_size,
-            max_batches=num_batches,
+            {
+                layer: saes[layer]
+                for layer in range(start_layer, end_layer)
+                if layer in saes
+            },
         )
-    ):
-        if "progress" not in locals():
-            progress = tqdm(
-                total=num_tokens
-                or num_batches * inference_batch_size * batch.position_ids.shape[1],
-                desc="Running SAE evals",
-            )
-        results.position_ids = np.concatenate(
-            (
-                results.position_ids,
-                batch.position_ids[batch.token_mask.bool()].flatten().cpu().numpy(),
-            ),
-            axis=0,
+        model.eval()
+        num_tokens_consumed = 0
+        results = ValidationResult(
+            layer_results={
+                layer: LayerEval() for layer in range(start_layer, end_layer)
+            },
+            position_ids=np.empty((0,)),
         )
 
-        batch.to(model.device)
-        if cache_dir is not None:
-            baseline_run = load_cache(
-                model.config.num_layers,
-                cache_dir,
-                step * inference_batch_size,
-                batch,
-            )
-            baseline_activations = {}
-            for k, v in baseline_run.items():
-                if k in range(start_layer, end_layer):
-                    baseline_activations[k] = ActivationBatch(
-                        layer_output=v.to(model.device)
-                    )
-        else:
-            baseline_activations = make_activation_batch(
-                model,
-                [(layer, "layer") for layer in range(start_layer, end_layer)],
-                batch,
-                start_layer=-1,  # not cached, so we start from raw input
-                end_layer=end_layer,
-            )
-        evals = run_evals(
-            make_batch_for_evals(
-                model,
-                full_replacement_model,
-                TrainingBatch(batch, {}, baseline_activations, replacement_layers=[]),
-                start_layer,
-                end_layer,
-            ),
-            list(range(start_layer, end_layer)),
-            aggregate=False,
-        )
-
-        for layer in evals.keys():
-            results.layer_results[layer].update(evals[layer])
-
-        num_tokens_consumed += batch.num_tokens
-        progress.update(batch.num_tokens)
-
-    progress.total = num_tokens_consumed
-    progress.refresh()
-    progress.close()
-
-    if offload:
         for layer in range(start_layer, end_layer):
             if layer in saes:
-                saes[layer].offload()
+                saes[layer].onload()
 
-    return results
+        for step, batch in enumerate(
+            input_generator(
+                model,
+                tokenizer,
+                dataset,
+                max_tokens=num_tokens,
+                tokenizer_batch_size=tokenizer_batch_size,
+                inference_batch_size=inference_batch_size,
+                max_batches=num_batches,
+            )
+        ):
+            if "progress" not in locals():
+                progress = tqdm(
+                    total=num_tokens
+                    or num_batches * inference_batch_size * batch.position_ids.shape[1],
+                    desc="Running SAE evals",
+                )
+            results.position_ids = np.concatenate(
+                (
+                    results.position_ids,
+                    batch.position_ids[batch.token_mask.bool()].flatten().cpu().numpy(),
+                ),
+                axis=0,
+            )
+
+            batch.to(model.device)
+            if cache_dir is not None:
+                baseline_run = load_cache(
+                    model.config.num_layers,
+                    cache_dir,
+                    step * inference_batch_size,
+                    batch,
+                )
+                baseline_activations = {}
+                for k, v in baseline_run.items():
+                    if k in range(start_layer, end_layer):
+                        baseline_activations[k] = ActivationBatch(
+                            layer_output=v.to(model.device)
+                        )
+            else:
+                baseline_activations = make_activation_batch(
+                    model,
+                    [(layer, "layer") for layer in range(start_layer, end_layer)],
+                    batch,
+                    start_layer=-1,  # not cached, so we start from raw input
+                    end_layer=end_layer,
+                )
+            evals = run_evals(
+                make_batch_for_evals(
+                    model,
+                    full_replacement_model,
+                    TrainingBatch(
+                        batch, {}, baseline_activations, replacement_layers=[]
+                    ),
+                    start_layer,
+                    end_layer,
+                ),
+                list(range(start_layer, end_layer)),
+                aggregate=False,
+            )
+
+            for layer in evals.keys():
+                results.layer_results[layer].update(evals[layer])
+
+            num_tokens_consumed += batch.num_tokens
+            progress.update(batch.num_tokens)
+
+        progress.total = num_tokens_consumed
+        progress.refresh()
+        progress.close()
+
+        return results
+
+    finally:
+        if offload:
+            try:
+                for layer in range(start_layer, end_layer):
+                    if layer in saes:
+                        saes[layer].offload()
+            except Exception:
+                pass
 
 
 @torch.no_grad
@@ -177,84 +186,95 @@ def run_single_layer_replacements(
     end_layer: Optional[int] = None,
     offload: bool = True,
 ):
-    if end_layer is None:
-        end_layer = model.config.num_layers + 1
+    try:
+        if end_layer is None:
+            end_layer = model.config.num_layers + 1
 
-    results = ValidationResult(
-        layer_results={layer: LayerEval() for layer in range(start_layer, end_layer)},
-        position_ids=np.empty((0,)),
-    )
+        results = ValidationResult(
+            layer_results={
+                layer: LayerEval() for layer in range(start_layer, end_layer)
+            },
+            position_ids=np.empty((0,)),
+        )
 
-    for layer in range(start_layer, end_layer):
-        if layer in saes:
-            saes[layer].onload()
-
-    for layer in range(start_layer, end_layer):
-        if layer not in saes:
-            continue
-
-        # This happens to run exactly the right replacement models we need
-        stepper = KLFinetuneTrainingStepper(model, layer, saes)
-
-        num_tokens_consumed = 0
-
-        for step, batch in enumerate(
-            input_generator(
-                model,
-                tokenizer,
-                dataset,
-                max_tokens=num_tokens,
-                tokenizer_batch_size=tokenizer_batch_size,
-                inference_batch_size=inference_batch_size,
-                max_batches=num_batches,
-            )
-        ):
-            if cache_dir is not None:
-                cache = load_cache(
-                    stepper.base_model.config.num_layers,
-                    cache_dir,
-                    step * inference_batch_size,
-                    batch,
-                )
-            else:
-                cache = None
-            if "progress" not in locals():
-                progress = tqdm(
-                    total=num_tokens
-                    or num_batches * inference_batch_size * batch.position_ids.shape[1],
-                    desc=f"Running SAE evals (layer {layer})",
-                )
-            results.position_ids = np.concatenate(
-                (
-                    results.position_ids,
-                    batch.position_ids[batch.token_mask.bool()].flatten().cpu().numpy(),
-                ),
-                axis=0,
-            )
-
-            batch.to(model.device)
-            evals = run_evals(
-                stepper.make_batch(batch, cache),
-                [model.config.num_layers],
-                aggregate=False,
-            )
-
-            results.layer_results[layer].update(evals[model.config.num_layers])
-
-            num_tokens_consumed += batch.num_tokens
-            progress.update(batch.num_tokens)
-
-        progress.total = num_tokens_consumed
-        progress.refresh()
-        progress.close()
-        del progress
-
-    if offload:
         for layer in range(start_layer, end_layer):
             if layer in saes:
-                saes[layer].offload()
+                saes[layer].onload()
 
-    return results
+        for layer in range(start_layer, end_layer):
+            if layer not in saes:
+                continue
+
+            # This happens to run exactly the right replacement models we need
+            stepper = KLFinetuneTrainingStepper(model, layer, saes)
+
+            num_tokens_consumed = 0
+
+            for step, batch in enumerate(
+                input_generator(
+                    model,
+                    tokenizer,
+                    dataset,
+                    max_tokens=num_tokens,
+                    tokenizer_batch_size=tokenizer_batch_size,
+                    inference_batch_size=inference_batch_size,
+                    max_batches=num_batches,
+                )
+            ):
+                if cache_dir is not None:
+                    cache = load_cache(
+                        stepper.base_model.config.num_layers,
+                        cache_dir,
+                        step * inference_batch_size,
+                        batch,
+                    )
+                else:
+                    cache = None
+                if "progress" not in locals():
+                    progress = tqdm(
+                        total=num_tokens
+                        or num_batches
+                        * inference_batch_size
+                        * batch.position_ids.shape[1],
+                        desc=f"Running SAE evals (layer {layer})",
+                    )
+                results.position_ids = np.concatenate(
+                    (
+                        results.position_ids,
+                        batch.position_ids[batch.token_mask.bool()]
+                        .flatten()
+                        .cpu()
+                        .numpy(),
+                    ),
+                    axis=0,
+                )
+
+                batch.to(model.device)
+                evals = run_evals(
+                    stepper.make_batch(batch, cache),
+                    [model.config.num_layers],
+                    aggregate=False,
+                )
+
+                results.layer_results[layer].update(evals[model.config.num_layers])
+
+                num_tokens_consumed += batch.num_tokens
+                progress.update(batch.num_tokens)
+
+            progress.total = num_tokens_consumed
+            progress.refresh()
+            progress.close()
+            del progress
+
+        return results
+    finally:
+        if offload:
+            try:
+                for layer in range(start_layer, end_layer):
+                    if layer in saes:
+                        saes[layer].offload()
+            except Exception:
+                pass
 
 
 @torch.no_grad

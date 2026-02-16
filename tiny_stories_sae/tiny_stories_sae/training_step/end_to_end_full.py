@@ -59,11 +59,9 @@ class EndToEndFullTrainingStepper(Stepper):
     def step(
         self, training_batch: TrainingBatch, config: "TrainingConfig"
     ) -> Dict[str, torch.Tensor]:
-        downstream_reconstruction_loss = torch.zeros(
-            (1,), device=self.base_model.device
-        )
-        for layer in range(self.target_layer + 1, self.base_model.config.num_layers):
-            downstream_reconstruction_loss += mse_loss(
+        reconstruction_loss = torch.zeros((1,), device=self.base_model.device)
+        for layer in range(self.target_layer, self.base_model.config.num_layers):
+            reconstruction_loss += mse_loss(
                 training_batch.replacement_activations[layer].sae_output,
                 training_batch.baseline_activations[layer].layer_output,
                 training_batch.input_data,
@@ -79,43 +77,23 @@ class EndToEndFullTrainingStepper(Stepper):
             training_batch.input_data,
         )
 
-        num_downstream_layers = (
-            self.base_model.config.num_layers - self.target_layer - 1
-        )
-
-        # Balance KL loss to the downstream MSE terms (or current layer if none) so that its scale
-        # is on equal footing with our other methods.
+        # Balance KL loss to MSE loss so that its scale is on equal footing with our other methods.
         kl_scale = 1.0
         downstream_scale = config.downstream_reconstruction_weight[self.target_layer]
         if config.balance_reconstruction_losses[self.target_layer]:
-            if num_downstream_layers == 0:
-                with torch.no_grad():
-                    mse_scale = mse_loss(
-                        training_batch.replacement_activations[
-                            self.target_layer
-                        ].sae_output,
-                        training_batch.baseline_activations[
-                            self.target_layer
-                        ].layer_output,
-                        training_batch.input_data,
-                    ).item()
-            else:
-                mse_scale = downstream_reconstruction_loss.item()
-            kl_scale *= mse_scale / (downstream_kl_loss.item() + 1e-8)
+            kl_scale *= reconstruction_loss.item() / (downstream_kl_loss.item() + 1e-8)
 
         weighted_kl_loss = kl_scale * downstream_kl_loss
-        weighted_downstream_reconstruction_loss = (
-            downstream_scale * downstream_reconstruction_loss
-        )
+        weighted_downstream_reconstruction_loss = downstream_scale * reconstruction_loss
 
         loss = (weighted_kl_loss + weighted_downstream_reconstruction_loss) / (
-            min(num_downstream_layers + 1, 2)
+            self.base_model.config.num_layers - self.target_layer + 1
         )
         loss.backward()
 
         return {
             "total_loss": loss.item(),
-            "raw_loss.downstream_reconstruction": downstream_reconstruction_loss.item(),
+            "raw_loss.downstream_reconstruction": reconstruction_loss.item(),
             "raw_loss.kl": downstream_kl_loss.item(),
             "weighted_loss.downstream_reconstruction": weighted_downstream_reconstruction_loss.item(),
             "weighted_loss.kl": weighted_kl_loss.item(),
