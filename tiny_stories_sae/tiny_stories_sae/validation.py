@@ -299,16 +299,13 @@ def run_evals(
         replacement = batch.replacement_activations[layer]
         baseline = batch.baseline_activations[layer]
         if baseline.logits is not None:
-            kl = kl_eval(
-                replacement.logits,
-                baseline.logits,
-                batch.input_data,
-                "np",
-            )
             result[layer] = LayerEval(
-                kl=np.exp(np.mean(np.log(np.clip(kl, min=1e-9)))).item()
-                if aggregate
-                else kl,
+                kl=kl_eval(
+                    replacement.logits,
+                    baseline.logits,
+                    batch.input_data,
+                    eval_type,
+                )
             )
         else:
             result[layer] = LayerEval(

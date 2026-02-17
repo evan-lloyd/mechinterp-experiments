@@ -45,20 +45,27 @@ def mse_loss(actual: torch.Tensor, target: torch.Tensor):
     return ((actual - target) ** 2).mean(dim=-1)
 
 
-@_handle_batch
-def kl_loss(actual: torch.Tensor, target: torch.Tensor):
-    return torch.nn.KLDivLoss(reduction="none", log_target=True)(
+# Not using decorator, since we want the geometric mean.
+def kl_loss(
+    actual: torch.Tensor,
+    target: torch.Tensor,
+    batch: DataBatch,
+    return_type: _ReturnType = "tensor",
+) -> torch.Tensor | np.ndarray | float:
+    result = torch.nn.KLDivLoss(reduction="none", log_target=True)(
         actual.log_softmax(-1),
         target.log_softmax(-1),
-    ).mean(dim=-1)
+    ).sum(dim=-1)[batch.token_mask.bool()]
+    if return_type == "np":
+        return result.flatten().cpu().numpy()
+    else:
+        result = result.clip(min=1e-9).log().mean().exp()
+        if return_type == "tensor":
+            return result
+        return result.item()
 
 
-@_handle_batch
-def kl_eval(actual: torch.Tensor, target: torch.Tensor):
-    return torch.nn.KLDivLoss(reduction="none", log_target=True)(
-        actual.log_softmax(-1),
-        target.log_softmax(-1),
-    ).sum(dim=-1)
+kl_eval = kl_loss
 
 
 @_handle_batch
