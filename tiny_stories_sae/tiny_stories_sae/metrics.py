@@ -2,6 +2,7 @@ from typing import Literal
 
 import numpy as np
 import torch
+from bitarray import bitarray
 
 from .activation_data import DataBatch
 
@@ -78,3 +79,16 @@ def rre_eval(actual: torch.Tensor, target: torch.Tensor):
 @_handle_batch
 def l0_eval(features: torch.Tensor, _):
     return (features > 0).to(torch.float32).sum(dim=-1)
+
+
+# Not using decorator, since aggregation logic is different.
+def live_features_eval(
+    features: torch.Tensor,
+    _: torch.Tensor,
+    batch: DataBatch,
+    return_type: _ReturnType = "float",
+):
+    result = bitarray((features[batch.token_mask.bool()].sum(dim=0) > 0).tolist())
+    if return_type == "float":
+        return sum(result) / features.shape[-1]
+    return result

@@ -365,6 +365,7 @@ def _train_evals(
             | {
                 "L0": result[target_layer].l0,
                 "kl": result[base_model.config.num_layers].kl,
+                "live_features": result[target_layer].live_features,
             }
         )
 

@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import torch
+from bitarray import bitarray
 from datasets import IterableDataset
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
@@ -16,7 +17,7 @@ from .activation_data import (
     make_activation_batch,
     make_batch_for_evals,
 )
-from .metrics import kl_eval, l0_eval, rre_eval
+from .metrics import kl_eval, l0_eval, live_features_eval, rre_eval
 from .ops import generate
 from .replacement_model import make_replacement_model
 from .sae import SAE
@@ -29,12 +30,19 @@ class LayerEval:
     rre: np.ndarray | float | None = None
     kl: np.ndarray | float | None = None
     l0: np.ndarray | float | None = None
+    live_features: bitarray | float | None = None
 
     def update(self, other: "LayerEval"):
         for attr in self.__class__.__dataclass_fields__:
             if getattr(self, attr) is None:
                 setattr(self, attr, getattr(other, attr))
             elif getattr(other, attr) is not None:
+                if attr == "live_features":
+                    assert isinstance(getattr(self, attr), bitarray) and isinstance(
+                        getattr(other, attr), bitarray
+                    ), "Trying to combine non-aggregated LayerEval"
+                    self.live_features |= other.live_features
+                    continue
                 assert isinstance(getattr(self, attr), np.ndarray) and isinstance(
                     getattr(other, attr), np.ndarray
                 ), "Trying to combine non-aggregated LayerEval"
@@ -316,6 +324,12 @@ def run_evals(
                     eval_type,
                 ),
                 l0=l0_eval(
+                    replacement.sae_features,
+                    None,
+                    batch.input_data,
+                    eval_type,
+                ),
+                live_features=live_features_eval(
                     replacement.sae_features,
                     None,
                     batch.input_data,
