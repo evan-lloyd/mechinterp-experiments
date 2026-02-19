@@ -4,6 +4,10 @@
       "name": "tiny_stories_sae",
       "path": "tiny_stories_sae"
     },
+    {
+      "name": "transformers_sae",
+      "path": "transformers_sae"
+    },
   ],
   "settings": {
     "python.languageServer": "None"

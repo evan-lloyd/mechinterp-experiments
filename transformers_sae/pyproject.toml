@@ -1,5 +1,5 @@
 [project]
-name = "tiny-stories-sae"
+name = "transformers-sae"
 requires-python = ">=3.12"
 dependencies = [
     "bitarray>=3.8.0",
@@ -34,3 +34,6 @@ torch = [
     { index = "pytorch-cpu", marker = "platform_system == 'Darwin'" },
     { index = "pytorch-cu126", marker = "platform_system != 'Darwin'" },
 ]
+
+[tool.ty]
+rules = { all = "warn", missing-argument = "error" }

@@ -211,3 +211,7 @@ __marimo__/
 
 # Notebook artifacts
 .plots
+.training_cache
+.validation_cache
+.checkpoints
+

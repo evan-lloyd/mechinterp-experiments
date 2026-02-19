@@ -1,0 +1,57 @@
+from typing import TYPE_CHECKING, Dict
+
+import torch
+
+from ..activation_data import ActivationBatch, TrainingBatch, make_activation_batch
+from ..data_batch import DataBatch
+from ..metrics import mse_loss
+from ..replacement_model import ReplacementModel, make_replacement_model
+from ..sae import SAE
+from .training_step import Stepper
+
+if TYPE_CHECKING:
+    from ..training import TrainingConfig
+
+
+class StandardTrainingStepper(Stepper):
+    sae: SAE
+    target_layer: int
+
+    def __init__(
+        self, base_model: ReplacementModel, target_layer: int, saes: Dict[int, SAE]
+    ):
+        super().__init__(
+            base_model,
+            make_replacement_model(base_model, {target_layer: saes[target_layer]}),
+        )
+        self.target_layer = target_layer
+        self.sae = saes[target_layer]
+
+    def run_replacement(
+        self, batch: DataBatch, baseline_activations: ActivationBatch
+    ) -> Dict[int, ActivationBatch]:
+        return make_activation_batch(
+            self.replacement_model,
+            [(self.target_layer, "sae")],
+            batch,
+            start_input=baseline_activations[self.target_layer].layer_output,
+            start_layer=self.target_layer,
+            end_layer=self.target_layer + 1,
+            start_at_sae=True,
+        )
+
+    def step(
+        self, training_batch: TrainingBatch, config: "TrainingConfig"
+    ) -> Dict[str, torch.Tensor]:
+        reconstruction_loss = mse_loss(
+            training_batch.replacement_activations[self.target_layer].sae_output,
+            training_batch.baseline_activations[self.target_layer].layer_output,
+            training_batch.input_data,
+        )
+
+        reconstruction_loss.backward()
+
+        return {
+            "total_loss": reconstruction_loss.item(),
+            "raw_loss.reconstruction": reconstruction_loss.item(),
+        }
