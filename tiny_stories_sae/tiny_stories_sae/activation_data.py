@@ -182,7 +182,9 @@ def make_batch_for_evals(
     # by starting at the first layer that wasn't replaced.
     missing_replacement_model_layers = sorted(
         list(
-            set(range(start_layer, end_layer)) - set(training_batch.replacement_layers)
+            # We never replace the logits layer, so don't count it as missing
+            set(range(start_layer, min(end_layer, full_replacement_model.config.num_layers)))
+            - set(training_batch.replacement_layers)
         )
     )
     needs_replacement_layers = [
