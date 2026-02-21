@@ -115,10 +115,13 @@ def cache_on_disk(cache_dir: str, model: ReplacementModel, batch: DataBatch):
     cache["position_ids"][old_num_rows:new_num_rows, :] = batch.position_ids.to(
         "cpu"
     ).numpy()
-    cache["activations"][:, old_num_rows:new_num_rows, :, :] = tensor_to_numpy(
+    cache["activations"][:, old_num_rows:new_num_rows, :, :] = (
         torch.stack(
             tuple(v[0] if isinstance(v, tuple) else v for v in activations.values())
-        ).to("cpu")
+        )
+        .to("cpu")
+        .view(torch.uint16)
+        .numpy()
     )
 
     metadata["num_tokens"] += batch.num_tokens
@@ -167,11 +170,10 @@ def load_cache(num_layers: int, cache_dir: str, cache_offset: int, batch: DataBa
     # batch object here
     cache = zarr.open_group(cache_dir, mode="r")
     return {
-        layer: torch.tensor(
+        layer: torch.from_numpy(
             cache["activations"][
                 layer, cache_offset : cache_offset + batch.batch_size, :, :
             ],
-            dtype=torch.bfloat16,
-        )
+        ).view(torch.bfloat16)
         for layer in range(num_layers)
     }

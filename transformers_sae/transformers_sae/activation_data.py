@@ -156,7 +156,6 @@ def make_batch_for_evals(
             ].layer_output
         else:
             prev_layer_data = None
-        print("new baseline run")
         new_baseline_run = _run_replacement_model(
             base_model,
             {

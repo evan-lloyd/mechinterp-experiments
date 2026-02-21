@@ -484,7 +484,7 @@ def train(
                 previous_trained_tokens=0,
                 make_checkpoints_at=checkpoints_at,
             )
-            return train_result
+
         return train_result
     finally:
         if offload_after_training:
