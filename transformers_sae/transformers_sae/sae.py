@@ -95,13 +95,17 @@ class SAE(torch.nn.Module):
             self.to(self.config.device)
 
     @_check_device
-    def decode(self, x: torch.Tensor):
-        return self.decoder(x)
+    def decode(self, x: torch.Tensor, should_cast: bool = True):
+        return self.decoder(x, should_cast)
 
     @_check_device
-    def encode(self, x: torch.Tensor):
-        return self.encoder(x)
+    def encode(self, x: torch.Tensor, should_cast: bool = True):
+        return self.encoder(x, should_cast)
 
     @_check_device
     def forward(self, x: torch.Tensor, *args, **kwargs):
-        return (self.decode(self.encode(x)),)
+        return (
+            self.decode(
+                self.encode(x.float(), should_cast=False), should_cast=False
+            ).to(x.dtype),
+        )

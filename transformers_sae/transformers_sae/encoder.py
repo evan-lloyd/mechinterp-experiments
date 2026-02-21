@@ -98,8 +98,18 @@ class Encoder(torch.nn.Module):
                 f'"{self.config.activation_function.kind}" not implemented'
             )
 
-    def forward(self, x: torch.Tensor):
-        return self._activation_fn(self.linear(x))
+    def forward(
+        self,
+        x: torch.Tensor,
+        should_cast: bool = True,
+    ):
+        out_dtype = x.dtype
+        if should_cast:
+            x = x.float()
+        result = self._activation_fn(self.linear(x))
+        if should_cast:
+            result = result.to(out_dtype)
+        return result
 
 
 class InteractionEncoder(Encoder):
@@ -135,10 +145,15 @@ class InteractionEncoder(Encoder):
         else:
             raise ValueError(f"Invalid initialization source: {type(init_from)}")
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, should_cast: bool = True):
+        out_dtype = x.dtype
+        if should_cast:
+            x = x.float()
         encoder_output = self.linear(x)
         features = self._activation_fn(encoder_output)
         for _ in range(self.config.n_interaction_iterations):
             features = self._activation_fn(encoder_output + features @ self.interaction)
 
+        if should_cast:
+            features = features.to(out_dtype)
         return features

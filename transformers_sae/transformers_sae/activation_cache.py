@@ -9,11 +9,12 @@ import numpy as np
 import torch
 import zarr
 from datasets import IterableDataset
+from ml_dtypes import bfloat16
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
 from .data_batch import DataBatch
-from .ops import ensure_directory
+from .ops import ensure_directory, tensor_to_numpy
 from .replacement_model import ReplacementModel
 from .tokenization import input_generator
 
@@ -62,7 +63,7 @@ def init_cache(
     zarr.create_array(
         cache_dir,
         name="activations",
-        dtype=np.float32,
+        dtype=np.uint16,  # Store as uint16, since bfloat16 isn't supported directly
         shape=(
             model.num_layers,
             0,
@@ -114,12 +115,10 @@ def cache_on_disk(cache_dir: str, model: ReplacementModel, batch: DataBatch):
     cache["position_ids"][old_num_rows:new_num_rows, :] = batch.position_ids.to(
         "cpu"
     ).numpy()
-    cache["activations"][:, old_num_rows:new_num_rows, :, :] = (
+    cache["activations"][:, old_num_rows:new_num_rows, :, :] = tensor_to_numpy(
         torch.stack(
             tuple(v[0] if isinstance(v, tuple) else v for v in activations.values())
-        )
-        .to("cpu")
-        .numpy()
+        ).to("cpu")
     )
 
     metadata["num_tokens"] += batch.num_tokens
@@ -138,7 +137,6 @@ def build_cache(
     inference_batch_size: int,
 ):
     progress = tqdm(total=num_tokens, desc="Building activation cache")
-    context_length = model.context_length
 
     init_cache(
         model,
@@ -172,7 +170,8 @@ def load_cache(num_layers: int, cache_dir: str, cache_offset: int, batch: DataBa
         layer: torch.tensor(
             cache["activations"][
                 layer, cache_offset : cache_offset + batch.batch_size, :, :
-            ]
+            ],
+            dtype=torch.bfloat16,
         )
         for layer in range(num_layers)
     }

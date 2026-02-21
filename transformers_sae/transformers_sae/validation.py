@@ -348,6 +348,7 @@ def generate_with_replacement(
     do_sample: bool = False,
     stream: bool = True,
     offload: bool = True,
+    max_new_tokens: int = 100,
 ):
     for sae in saes.values():
         sae.onload()
@@ -362,6 +363,8 @@ def generate_with_replacement(
         do_sample=do_sample,
         temperature=0.5,
         stream=stream,
+        max_new_tokens=max_new_tokens,
+        use_cache=True,
     )
 
     if offload:

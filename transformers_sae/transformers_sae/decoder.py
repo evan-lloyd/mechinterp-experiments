@@ -41,5 +41,11 @@ class Decoder(torch.nn.Module):
         else:
             raise ValueError(f"Invalid initialization source: {type(init_from)}")
 
-    def forward(self, x: torch.Tensor):
-        return self.linear(x)
+    def forward(self, x: torch.Tensor, should_cast: bool = True):
+        orig_dtype = x.dtype
+        if should_cast:
+            x = x.float()
+        result = self.linear(x)
+        if should_cast:
+            result = result.to(orig_dtype)
+        return result

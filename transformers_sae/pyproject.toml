@@ -2,16 +2,19 @@
 name = "transformers-sae"
 requires-python = ">=3.12"
 dependencies = [
+    "accelerate>=1.12.0",
     "bitarray>=3.8.0",
+    "bitsandbytes>=0.49.2",
     "cloudpickle>=3.1.2",
     "datasets>=4.4.2",
     "jupyter>=1.1.1",
     "jupyterlab>=4.5.1",
     "matplotlib>=3.10.8",
+    "ml-dtypes>=0.5.4",
     "safetensors>=0.7.0",
     "scipy>=1.17.0",
     "torch>=2.9.1",
-    "transformers>=4.57.3",
+    "transformers[mistral-common]>=4.57.3",
     "zarr>=3.1.5",
 ]
 version = "0.0.0"

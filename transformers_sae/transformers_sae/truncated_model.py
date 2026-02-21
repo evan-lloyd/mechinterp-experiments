@@ -35,9 +35,11 @@ def truncated_model(
     class _StartAtSAE(torch.nn.Module):
         def __init__(self):
             super().__init__()
+            self.sae = model.transformer.h[start_layer].sae
 
         def forward(self, x: torch.Tensor, *args, **kwargs):
-            return model.transformer.h[start_layer].sae(x)
+            result = self.sae(x.float(), should_cast=False)
+            return (result[0].to(x.dtype), )
 
     patched_layers = torch.nn.ModuleList(
         model.transformer.h[max(start_layer, 0) : end_layer]
@@ -49,10 +51,11 @@ def truncated_model(
     class _TruncatedTransformer(torch.nn.Module):
         def __init__(self):
             super().__init__()
+            self.layers = patched_layers
 
         def forward(self, x: torch.Tensor, *args, **kwargs):
             residual = x
-            for layer in patched_layers:
+            for layer in self.layers:
                 residual = layer(
                     residual,
                     attention_mask=kwargs.get("attention_mask"),

@@ -121,11 +121,15 @@ def tokenize_strings(
         ), list(token_ids.values())
 
     if context_length not in _ONES:
-        ones = _ONES[context_length] = torch.ones((context_length, context_length))
+        ones = _ONES[context_length] = torch.ones(
+            (context_length, context_length), dtype=dtype
+        )
     else:
         ones = _ONES[context_length]
     if context_length not in _ZEROS:
-        zeros = _ZEROS[context_length] = torch.zeros((context_length, context_length))
+        zeros = _ZEROS[context_length] = torch.zeros(
+            (context_length, context_length), dtype=dtype
+        )
     else:
         zeros = _ZEROS[context_length]
 
@@ -198,7 +202,7 @@ def tokenize_strings(
 
     unused_inputs = list(token_ids.values())
     position_ids = torch.stack(position_id_stack)
-    token_mask = (position_ids >= 0).float()
+    token_mask = (position_ids >= 0).to(dtype=torch.float32)
 
     # These have to be non-negative on CUDA kernels
     position_ids = torch.where(position_ids >= 0, position_ids, 0)

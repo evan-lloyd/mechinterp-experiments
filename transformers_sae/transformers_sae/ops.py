@@ -1,6 +1,8 @@
+import math
 import os
 import tempfile
 import uuid
+import weakref
 import zipfile
 from collections import defaultdict
 from io import StringIO
@@ -8,19 +10,21 @@ from typing import TYPE_CHECKING, Sequence, Tuple
 
 import cloudpickle
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 from IPython.display import HTML, SVG, display
+from ml_dtypes import bfloat16
 from safetensors import safe_open
 from safetensors.numpy import save_file as save_file_numpy
 from safetensors.torch import save_file as save_file_torch
+from torch.utils._python_dispatch import TorchDispatchMode
+from torch.utils._pytree import tree_map_only
+from torch.utils.weak import WeakIdKeyDictionary
 from transformers import AutoModel, AutoTokenizer, TextStreamer
 
 if TYPE_CHECKING:
     from .sae import SAE
     from .training import SAECheckpoint, TrainingResult
-
-# TinyStories33M max_position_embeddings
-MAX_GENERATION = 2048
 
 
 def save_checkpoint(checkpoint: "SAECheckpoint", out_file: str):
@@ -191,7 +195,6 @@ def generate(
         with torch.inference_mode():
             return model.generate(
                 **inputs,
-                max_length=MAX_GENERATION,
                 streamer=streamer,
                 tokenizer=tokenizer,
                 **kwargs,
@@ -312,3 +315,74 @@ def display_sortable_html_table(
     the result. Same arguments as ``render_sortable_html_table``.
     """
     display(HTML(render_sortable_html_table(headers, rows, table_id)))
+
+
+# https://dev-discuss.pytorch.org/t/how-to-measure-memory-usage-from-your-model-without-running-it/2024
+# Track all the memory being used by Tensors.
+# Only max is tracked but others can be added.
+# Minimum allocation size
+PYTORCH_MIN_ALLOCATE = 2**9
+
+
+# Use this Mode to call track on every Tensor being created by functions
+class MemoryTrackingMode(TorchDispatchMode):
+    _memory_max: int
+    memory_use: WeakIdKeyDictionary
+
+    def update_stats(self):
+        curr_use = 0
+        for k, v in self.memory_use.items():
+            curr_use += (
+                math.ceil(k.size() * k.element_size() / PYTORCH_MIN_ALLOCATE)
+                * PYTORCH_MIN_ALLOCATE
+            )
+
+        self._memory_max = max(curr_use, self._memory_max)
+
+    def track(self, t: torch.Tensor):
+        def cb(_):
+            self.update_stats()
+
+        st = t.untyped_storage()
+        wt = weakref.ref(st, cb)
+        self.memory_use[st] = wt
+        self.update_stats()
+
+    def __enter__(self, *args, **kwargs):
+        super().__enter__(*args, **kwargs)
+        self._memory_max = 0
+        self.memory_use = WeakIdKeyDictionary()
+        return self
+
+    def __exit__(self, *args, **kwargs):
+        super().__exit__(*args, **kwargs)
+        self.memory_use = WeakIdKeyDictionary()
+
+    @property
+    def memory_max(self) -> str:
+        """Return memory_max as a human-readable string."""
+        bytes_val = self._memory_max
+        if bytes_val >= 1024**3:
+            return f"{bytes_val / 1024**3:.2f} GB"
+        elif bytes_val >= 1024**2:
+            return f"{bytes_val / 1024**2:.2f} MB"
+        elif bytes_val >= 1024:
+            return f"{bytes_val / 1024:.2f} KB"
+        else:
+            return f"{bytes_val} B"
+
+    def __torch_dispatch__(self, func, types, args, kwargs=None):
+        res = func(*args, **kwargs or {})
+
+        tree_map_only(torch.Tensor, lambda t: self.track(t), res)
+        return res
+
+
+def tensor_to_numpy(t: torch.Tensor):
+    """Convert tensor to numpy ndarray, handling bfloat16 if necessary using the
+    ml_dtypes extension."""
+
+    if t.dtype is torch.bfloat16:
+        # https://github.com/pytorch/pytorch/blob/60dc00dcd74dd7e22533b81eeb0e6382fbf9dea2/torch/onnx/_internal/exporter/_core.py#L140
+        return t.view(torch.uint16).numpy().view(bfloat16)
+    return t.numpy()

@@ -5,6 +5,7 @@ import torch
 from bitarray import bitarray
 
 from .activation_data import DataBatch
+from .ops import tensor_to_numpy
 
 """NB: The losses here are deliberately taking a mean, rather than sum, on the final dimension, to factor out
 the implicit dependence on d_model (mse) or d_vocab (kl). This is probably non-standard, but is effectively
@@ -26,7 +27,9 @@ def _handle_batch(fn):
         a numpy array of the raw values returned by the wrapped function, for only the non-masked tokens.
         """
         if return_type == "np":
-            return fn(actual, target)[batch.token_mask.bool()].flatten().cpu().numpy()
+            return tensor_to_numpy(
+                fn(actual, target)[batch.token_mask.bool()].flatten().cpu()
+            )
         else:
             result = (fn(actual, target) * batch.token_mask).sum() / batch.num_tokens
             if return_type == "tensor":
@@ -38,12 +41,14 @@ def _handle_batch(fn):
 
 @_handle_batch
 def cos_dist_loss(actual: torch.Tensor, target: torch.Tensor):
-    return 1 - torch.nn.functional.cosine_similarity(actual, target, dim=-1)
+    return 1 - torch.nn.functional.cosine_similarity(
+        actual.float(), target.float(), dim=-1
+    )
 
 
 @_handle_batch
 def mse_loss(actual: torch.Tensor, target: torch.Tensor):
-    return ((actual - target) ** 2).mean(dim=-1)
+    return ((actual.float() - target.float()) ** 2).mean(dim=-1)
 
 
 # Not using decorator, since we want the geometric mean.
@@ -54,11 +59,11 @@ def kl_loss(
     return_type: _ReturnType = "tensor",
 ) -> torch.Tensor | np.ndarray | float:
     result = torch.nn.KLDivLoss(reduction="none", log_target=True)(
-        actual.log_softmax(-1),
-        target.log_softmax(-1),
+        actual.float().log_softmax(-1),
+        target.float().log_softmax(-1),
     ).sum(dim=-1)[batch.token_mask.bool()]
     if return_type == "np":
-        return result.flatten().cpu().numpy()
+        return tensor_to_numpy(result.flatten().cpu())
     else:
         result = result.clip(min=1e-9).log().mean().exp()
         if return_type == "tensor":
@@ -71,8 +76,8 @@ kl_eval = kl_loss
 
 @_handle_batch
 def rre_eval(actual: torch.Tensor, target: torch.Tensor):
-    return torch.linalg.vector_norm(actual - target, dim=-1) / (
-        torch.linalg.vector_norm(target, dim=-1) + 1e-8
+    return torch.linalg.vector_norm(actual.float() - target.float(), dim=-1) / (
+        torch.linalg.vector_norm(target.float(), dim=-1) + 1e-8
     )
 
 

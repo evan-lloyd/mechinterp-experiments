@@ -260,9 +260,12 @@ def training_loop(
         else:
             cache = None
         batch.to(stepper.base_model.device)
-        training_batch = stepper.make_batch(batch, cache)
 
-        losses = stepper.step(training_batch, config)
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            training_batch = stepper.make_batch(batch, cache)
+            loss, step_result = stepper.step(training_batch, config)
+
+        loss.backward()
 
         # After first batch, step before doing evals
         if num_used_tokens + previous_trained_tokens > 0:
@@ -270,7 +273,8 @@ def training_loop(
             num_used_tokens += batch.num_tokens
 
         if num_used_tokens >= eval_threshold:
-            evals = eval_fn(training_batch)
+            with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+                evals = eval_fn(training_batch)
             progress.set_postfix(evals, refresh=False)
             eval_threshold = min(
                 eval_threshold + config.eval_interval,
@@ -283,7 +287,7 @@ def training_loop(
                 num_used_tokens + previous_trained_tokens,
             )
             checkpoints[-1].append(evals)
-            checkpoints[-1].append(losses)
+            checkpoints[-1].append(step_result)
             checkpoints[-1].total_tokens_trained = (
                 num_used_tokens + previous_trained_tokens
             )
@@ -480,6 +484,7 @@ def train(
                 previous_trained_tokens=0,
                 make_checkpoints_at=checkpoints_at,
             )
+            return train_result
         return train_result
     finally:
         if offload_after_training:

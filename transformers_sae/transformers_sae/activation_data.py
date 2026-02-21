@@ -63,11 +63,12 @@ def _run_replacement_model(
             hook_stack.enter_context(
                 module.register_forward_hook(partial(_hook_output, hook_name))
             )
-        model_to_run(
-            *input_args,
-            **input_kwargs,
-            use_cache=False,
-        )
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            model_to_run(
+                *input_args,
+                **input_kwargs,
+                use_cache=False,
+            )
 
     return {k: ensure_tensor(v) for k, v in activation_cache.items()}
 
@@ -155,6 +156,7 @@ def make_batch_for_evals(
             ].layer_output
         else:
             prev_layer_data = None
+        print("new baseline run")
         new_baseline_run = _run_replacement_model(
             base_model,
             {
@@ -182,7 +184,9 @@ def make_batch_for_evals(
     # by starting at the first layer that wasn't replaced.
     missing_replacement_model_layers = sorted(
         list(
-            set(range(start_layer, end_layer)) - set(training_batch.replacement_layers)
+            # We never replace the logits layer, so don't count it as missing
+            set(range(start_layer, min(end_layer, full_replacement_model.num_layers)))
+            - set(training_batch.replacement_layers)
         )
     )
     needs_replacement_layers = [
