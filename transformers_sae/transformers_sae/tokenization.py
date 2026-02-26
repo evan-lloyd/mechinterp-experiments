@@ -4,6 +4,8 @@ from typing import Dict, Iterator, List, Optional, Tuple
 
 import torch
 from datasets import IterableDataset
+from torch.utils.data import DataLoader
+from torch.utils.data import IterableDataset as TorchIterableDataset
 from transformers import AutoTokenizer
 
 from .data_batch import DataBatch
@@ -268,7 +270,7 @@ def _iter_dataset(
             return
 
 
-def input_generator(
+def _input_generator(
     model: ReplacementModel,
     tokenizer: AutoTokenizer,
     dataset: IterableDataset,
@@ -307,3 +309,36 @@ def input_generator(
             # be training on the overlapping tokens twice, but I doubt this matters much.
             yield batch
         state.num_tokens_generated += batch.num_tokens
+
+
+def make_dataloader(
+    model: ReplacementModel,
+    tokenizer: AutoTokenizer,
+    dataset: IterableDataset,
+    max_tokens: int | None,
+    tokenizer_batch_size: int,
+    inference_batch_size: int,
+    offset: int = 0,
+    max_batches: int | None = None,
+):
+    class InputGeneratorDataset(TorchIterableDataset):
+        def __iter__(self):
+            return iter(
+                _input_generator(
+                    model,
+                    tokenizer,
+                    dataset,
+                    max_tokens=max_tokens,
+                    max_batches=max_batches,
+                    tokenizer_batch_size=tokenizer_batch_size,
+                    inference_batch_size=inference_batch_size,
+                    offset=offset,
+                )
+            )
+
+    return DataLoader(
+        InputGeneratorDataset(),
+        batch_size=None,
+        num_workers=1,
+        pin_memory=True,
+    )

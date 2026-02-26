@@ -15,7 +15,7 @@ from transformers import AutoTokenizer
 from .data_batch import DataBatch
 from .ops import ensure_directory
 from .replacement_model import ReplacementModel
-from .tokenization import input_generator
+from .tokenization import make_dataloader
 
 
 @torch.no_grad()
@@ -155,7 +155,7 @@ def build_cache(
     num_used_tokens = 0
 
     model.eval()
-    for batch in input_generator(
+    for batch in make_dataloader(
         model,
         tokenizer,
         dataset,
