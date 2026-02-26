@@ -57,7 +57,7 @@ class ValidationResult:
     position_ids: np.ndarray
 
 
-@torch.no_grad
+@torch.no_grad()
 def run_validations(
     model: ReplacementModel,
     tokenizer: AutoTokenizer,
@@ -179,7 +179,7 @@ def run_validations(
                 pass
 
 
-@torch.no_grad
+@torch.no_grad()
 def run_single_layer_replacements(
     model: ReplacementModel,
     tokenizer: AutoTokenizer,
@@ -285,7 +285,7 @@ def run_single_layer_replacements(
                 pass
 
 
-@torch.no_grad
+@torch.no_grad()
 def run_evals(
     batch: TrainingBatch,
     layers: List[int],

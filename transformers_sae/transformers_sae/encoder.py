@@ -33,6 +33,7 @@ class EncoderConfig:
     d_model: int
     d_sae: int
     device: torch.device
+    dtype: torch.dtype
     activation_function: ActivationFunctionConfig
 
 
@@ -48,7 +49,9 @@ class Encoder(torch.nn.Module):
     ):
         super().__init__()
         self.config = config
-        self.linear = torch.nn.Linear(config.d_model, config.d_sae, device="meta")
+        self.linear = torch.nn.Linear(
+            config.d_model, config.d_sae, device="meta", dtype=self.config.dtype
+        )
 
     def init_weights(
         self,
@@ -80,7 +83,11 @@ class Encoder(torch.nn.Module):
                 .contiguous()
             )
             self.linear.bias = torch.nn.Parameter(
-                torch.zeros(self.config.d_sae, device=to_device or self.config.device)
+                torch.zeros(
+                    self.config.d_sae,
+                    device=to_device or self.config.device,
+                    dtype=self.config.dtype,
+                )
             )
         else:
             raise ValueError(f"Invalid initialization source: {type(init_from)}")
@@ -105,7 +112,7 @@ class Encoder(torch.nn.Module):
     ):
         out_dtype = x.dtype
         if should_cast:
-            x = x.float()
+            x = x.to(self.config.dtype)
         result = self._activation_fn(self.linear(x))
         if should_cast:
             result = result.to(out_dtype)
@@ -119,10 +126,12 @@ class InteractionEncoder(Encoder):
     ):
         super().__init__(config)
         self.interaction = torch.nn.Parameter(
-            torch.empty((config.d_sae, config.d_sae), device="meta")
+            torch.empty(
+                (config.d_sae, config.d_sae), device="meta", dtype=self.config.dtype
+            )
         )
 
-    @torch.no_grad
+    @torch.no_grad()
     def init_weights(
         self,
         init_from: Union["Encoder", "Decoder", None] = None,
@@ -140,7 +149,11 @@ class InteractionEncoder(Encoder):
             )
         elif isinstance(init_from, Decoder):
             self.interaction = torch.nn.Parameter(
-                torch.eye(self.config.d_sae, device=to_device or self.config.device)
+                torch.eye(
+                    self.config.d_sae,
+                    device=to_device or self.config.device,
+                    dtype=self.config.dtype,
+                )
             )
         else:
             raise ValueError(f"Invalid initialization source: {type(init_from)}")
@@ -148,7 +161,7 @@ class InteractionEncoder(Encoder):
     def forward(self, x: torch.Tensor, should_cast: bool = True):
         out_dtype = x.dtype
         if should_cast:
-            x = x.float()
+            x = x.to(self.config.dtype)
         encoder_output = self.linear(x)
         features = self._activation_fn(encoder_output)
         for _ in range(self.config.n_interaction_iterations):

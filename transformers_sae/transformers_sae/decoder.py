@@ -8,15 +8,18 @@ class DecoderConfig:
     d_model: int
     d_sae: int
     device: torch.device
+    dtype: torch.dtype
 
 
 class Decoder(torch.nn.Module):
     def __init__(self, config: DecoderConfig):
         super().__init__()
         self.config = config
-        self.linear = torch.nn.Linear(config.d_sae, config.d_model, device="meta")
+        self.linear = torch.nn.Linear(
+            config.d_sae, config.d_model, device="meta", dtype=self.config.dtype
+        )
 
-    @torch.no_grad
+    @torch.no_grad()
     def init_weights(
         self, init_from: Union["Decoder", None] = None, to_device: str | None = None
     ):
@@ -25,6 +28,7 @@ class Decoder(torch.nn.Module):
                 self.config.d_sae,
                 self.config.d_model,
                 device=to_device or self.config.device,
+                dtype=self.config.dtype,
             )
         elif isinstance(init_from, Decoder):
             self.linear.weight = torch.nn.Parameter(
@@ -44,7 +48,7 @@ class Decoder(torch.nn.Module):
     def forward(self, x: torch.Tensor, should_cast: bool = True):
         orig_dtype = x.dtype
         if should_cast:
-            x = x.float()
+            x = x.to(self.config.dtype)
         result = self.linear(x)
         if should_cast:
             result = result.to(orig_dtype)

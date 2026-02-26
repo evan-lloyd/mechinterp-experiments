@@ -1,5 +1,6 @@
+from torchgen.model import Type
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, TypeAlias, Literal
 
 import torch
 
@@ -19,12 +20,35 @@ class SAEConfig:
     d_model: int
     d_sae: int
     device: torch.device
+    dtype: torch.dtype
     encoder: EncoderConfig
     decoder: DecoderConfig
 
-    def __post_init__(self):
-        if not isinstance(self.device, torch.device):
-            self.device = torch.device(self.device)
+
+EncoderKind: TypeAlias = Literal["relu", "topk"]
+
+
+def make_training_config(
+    *,
+    d_model: int,
+    d_sae: int,
+    device: str | torch.device,
+    dtype: torch.dtype,
+    encoder_kind: EncoderKind,
+    top_k: int | None = None,
+) -> SAEConfig:
+    if encoder_kind == "relu":
+        activation_config = ReluActivationFunctionConfig()
+    elif encoder_kind == "topk":
+        assert top_k is not None, "Must specify top_k for TopK SAE"
+        activation_config = TopKActivationFunctionConfig(top_k)
+    else:
+        raise ValueError(f"Unknown encoder_kind {encoder_kind}")
+
+    device = torch.device(device)
+    encoder_config = EncoderConfig(d_model, d_sae, device, dtype, activation_config)
+    decoder_config = DecoderConfig(d_model, d_sae, device, dtype)
+    return SAEConfig(d_model, d_sae, device, dtype, encoder_config, decoder_config)
 
 
 def _check_device(method):
@@ -57,7 +81,7 @@ class SAE(torch.nn.Module):
         self.decoder = Decoder(config.decoder)
         self._device_tracker = torch.nn.Buffer(torch.empty((0,), device="meta"))
 
-    @torch.no_grad
+    @torch.no_grad()
     def init_weights(
         self,
         init_from: Optional["SAE"] = None,
@@ -106,6 +130,7 @@ class SAE(torch.nn.Module):
     def forward(self, x: torch.Tensor, *args, **kwargs):
         return (
             self.decode(
-                self.encode(x.float(), should_cast=False), should_cast=False
+                self.encode(x.to(self.config.dtype), should_cast=False),
+                should_cast=False,
             ).to(x.dtype),
         )

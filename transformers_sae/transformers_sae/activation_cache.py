@@ -9,17 +9,16 @@ import numpy as np
 import torch
 import zarr
 from datasets import IterableDataset
-from ml_dtypes import bfloat16
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
 from .data_batch import DataBatch
-from .ops import ensure_directory, tensor_to_numpy
+from .ops import ensure_directory
 from .replacement_model import ReplacementModel
 from .tokenization import input_generator
 
 
-@torch.no_grad
+@torch.no_grad()
 def _run_base_model(
     base_model: ReplacementModel,
     batch: DataBatch,
@@ -60,10 +59,17 @@ def init_cache(
     }
     metadata = {"num_tokens": 0, "num_rows": 0, "num_layers": model.num_layers}
     ensure_directory(cache_dir)
+    if model.dtype == torch.bfloat16:
+        dtype = np.uint16
+    elif model.dtype == torch.float16:
+        dtype = np.float16
+    else:
+        dtype = np.float32
+
     zarr.create_array(
         cache_dir,
         name="activations",
-        dtype=np.uint16,  # Store as uint16, since bfloat16 isn't supported directly
+        dtype=dtype,  # Store as uint16, since bfloat16 isn't supported directly
         shape=(
             model.num_layers,
             0,
@@ -115,14 +121,13 @@ def cache_on_disk(cache_dir: str, model: ReplacementModel, batch: DataBatch):
     cache["position_ids"][old_num_rows:new_num_rows, :] = batch.position_ids.to(
         "cpu"
     ).numpy()
-    cache["activations"][:, old_num_rows:new_num_rows, :, :] = (
-        torch.stack(
-            tuple(v[0] if isinstance(v, tuple) else v for v in activations.values())
-        )
-        .to("cpu")
-        .view(torch.uint16)
-        .numpy()
-    )
+    torch_stack = torch.stack(
+        tuple(v[0] if isinstance(v, tuple) else v for v in activations.values())
+    ).to("cpu")
+    # Hack to handle bfloat16
+    if cache["activations"].dtype == np.uint16:
+        torch_stack = torch_stack.view(torch.uint16)
+    cache["activations"][:, old_num_rows:new_num_rows, :, :] = torch_stack.numpy()
 
     metadata["num_tokens"] += batch.num_tokens
     metadata["num_rows"] = new_num_rows
@@ -169,11 +174,19 @@ def load_cache(num_layers: int, cache_dir: str, cache_offset: int, batch: DataBa
     # TODO: we should reconstruct the batch from cache, rather than needing the
     # batch object here
     cache = zarr.open_group(cache_dir, mode="r")
+
+    def _maybe_convert_bfloat16(t: torch.Tensor):
+        if cache["activations"].dtype == np.uint16:
+            return t.view(torch.bfloat16)
+        return t
+
     return {
-        layer: torch.from_numpy(
-            cache["activations"][
-                layer, cache_offset : cache_offset + batch.batch_size, :, :
-            ],
-        ).view(torch.bfloat16)
+        layer: _maybe_convert_bfloat16(
+            torch.from_numpy(
+                cache["activations"][
+                    layer, cache_offset : cache_offset + batch.batch_size, :, :
+                ],
+            )
+        )
         for layer in range(num_layers)
     }
