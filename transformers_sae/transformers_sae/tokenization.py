@@ -1,3 +1,4 @@
+import multiprocessing
 from dataclasses import dataclass, field
 from math import inf
 from typing import Dict, Iterator, List, Optional, Tuple
@@ -336,9 +337,24 @@ def make_dataloader(
                 )
             )
 
+    # Can't/don't want to serialize process args if we're on MacOS, so just return a regular iterator
+    if multiprocessing.get_start_method() == "spawn":
+        return iter(
+            _input_generator(
+                model,
+                tokenizer,
+                dataset,
+                max_tokens=max_tokens,
+                max_batches=max_batches,
+                tokenizer_batch_size=tokenizer_batch_size,
+                inference_batch_size=inference_batch_size,
+                offset=offset,
+            )
+        )
+
     return DataLoader(
         InputGeneratorDataset(),
         batch_size=None,
         num_workers=1,
-        pin_memory=True,
+        pin_memory=model.device.type == "cuda",
     )
