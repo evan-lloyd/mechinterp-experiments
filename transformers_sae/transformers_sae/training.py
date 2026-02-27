@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -15,6 +16,7 @@ from .activation_cache import load_cache
 from .activation_data import TrainingBatch, make_batch_for_evals
 from .encoder import InteractionEncoder
 from .multiline_progress import MultilineProgress
+from .ops import save_training_result
 from .replacement_model import ReplacementModel, make_replacement_model
 from .sae import SAE
 from .tokenization import make_dataloader
@@ -221,6 +223,7 @@ def training_loop(
     progress_desc: str,
     make_checkpoints_at: List[int] = None,
     previous_trained_tokens: int = 0,
+    checkpoint_dir: Optional[str] = None,
 ) -> None:
     sae = checkpoints[-1].sae
 
@@ -261,7 +264,10 @@ def training_loop(
             cache = None
         batch.to(stepper.base_model.device)
 
-        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        with torch.autocast(
+            device_type="cuda" if stepper.base_model.device.type == "cuda" else "cpu",
+            dtype=torch.bfloat16,
+        ):
             training_batch = stepper.make_batch(batch, cache)
             loss, step_result = stepper.step(training_batch, config)
 
@@ -273,7 +279,12 @@ def training_loop(
             num_used_tokens += batch.num_tokens
 
         if num_used_tokens >= eval_threshold:
-            with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            with torch.autocast(
+                device_type="cuda"
+                if stepper.base_model.device.type == "cuda"
+                else "cpu",
+                dtype=torch.bfloat16,
+            ):
                 evals = eval_fn(training_batch)
             progress.set_postfix(evals, refresh=False)
             eval_threshold = min(
@@ -307,13 +318,22 @@ def training_loop(
             should_make_checkpoint = True
             cur_checkpoint += 1
 
-        if should_make_checkpoint:
+        # Don't make a checkpoint if this is the final batch
+        if (
+            should_make_checkpoint
+            and num_used_tokens + previous_trained_tokens < max_tokens
+        ):
             # Finalize current checkpoint
             checkpoints[-1].total_tokens_trained = (
                 num_used_tokens + previous_trained_tokens
             )
             checkpoints[-1].sae = stepper.make_checkpoint()
             checkpoints[-1].finalize()
+
+            if checkpoint_dir:
+                save_training_result(
+                    {stepper.target_layer: [checkpoints[-1]]}, checkpoint_dir
+                )
 
             # Initialize new checkpoint
             checkpoints.append(
@@ -439,6 +459,7 @@ def train(
     cache_dir: Optional[str] = None,
     checkpoints_at: Optional[List[int]] = None,
     offload_after_training: bool = True,
+    checkpoint_dir: Optional[str] = None,
 ) -> TrainingResult:
     if config.method not in (
         TrainingMethod.standard,
@@ -483,7 +504,10 @@ def train(
                 f"Layer {layer}",
                 previous_trained_tokens=0,
                 make_checkpoints_at=checkpoints_at,
+                checkpoint_dir=checkpoint_dir,
             )
+            if checkpoint_dir:
+                save_training_result({layer: [train_result[layer]][-1]}, checkpoint_dir)
 
         return train_result
     finally:

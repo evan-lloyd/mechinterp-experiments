@@ -6,11 +6,10 @@ import weakref
 import zipfile
 from collections import defaultdict
 from io import StringIO
-from typing import TYPE_CHECKING, Sequence, Tuple
+from typing import TYPE_CHECKING, Dict, List, Sequence, Tuple
 
 import cloudpickle
 import matplotlib.pyplot as plt
-import numpy as np
 import torch
 from IPython.display import HTML, SVG, display
 from ml_dtypes import bfloat16
@@ -109,7 +108,9 @@ def load_checkpoint(in_file: str) -> "SAECheckpoint":
         return checkpoint
 
 
-def save_training_result(result: "TrainingResult", out_dir: str):
+def save_training_result(
+    result: "TrainingResult" | Dict[int, List["SAECheckpoint"]], out_dir: str
+):
     """Save a TrainingResult to the given directory.
 
     Each checkpoint is saved to its own file, named based on the layer

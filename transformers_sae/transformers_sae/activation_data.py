@@ -38,15 +38,9 @@ def _run_replacement_model(
     end_layer: Optional[int] = None,
     start_at_sae: bool = False,
 ):
-    if start_layer == -1:
-        input_args = []
-        input_kwargs = batch.model_kwargs()
-    else:
-        assert start_input is not None, (
-            "Must provide first layer's input if not starting from embedding"
-        )
-        input_args = [start_input]
-        input_kwargs = {"attention_mask": batch.attention_mask}
+    input_args, input_kwargs = model.get_model_args(
+        batch, start_input, start_layer == -1
+    )
 
     activation_cache = {}
 
@@ -63,7 +57,9 @@ def _run_replacement_model(
             hook_stack.enter_context(
                 module.register_forward_hook(partial(_hook_output, hook_name))
             )
-        with torch.autocast("cpu", dtype=torch.bfloat16):
+        with torch.autocast(
+            "cuda" if model.device.type == "cuda" else "cpu", dtype=torch.bfloat16
+        ):
             model_to_run(
                 *input_args,
                 **input_kwargs,
@@ -74,7 +70,7 @@ def _run_replacement_model(
 
 
 def make_activation_batch(
-    replacement_model: torch.nn.Module,
+    replacement_model: ReplacementModel,
     request_spec: List[Tuple[int, Literal["layer", "sae"]]],
     batch: DataBatch,
     start_input: Optional[torch.Tensor] = None,
@@ -93,8 +89,8 @@ def make_activation_batch(
                 assert r[0] in replacement_model.sae_layers, f"No SAE at layer {r[0]}"
                 attrs = ("sae_output", "sae_features")
                 submodule_paths = (
-                    f"transformer.h.{r[0]}.sae",
-                    f"transformer.h.{r[0]}.sae.encoder",
+                    f"{replacement_model.layer_path}.{r[0]}.sae",
+                    f"{replacement_model.layer_path}.{r[0]}.sae.encoder",
                 )
             elif r[1] == "layer":
                 attrs = ("layer_output",)
@@ -102,9 +98,11 @@ def make_activation_batch(
                     hasattr(replacement_model, "sae_layers")
                     and r[0] in replacement_model.sae_layers
                 ):
-                    submodule_paths = (f"transformer.h.{r[0]}.original_layer",)
+                    submodule_paths = (
+                        f"{replacement_model.layer_path}.{r[0]}.original_layer",
+                    )
                 else:
-                    submodule_paths = (f"transformer.h.{r[0]}",)
+                    submodule_paths = (f"{replacement_model.layer_path}.{r[0]}",)
         for attr, submodule in zip(attrs, submodule_paths):
             hooks[(r[0], attr)] = replacement_model.get_submodule(submodule)
         request_attrs_by_layer[r[0]].extend(attrs)
@@ -158,12 +156,7 @@ def make_batch_for_evals(
             prev_layer_data = None
         new_baseline_run = _run_replacement_model(
             base_model,
-            {
-                layer: base_model.transformer.h[layer]
-                if layer < base_model.num_layers
-                else base_model.lm_head
-                for layer in needs_baseline_layers
-            },
+            {layer: base_model.get_layer(layer) for layer in needs_baseline_layers},
             training_batch.input_data,
             start_input=prev_layer_data,
             start_layer=needs_baseline_layers[0] if prev_layer_data is not None else -1,
@@ -206,15 +199,15 @@ def make_batch_for_evals(
             if layer >= full_replacement_model.num_layers:
                 hooks[layer] = full_replacement_model.lm_head
             else:
-                hooks[(layer, "layer_output")] = full_replacement_model.transformer.h[
+                hooks[(layer, "layer_output")] = full_replacement_model.get_layer(
                     layer
-                ].original_layer
-                hooks[(layer, "sae_features")] = full_replacement_model.transformer.h[
+                ).original_layer
+                hooks[(layer, "sae_features")] = full_replacement_model.get_layer(
                     layer
-                ].sae.encoder
-                hooks[(layer, "sae_output")] = full_replacement_model.transformer.h[
+                ).sae.encoder
+                hooks[(layer, "sae_output")] = full_replacement_model.get_layer(
                     layer
-                ].sae
+                ).sae
         # The previously used replacement model was good up until this layer, so we can start here
         # if we have the data. Otherwise, we need to start at the start_layer from baseline data.
         if needs_replacement_layers[0] - 1 in replacement_activations:

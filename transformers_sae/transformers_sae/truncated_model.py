@@ -2,6 +2,7 @@ from contextlib import contextmanager
 
 import torch
 
+from .ops import ensure_tensor
 from .replacement_model import ReplacementModel
 
 
@@ -26,8 +27,16 @@ def truncated_model(
         pass
 
     class _StopLayer(torch.nn.Module):
-        def __init__(self):
+        def __init__(self, orig_layer: torch.nn.Module):
+            # Some implementations (gemma2) look at attributes on layers before calling them,
+            # so we need to proxy those
             super().__init__()
+            object.__setattr__(self, "orig_layer", orig_layer)
+
+        def __getattr__(self, name: str):
+            if name != "forward":
+                return getattr(object.__getattribute__(self, "orig_layer"), name)
+            return super().__getattr__(name)
 
         def forward(self, *args, **kwargs):
             raise _EarlyStopping()
@@ -35,15 +44,19 @@ def truncated_model(
     class _StartAtSAE(torch.nn.Module):
         def __init__(self):
             super().__init__()
-            self.sae = model.transformer.h[start_layer].sae
+            self.sae = model.get_layer(start_layer).sae
 
         def forward(self, x: torch.Tensor, *args, **kwargs):
             result = self.sae(x.float(), should_cast=False)
-            return (result[0].to(x.dtype), )
+            return (result[0].to(x.dtype),)
 
     patched_layers = torch.nn.ModuleList(
-        model.transformer.h[max(start_layer, 0) : end_layer]
-        + ([_StopLayer()] if end_layer < model.num_layers else [])
+        model.get_submodule(model.layer_path)[max(start_layer, 0) : end_layer]
+        + (
+            [_StopLayer(model.get_layer(end_layer))]
+            if end_layer < model.num_layers
+            else []
+        )
     )
     if start_at_sae:
         patched_layers[0] = _StartAtSAE()
@@ -56,24 +69,21 @@ def truncated_model(
         def forward(self, x: torch.Tensor, *args, **kwargs):
             residual = x
             for layer in self.layers:
-                residual = layer(
-                    residual,
-                    attention_mask=kwargs.get("attention_mask"),
-                    use_cache=kwargs.get("use_cache"),
-                )[0]
+                layer_args, layer_kwargs = model.get_layer_args(*args, **kwargs)
+                residual = ensure_tensor(layer(residual, *layer_args, **layer_kwargs))
             if end_layer > model.num_layers:
-                residual = model.transformer.ln_f(residual)
+                residual = model.get_submodule(model.norm_path)(residual)
                 residual = model.lm_head(
                     residual.view(-1, residual.shape[-2], residual.shape[-1])
                 )
             return (residual,)
 
     try:
-        orig_layers = model.transformer.h
+        orig_layers = model.get_submodule(model.layer_path)
 
         # If starting from embedding, we only need to handle early stopping
         if start_layer == -1:
-            model.transformer.h = patched_layers
+            model.set_submodule(model.layer_path, patched_layers)
             truncated_model = model
         else:
             truncated_model = _TruncatedTransformer()
@@ -82,4 +92,4 @@ def truncated_model(
         except _EarlyStopping:
             pass
     finally:
-        model.transformer.h = orig_layers
+        model.set_submodule(model.layer_path, orig_layers)

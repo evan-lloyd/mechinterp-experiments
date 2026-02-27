@@ -63,9 +63,9 @@ class NextLayerTrainingStepper(Stepper):
             with torch.no_grad():
                 baseline_activations[
                     self.target_layer + 1
-                ].sae_features = self.replacement_model.transformer.h[
+                ].sae_features = self.replacement_model.get_layer(
                     self.target_layer + 1
-                ].sae.encode(baseline_activations[self.target_layer + 1].layer_output)
+                ).sae.encode(baseline_activations[self.target_layer + 1].layer_output)
 
         return baseline_activations
 

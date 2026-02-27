@@ -108,7 +108,7 @@ def cache_on_disk(cache_dir: str, model: ReplacementModel, batch: DataBatch):
     activations, _ = _run_base_model(
         model,
         batch,
-        {layer: model.transformer.h[layer] for layer in range(model.num_layers)},
+        {layer: model.get_layer(layer) for layer in range(model.num_layers)},
     )
 
     cache = zarr.open_group(cache_dir, mode="r+")
