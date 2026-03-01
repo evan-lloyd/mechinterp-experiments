@@ -26,6 +26,31 @@ if TYPE_CHECKING:
     from .training import SAECheckpoint, TrainingResult
 
 
+def _checkpoint_filename(layer: int, total_tokens_trained: int) -> str:
+    """Return the checkpoint filename for the given layer and token count.
+
+    Convention: layer_{layer}_tokens_{total_tokens_trained}.checkpoint
+    Shared by save_training_result and find_latest_checkpoint.
+    """
+    return f"layer_{layer}_tokens_{total_tokens_trained}.checkpoint"
+
+
+def _parse_checkpoint_filename(filename: str) -> Tuple[int, int] | None:
+    """Parse checkpoint filename, return (layer, total_tokens_trained) or None if invalid."""
+    if not filename.endswith(".checkpoint"):
+        return None
+    prefix = filename[: -len(".checkpoint")]
+    parts = prefix.split("_")
+    if len(parts) != 4 or parts[0] != "layer" or parts[2] != "tokens":
+        return None
+    try:
+        layer = int(parts[1])
+        tokens = int(parts[3])
+        return (layer, tokens)
+    except ValueError:
+        return None
+
+
 def save_checkpoint(checkpoint: "SAECheckpoint", out_file: str):
     with tempfile.TemporaryDirectory() as tmpdir:
         # Save SAE weights using safetensors
@@ -60,6 +85,26 @@ def save_checkpoint(checkpoint: "SAECheckpoint", out_file: str):
             for filename in os.listdir(tmpdir):
                 filepath = os.path.join(tmpdir, filename)
                 zf.write(filepath, filename)
+
+
+def find_latest_checkpoint(checkpoint_dir: str, layer: int) -> str | None:
+    """Find the checkpoint with the most trained tokens for the given layer.
+
+    Returns the path to the checkpoint file, or None if no checkpoint exists for the layer.
+    """
+    best_path: str | None = None
+    best_tokens: int = -1
+
+    for filename in os.listdir(checkpoint_dir):
+        parsed = _parse_checkpoint_filename(filename)
+        if parsed is None or parsed[0] != layer:
+            continue
+        _, tokens = parsed
+        if tokens > best_tokens:
+            best_tokens = tokens
+            best_path = os.path.join(checkpoint_dir, filename)
+
+    return best_path
 
 
 def load_checkpoint(in_file: str) -> "SAECheckpoint":
@@ -109,22 +154,37 @@ def load_checkpoint(in_file: str) -> "SAECheckpoint":
 
 
 def save_training_result(
-    result: "TrainingResult" | Dict[int, List["SAECheckpoint"]], out_dir: str
+    result: "TrainingResult" | Dict[int, List["SAECheckpoint"]],
+    out_dir: str,
+    keep_in_ram: bool = True,
 ):
     """Save a TrainingResult to the given directory.
 
     Each checkpoint is saved to its own file, named based on the layer
     and number of training tokens for that checkpoint.
+
+    The save happens asynchronously in a background thread.
     """
+    import threading
+
     os.makedirs(out_dir, exist_ok=True)
 
+    # Collect all save tasks
+    save_tasks = []
     for layer, checkpoints in result.items():
         for checkpoint in checkpoints:
-            filename = (
-                f"layer_{layer}_tokens_{checkpoint.total_tokens_trained}.checkpoint"
-            )
+            filename = _checkpoint_filename(layer, checkpoint.total_tokens_trained)
             filepath = os.path.join(out_dir, filename)
+            save_tasks.append((checkpoint, filepath))
+
+    def _save_async():
+        for checkpoint, filepath in save_tasks:
             save_checkpoint(checkpoint, filepath)
+            if not keep_in_ram:
+                checkpoint.sae = None
+
+    thread = threading.Thread(target=_save_async, daemon=True)
+    thread.start()
 
 
 def load_training_result(from_dir: str) -> "TrainingResult":
@@ -137,14 +197,13 @@ def load_training_result(from_dir: str) -> "TrainingResult":
     # Find all checkpoint files and group by layer
     checkpoints_by_layer = defaultdict(list)
     for filename in os.listdir(from_dir):
-        if filename.endswith(".checkpoint"):
-            # Parse filename: layer_{layer}_tokens_{tokens}.checkpoint
-            parts = filename.replace(".checkpoint", "").split("_")
-            layer = int(parts[1])
-            tokens = int(parts[3])
-            filepath = os.path.join(from_dir, filename)
-            checkpoint = load_checkpoint(filepath)
-            checkpoints_by_layer[layer].append((tokens, checkpoint))
+        parsed = _parse_checkpoint_filename(filename)
+        if parsed is None:
+            continue
+        layer, tokens = parsed
+        filepath = os.path.join(from_dir, filename)
+        checkpoint = load_checkpoint(filepath)
+        checkpoints_by_layer[layer].append((tokens, checkpoint))
 
     # Sort checkpoints by tokens trained and extract SAEs for initialization
     saes = {}
@@ -328,6 +387,7 @@ PYTORCH_MIN_ALLOCATE = 2**9
 # Use this Mode to call track on every Tensor being created by functions
 class MemoryTrackingMode(TorchDispatchMode):
     _memory_max: int
+    _cur_use: int
     memory_use: WeakIdKeyDictionary
 
     def update_stats(self):
@@ -339,6 +399,7 @@ class MemoryTrackingMode(TorchDispatchMode):
             )
 
         self._memory_max = max(curr_use, self._memory_max)
+        self._cur_use = curr_use
 
     def track(self, t: torch.Tensor):
         def cb(_):
@@ -359,10 +420,9 @@ class MemoryTrackingMode(TorchDispatchMode):
         super().__exit__(*args, **kwargs)
         self.memory_use = WeakIdKeyDictionary()
 
-    @property
-    def memory_max(self) -> str:
-        """Return memory_max as a human-readable string."""
-        bytes_val = self._memory_max
+    @staticmethod
+    def _format_bytes(bytes_val: int) -> str:
+        """Format bytes as a human-readable string."""
         if bytes_val >= 1024**3:
             return f"{bytes_val / 1024**3:.2f} GB"
         elif bytes_val >= 1024**2:
@@ -371,6 +431,16 @@ class MemoryTrackingMode(TorchDispatchMode):
             return f"{bytes_val / 1024:.2f} KB"
         else:
             return f"{bytes_val} B"
+
+    @property
+    def memory_max(self) -> str:
+        """Return memory_max as a human-readable string."""
+        return self._format_bytes(self._memory_max)
+
+    @property
+    def memory_cur(self) -> str:
+        """Return current memory usage as a human-readable string."""
+        return self._format_bytes(self._cur_use)
 
     def __torch_dispatch__(self, func, types, args, kwargs=None):
         res = func(*args, **kwargs or {})

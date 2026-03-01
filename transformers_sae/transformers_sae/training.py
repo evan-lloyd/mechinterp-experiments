@@ -16,7 +16,7 @@ from .activation_cache import load_cache
 from .activation_data import TrainingBatch, make_batch_for_evals
 from .encoder import InteractionEncoder
 from .multiline_progress import MultilineProgress
-from .ops import save_training_result
+from .ops import find_latest_checkpoint, load_checkpoint, save_training_result
 from .replacement_model import ReplacementModel, make_replacement_model
 from .sae import SAE
 from .tokenization import make_dataloader
@@ -87,15 +87,6 @@ class SAECheckpoint:
     )
     sae: Optional[SAE] = None
     _is_finalized: bool = field(init=False, default=False)
-
-    def clone_history(self) -> "SAECheckpoint":
-        """Clones the training history, but not SAE weights, into a new LayerResult."""
-        return SAECheckpoint(
-            total_tokens_trained=self.total_tokens_trained,
-            step_tokens_trained=deepcopy(self.step_tokens_trained),
-            step_metrics=deepcopy(self.step_metrics),
-            # NB: Deliberately *not* copying SAE
-        )
 
     def finalize(self):
         self._is_finalized = True
@@ -221,7 +212,7 @@ def training_loop(
     cache_dir: Optional[str],
     optimizer: torch.optim.Optimizer,
     progress_desc: str,
-    make_checkpoints_at: List[int] = None,
+    make_checkpoints_at: List[int] | None = None,
     previous_trained_tokens: int = 0,
     checkpoint_dir: Optional[str] = None,
 ) -> None:
@@ -276,6 +267,8 @@ def training_loop(
         # After first batch, step before doing evals
         if num_used_tokens + previous_trained_tokens > 0:
             optimizer.step()
+            optimizer.zero_grad()
+            del loss
             num_used_tokens += batch.num_tokens
 
         if num_used_tokens >= eval_threshold:
@@ -306,6 +299,8 @@ def training_loop(
         # On the first batch only, we do evals before updating params
         if num_used_tokens + previous_trained_tokens == 0:
             optimizer.step()
+            optimizer.zero_grad()
+            del loss
             num_used_tokens += batch.num_tokens
 
         should_make_checkpoint = False
@@ -332,7 +327,9 @@ def training_loop(
 
             if checkpoint_dir:
                 save_training_result(
-                    {stepper.target_layer: [checkpoints[-1]]}, checkpoint_dir
+                    {stepper.target_layer: [checkpoints[-1]]},
+                    checkpoint_dir,
+                    keep_in_ram=False,
                 )
 
             # Initialize new checkpoint
@@ -358,7 +355,7 @@ def training_loop(
         progress.total = max(max_tokens - previous_trained_tokens, num_used_tokens)
         progress.update(batch.num_tokens)
 
-    checkpoints[-1].total_tokens_trained = num_used_tokens
+    checkpoints[-1].total_tokens_trained = num_used_tokens + previous_trained_tokens
     checkpoints[-1].finalize()
     progress.close()
 
@@ -460,6 +457,7 @@ def train(
     checkpoints_at: Optional[List[int]] = None,
     offload_after_training: bool = True,
     checkpoint_dir: Optional[str] = None,
+    force_retrain: bool = False,
 ) -> TrainingResult:
     if config.method not in (
         TrainingMethod.standard,
@@ -477,12 +475,44 @@ def train(
         }
         train_result = TrainingResult(training_saes)
 
-        # For consistency across methods, we always run our evals with the full replacement model
-        # starting from the target layer
-        eval_model = make_replacement_model(model, training_saes)
         for layer in sorted(config.train_layers, reverse=True):
-            # Init weights from next layer, if it exists
-            training_saes[layer].init_weights(training_saes.get(layer + 1))
+            if checkpoint_dir and not force_retrain:
+                latest_checkpoint = find_latest_checkpoint(checkpoint_dir, layer)
+            else:
+                latest_checkpoint = None
+
+            if latest_checkpoint is not None:
+                print("Loading checkpoint", latest_checkpoint)
+                checkpoint = load_checkpoint(latest_checkpoint)
+                sae = checkpoint.sae
+                assert sae is not None, (
+                    f"Checkpoint {latest_checkpoint} was missing SAE data"
+                )
+                sae.onload()
+                checkpoint.sae = None
+
+                train_result._layer_results[layer] = [
+                    checkpoint,
+                    SAECheckpoint(
+                        sae=sae,
+                        total_tokens_trained=checkpoint.total_tokens_trained,
+                    ),
+                ]
+                training_saes[layer] = sae
+                token_offset = checkpoint.total_tokens_trained
+            else:
+                # Init weights from next layer, if it exists
+                training_saes[layer].init_weights(training_saes.get(layer + 1))
+                token_offset = 0
+
+            if token_offset >= config.num_train_tokens:
+                continue
+
+            if checkpoints_at is not None:
+                make_checkpoints_at = [t for t in checkpoints_at if t > token_offset]
+            else:
+                make_checkpoints_at = None
+
             optimizer = make_optimizer(training_saes, [layer], config)
             if config.method is TrainingMethod.standard:
                 stepper = StandardTrainingStepper(model, layer, training_saes)
@@ -495,19 +525,27 @@ def train(
             training_loop(
                 stepper,
                 train_result[layer],
-                _train_evals(model, eval_model, layer),
+                # For consistency across methods, we always run our evals with the full replacement model
+                # starting from the target layer
+                _train_evals(
+                    model, make_replacement_model(model, training_saes), layer
+                ),
                 tokenizer,
                 dataset,
                 config,
                 cache_dir,
                 optimizer,
                 f"Layer {layer}",
-                previous_trained_tokens=0,
-                make_checkpoints_at=checkpoints_at,
+                previous_trained_tokens=token_offset,
+                make_checkpoints_at=make_checkpoints_at,
                 checkpoint_dir=checkpoint_dir,
             )
             if checkpoint_dir:
-                save_training_result({layer: [train_result[layer]][-1]}, checkpoint_dir)
+                save_training_result(
+                    {layer: [train_result[layer][-1]]},
+                    checkpoint_dir,
+                    keep_in_ram=False,
+                )
 
         return train_result
     finally:
