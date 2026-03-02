@@ -109,6 +109,7 @@ class Encoder(torch.nn.Module):
     def train(self, mode: bool = True):
         super().train(mode)
         self.to(dtype=self.config.train_dtype if mode else self.config.inference_dtype)
+        self.requires_grad_(mode)
 
     @property
     def dtype(self) -> torch.dtype:

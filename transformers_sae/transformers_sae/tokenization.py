@@ -272,7 +272,8 @@ def _iter_dataset(
 
 
 def _input_generator(
-    model: ReplacementModel,
+    context_length: int,
+    dtype: torch.dtype,
     tokenizer: AutoTokenizer,
     dataset: IterableDataset,
     max_tokens: Optional[int] = None,
@@ -289,13 +290,13 @@ def _input_generator(
         max_batches,
         tokenizer_batch_size,
         inference_batch_size,
-        model.context_length,
+        context_length,
     ):
         batch, state.batch_inputs = tokenize_strings(
             state.batch_inputs,
-            model.dtype,
+            dtype,
             tokenizer,
-            model.context_length,
+            context_length,
             state.tokens_to_generate,
             inference_batch_size,
             offset - state.num_tokens_generated,
@@ -326,7 +327,8 @@ def make_dataloader(
         def __iter__(self):
             return iter(
                 _input_generator(
-                    model,
+                    model.context_length,
+                    model.dtype,
                     tokenizer,
                     dataset,
                     max_tokens=max_tokens,
@@ -341,7 +343,8 @@ def make_dataloader(
     if multiprocessing.get_start_method() == "spawn":
         return iter(
             _input_generator(
-                model,
+                model.context_length,
+                model.dtype,
                 tokenizer,
                 dataset,
                 max_tokens=max_tokens,

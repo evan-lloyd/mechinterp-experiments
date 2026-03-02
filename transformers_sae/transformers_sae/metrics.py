@@ -5,7 +5,7 @@ import torch
 from bitarray import bitarray
 
 from .activation_data import DataBatch
-from .ops import tensor_to_numpy
+from .ops import MemoryTrackingMode, tensor_to_numpy
 
 """NB: The losses here are deliberately taking a mean, rather than sum, on the final dimension, to factor out
 the implicit dependence on d_model (mse) or d_vocab (kl). This is probably non-standard, but is effectively
@@ -56,10 +56,19 @@ def kl_loss(
     batch: DataBatch,
     return_type: _ReturnType = "tensor",
 ) -> torch.Tensor | np.ndarray | float:
-    result = torch.nn.KLDivLoss(reduction="none", log_target=True)(
-        actual.log_softmax(-1),
-        target.log_softmax(-1),
-    ).sum(dim=-1)[batch.token_mask.bool()]
+    with MemoryTrackingMode() as mm:
+        # actual = actual[batch.token_mask.bool()].log_softmax(-1)
+        # target = target[batch.token_mask.bool()].log_softmax(-1)
+        result = torch.nn.functional.kl_div(
+            actual.log_softmax(-1),
+            target.log_softmax(-1),
+            # actual.log_softmax(-1),
+            # target.log_softmax(-1),
+            reduction="none",
+            log_target=True,
+        ).sum(dim=-1)
+    # print("kl_loss", mm.memory_max, mm.memory_cur)
+    
     if return_type == "np":
         return tensor_to_numpy(result.flatten().cpu())
     else:

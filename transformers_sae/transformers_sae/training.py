@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import os
 from collections import defaultdict
-from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, List, Mapping, Optional
@@ -547,7 +545,7 @@ def train(
                 save_training_result(
                     {layer: [train_result[layer][-1]]},
                     checkpoint_dir,
-                    keep_in_ram=False,
+                    keep_in_ram=True,
                 )
             sae.eval()
 

@@ -1,6 +1,7 @@
 import math
 import os
 import tempfile
+from inspect import getframeinfo, stack
 import uuid
 import weakref
 import zipfile
@@ -94,6 +95,9 @@ def find_latest_checkpoint(checkpoint_dir: str, layer: int) -> str | None:
     """
     best_path: str | None = None
     best_tokens: int = -1
+
+    if not os.path.exists(checkpoint_dir):
+        return None
 
     for filename in os.listdir(checkpoint_dir):
         parsed = _parse_checkpoint_filename(filename)
@@ -386,39 +390,45 @@ PYTORCH_MIN_ALLOCATE = 2**9
 
 # Use this Mode to call track on every Tensor being created by functions
 class MemoryTrackingMode(TorchDispatchMode):
-    _memory_max: int
-    _cur_use: int
-    memory_use: WeakIdKeyDictionary
+    _memory_max: Dict[str, int]
+    _cur_use: Dict[str, int]
+    memory_use: Dict[str, WeakIdKeyDictionary]
 
     def update_stats(self):
-        curr_use = 0
-        for k, v in self.memory_use.items():
-            curr_use += (
-                math.ceil(k.size() * k.element_size() / PYTORCH_MIN_ALLOCATE)
-                * PYTORCH_MIN_ALLOCATE
-            )
+        for dev, use in self.memory_use.items():
+            curr_use = 0
+            for k, v in use.items():
+                curr_use += (
+                    math.ceil(k.size() * k.element_size() / PYTORCH_MIN_ALLOCATE)
+                    * PYTORCH_MIN_ALLOCATE
+                )
 
-        self._memory_max = max(curr_use, self._memory_max)
-        self._cur_use = curr_use
+            self._memory_max[dev] = max(curr_use, self._memory_max[dev])
+            self._cur_use[dev] = curr_use
 
     def track(self, t: torch.Tensor):
+        st = t.untyped_storage()
+        dev = str(t.device)
+
         def cb(_):
             self.update_stats()
 
-        st = t.untyped_storage()
+            return cb
+
         wt = weakref.ref(st, cb)
-        self.memory_use[st] = wt
+        self.memory_use[dev][st] = wt
         self.update_stats()
 
     def __enter__(self, *args, **kwargs):
         super().__enter__(*args, **kwargs)
-        self._memory_max = 0
-        self.memory_use = WeakIdKeyDictionary()
+        self._memory_max = defaultdict(int)
+        self._cur_use = defaultdict(int)
+        self.memory_use = defaultdict(WeakIdKeyDictionary)
         return self
 
     def __exit__(self, *args, **kwargs):
         super().__exit__(*args, **kwargs)
-        self.memory_use = WeakIdKeyDictionary()
+        self.memory_use = defaultdict(WeakIdKeyDictionary)
 
     @staticmethod
     def _format_bytes(bytes_val: int) -> str:
@@ -435,18 +445,28 @@ class MemoryTrackingMode(TorchDispatchMode):
     @property
     def memory_max(self) -> str:
         """Return memory_max as a human-readable string."""
-        return self._format_bytes(self._memory_max)
+        return str({k: self._format_bytes(v) for k, v in self._memory_max.items()})
 
     @property
     def memory_cur(self) -> str:
         """Return current memory usage as a human-readable string."""
-        return self._format_bytes(self._cur_use)
+        return str({k: self._format_bytes(v) for k, v in self._cur_use.items()})
 
     def __torch_dispatch__(self, func, types, args, kwargs=None):
         res = func(*args, **kwargs or {})
 
         tree_map_only(torch.Tensor, lambda t: self.track(t), res)
         return res
+
+
+def available_vram():
+    """Print the amount of VRAM currently available for PyTorch operations in GiB."""
+    if torch.cuda.is_available():
+        free_memory, total_memory = torch.cuda.mem_get_info()
+        free_gib = free_memory / (1024**3)
+        total_gib = total_memory / (1024**3)
+        return f"Available VRAM: {free_gib:.2f} GiB / {total_gib:.2f} GiB"
+    return ""
 
 
 def tensor_to_numpy(t: torch.Tensor):
