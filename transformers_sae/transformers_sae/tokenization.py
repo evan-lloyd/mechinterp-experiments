@@ -12,9 +12,6 @@ from transformers import AutoTokenizer
 from .data_batch import DataBatch
 from .replacement_model import ReplacementModel
 
-_ONES: Dict[int, torch.Tensor] = {}
-_ZEROS: Dict[int, torch.Tensor] = {}
-
 
 def _ensure_tokenized(
     inputs: List[str | torch.Tensor],
@@ -82,6 +79,8 @@ def tokenize_strings(
     dtype: torch.dtype,
     tokenizer: AutoTokenizer,
     context_length: int,
+    zeros: torch.Tensor,
+    ones: torch.Tensor,
     max_tokens: Optional[int] = None,
     max_batch_size: Optional[int] = None,
     token_offset: int = 0,
@@ -122,19 +121,6 @@ def tokenize_strings(
             row_lens,
             torch.empty((0,)),
         ), list(token_ids.values())
-
-    if context_length not in _ONES:
-        ones = _ONES[context_length] = torch.ones(
-            (context_length, context_length), dtype=dtype
-        )
-    else:
-        ones = _ONES[context_length]
-    if context_length not in _ZEROS:
-        zeros = _ZEROS[context_length] = torch.zeros(
-            (context_length, context_length), dtype=dtype
-        )
-    else:
-        zeros = _ZEROS[context_length]
 
     for input_batch, row_len, new_tokens in zip(input_batches, row_lens, new_tokenses):
         row_lens.append(row_len)
@@ -283,6 +269,8 @@ def _input_generator(
     inference_batch_size: int = 1,
     offset: int = 0,
 ):
+    zeros = torch.zeros((context_length, context_length), dtype=dtype)
+    ones = torch.ones((context_length, context_length), dtype=dtype)
     for state in _iter_dataset(
         dataset,
         max_tokens,
@@ -297,6 +285,8 @@ def _input_generator(
             dtype,
             tokenizer,
             context_length,
+            zeros,
+            ones,
             state.tokens_to_generate,
             inference_batch_size,
             offset - state.num_tokens_generated,

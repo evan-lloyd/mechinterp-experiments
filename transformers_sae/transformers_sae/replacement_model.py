@@ -74,6 +74,9 @@ def _shallow_copy_model(source: torch.nn.Module):
     copied = copy.copy(source)
     copied._modules = {}
     copied._buffers = dict(**source._buffers)
+    copied._parameters = dict(**source._parameters)
+    copied._non_persistent_buffers_set = copy.copy(source._non_persistent_buffers_set)
+    copied.training = source.training
 
     # Recursively copy all submodules
     for name, module in source._modules.items():

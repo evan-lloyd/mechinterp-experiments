@@ -1,13 +1,12 @@
 import math
 import os
 import tempfile
-from inspect import getframeinfo, stack
 import uuid
 import weakref
 import zipfile
 from collections import defaultdict
 from io import StringIO
-from typing import TYPE_CHECKING, Dict, List, Sequence, Tuple
+from typing import TYPE_CHECKING, Dict, Iterable, List, Sequence, Tuple
 
 import cloudpickle
 import matplotlib.pyplot as plt
@@ -393,6 +392,7 @@ class MemoryTrackingMode(TorchDispatchMode):
     _memory_max: Dict[str, int]
     _cur_use: Dict[str, int]
     memory_use: Dict[str, WeakIdKeyDictionary]
+    ignore_tensors: WeakIdKeyDictionary
 
     def update_stats(self):
         for dev, use in self.memory_use.items():
@@ -408,16 +408,23 @@ class MemoryTrackingMode(TorchDispatchMode):
 
     def track(self, t: torch.Tensor):
         st = t.untyped_storage()
+        if st in self.ignore_tensors:
+            return
+
         dev = str(t.device)
 
         def cb(_):
             self.update_stats()
 
-            return cb
-
         wt = weakref.ref(st, cb)
         self.memory_use[dev][st] = wt
         self.update_stats()
+
+    def __init__(self, *args, ignore_tensors: Iterable[torch.Tensor] | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.ignore_tensors = WeakIdKeyDictionary(
+            {t.untyped_storage(): None for t in ignore_tensors or {}}
+        )
 
     def __enter__(self, *args, **kwargs):
         super().__enter__(*args, **kwargs)
@@ -428,7 +435,7 @@ class MemoryTrackingMode(TorchDispatchMode):
 
     def __exit__(self, *args, **kwargs):
         super().__exit__(*args, **kwargs)
-        self.memory_use = defaultdict(WeakIdKeyDictionary)
+        # self.memory_use = defaultdict(WeakIdKeyDictionary)
 
     @staticmethod
     def _format_bytes(bytes_val: int) -> str:
