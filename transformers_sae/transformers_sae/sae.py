@@ -20,7 +20,8 @@ class SAEConfig:
     d_model: int
     d_sae: int
     device: torch.device
-    dtype: torch.dtype
+    train_dtype: torch.dtype
+    inference_dtype: torch.dtype
     encoder: EncoderConfig
     decoder: DecoderConfig
 
@@ -28,12 +29,13 @@ class SAEConfig:
 EncoderKind: TypeAlias = Literal["relu", "topk"]
 
 
-def make_training_config(
+def make_sae_config(
     *,
     d_model: int,
     d_sae: int,
     device: str | torch.device,
-    dtype: torch.dtype,
+    train_dtype: torch.dtype,
+    inference_dtype: torch.dtype,
     encoder_kind: EncoderKind,
     top_k: int | None = None,
 ) -> SAEConfig:
@@ -46,9 +48,19 @@ def make_training_config(
         raise ValueError(f"Unknown encoder_kind {encoder_kind}")
 
     device = torch.device(device)
-    encoder_config = EncoderConfig(d_model, d_sae, device, dtype, activation_config)
-    decoder_config = DecoderConfig(d_model, d_sae, device, dtype)
-    return SAEConfig(d_model, d_sae, device, dtype, encoder_config, decoder_config)
+    encoder_config = EncoderConfig(
+        d_model, d_sae, device, train_dtype, inference_dtype, activation_config
+    )
+    decoder_config = DecoderConfig(d_model, d_sae, device, train_dtype, inference_dtype)
+    return SAEConfig(
+        d_model,
+        d_sae,
+        device,
+        train_dtype,
+        inference_dtype,
+        encoder_config,
+        decoder_config,
+    )
 
 
 def _check_device(method):
@@ -130,7 +142,7 @@ class SAE(torch.nn.Module):
     def forward(self, x: torch.Tensor, *args, **kwargs):
         return (
             self.decode(
-                self.encode(x.to(self.config.dtype), should_cast=False),
+                self.encode(x.to(self.encoder.dtype), should_cast=False),
                 should_cast=False,
             ).to(x.dtype),
         )

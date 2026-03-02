@@ -199,7 +199,7 @@ def make_optimizer(saes: Dict[int, SAE], layers: List[int], config: TrainingConf
     for pg in param_groups:
         pg["base_lr"] = pg["lr"]
 
-    return torch.optim.Adam(param_groups, lr=config.lr)
+    return torch.optim.AdamW(param_groups, lr=config.lr)
 
 
 def training_loop(
@@ -502,10 +502,12 @@ def train(
                 token_offset = checkpoint.total_tokens_trained
             else:
                 # Init weights from next layer, if it exists
-                training_saes[layer].init_weights(training_saes.get(layer + 1))
+                sae = training_saes[layer]
+                sae.init_weights(training_saes.get(layer + 1))
                 token_offset = 0
 
             if token_offset >= config.num_train_tokens:
+                sae.eval()
                 continue
 
             if checkpoints_at is not None:
@@ -513,6 +515,7 @@ def train(
             else:
                 make_checkpoints_at = None
 
+            sae.train()
             optimizer = make_optimizer(training_saes, [layer], config)
             if config.method is TrainingMethod.standard:
                 stepper = StandardTrainingStepper(model, layer, training_saes)
@@ -546,6 +549,7 @@ def train(
                     checkpoint_dir,
                     keep_in_ram=False,
                 )
+            sae.eval()
 
         return train_result
     finally:

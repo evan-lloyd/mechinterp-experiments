@@ -89,7 +89,7 @@ SAVE_FINAL_RESULTS = True
 
 import numpy as np
 
-from transformers_sae.sae import SAE, make_training_config
+from transformers_sae.sae import SAE, make_sae_config
 from transformers_sae.training import TrainingConfig, TrainingMethod, fine_tune, train
 from transformers_sae.validation import run_validations
 
@@ -101,7 +101,7 @@ def SAE_SPECS():
 empty_saes = {
     method: {
         layer: SAE(
-            make_training_config(
+            make_sae_config(
                 d_model=model.d_model,
                 d_sae=D_SAE,
                 device=TRAINING_DEVICE,

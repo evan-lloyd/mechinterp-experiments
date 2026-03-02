@@ -8,7 +8,8 @@ class DecoderConfig:
     d_model: int
     d_sae: int
     device: torch.device
-    dtype: torch.dtype
+    train_dtype: torch.dtype
+    inference_dtype: torch.dtype
 
 
 class Decoder(torch.nn.Module):
@@ -16,7 +17,7 @@ class Decoder(torch.nn.Module):
         super().__init__()
         self.config = config
         self.linear = torch.nn.Linear(
-            config.d_sae, config.d_model, device="meta", dtype=self.config.dtype
+            config.d_sae, config.d_model, device="meta", dtype=self.config.train_dtype
         )
 
     @torch.no_grad()
@@ -28,7 +29,7 @@ class Decoder(torch.nn.Module):
                 self.config.d_sae,
                 self.config.d_model,
                 device=to_device or self.config.device,
-                dtype=self.config.dtype,
+                dtype=self.config.train_dtype,
             )
         elif isinstance(init_from, Decoder):
             self.linear.weight = torch.nn.Parameter(
@@ -45,10 +46,18 @@ class Decoder(torch.nn.Module):
         else:
             raise ValueError(f"Invalid initialization source: {type(init_from)}")
 
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.config.train_dtype if self.training else self.config.inference_dtype
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        self.to(dtype=self.config.train_dtype if mode else self.config.inference_dtype)
+
     def forward(self, x: torch.Tensor, should_cast: bool = True):
         orig_dtype = x.dtype
         if should_cast:
-            x = x.to(self.config.dtype)
+            x = x.to(self.dtype)
         result = self.linear(x)
         if should_cast:
             result = result.to(orig_dtype)

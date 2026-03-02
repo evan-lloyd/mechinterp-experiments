@@ -33,7 +33,8 @@ class EncoderConfig:
     d_model: int
     d_sae: int
     device: torch.device
-    dtype: torch.dtype
+    train_dtype: torch.dtype
+    inference_dtype: torch.dtype
     activation_function: ActivationFunctionConfig
 
 
@@ -50,7 +51,7 @@ class Encoder(torch.nn.Module):
         super().__init__()
         self.config = config
         self.linear = torch.nn.Linear(
-            config.d_model, config.d_sae, device="meta", dtype=self.config.dtype
+            config.d_model, config.d_sae, device="meta", dtype=self.config.train_dtype
         )
 
     def init_weights(
@@ -86,7 +87,7 @@ class Encoder(torch.nn.Module):
                 torch.zeros(
                     self.config.d_sae,
                     device=to_device or self.config.device,
-                    dtype=self.config.dtype,
+                    dtype=self.config.train_dtype,
                 )
             )
         else:
@@ -105,6 +106,14 @@ class Encoder(torch.nn.Module):
                 f'"{self.config.activation_function.kind}" not implemented'
             )
 
+    def train(self, mode: bool = True):
+        super().train(mode)
+        self.to(dtype=self.config.train_dtype if mode else self.config.inference_dtype)
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.config.train_dtype if self.training else self.config.inference_dtype
+
     def forward(
         self,
         x: torch.Tensor,
@@ -112,7 +121,7 @@ class Encoder(torch.nn.Module):
     ):
         out_dtype = x.dtype
         if should_cast:
-            x = x.to(self.config.dtype)
+            x = x.to(self.dtype)
         result = self._activation_fn(self.linear(x))
         if should_cast:
             result = result.to(out_dtype)
@@ -120,6 +129,8 @@ class Encoder(torch.nn.Module):
 
 
 class InteractionEncoder(Encoder):
+    config: InteractionEncoderConfig
+
     def __init__(
         self,
         config: InteractionEncoderConfig,
@@ -127,7 +138,9 @@ class InteractionEncoder(Encoder):
         super().__init__(config)
         self.interaction = torch.nn.Parameter(
             torch.empty(
-                (config.d_sae, config.d_sae), device="meta", dtype=self.config.dtype
+                (config.d_sae, config.d_sae),
+                device="meta",
+                dtype=self.config.train_dtype,
             )
         )
 
@@ -152,7 +165,7 @@ class InteractionEncoder(Encoder):
                 torch.eye(
                     self.config.d_sae,
                     device=to_device or self.config.device,
-                    dtype=self.config.dtype,
+                    dtype=self.config.train_dtype,
                 )
             )
         else:
@@ -161,7 +174,7 @@ class InteractionEncoder(Encoder):
     def forward(self, x: torch.Tensor, should_cast: bool = True):
         out_dtype = x.dtype
         if should_cast:
-            x = x.to(self.config.dtype)
+            x = x.to(self.dtype)
         encoder_output = self.linear(x)
         features = self._activation_fn(encoder_output)
         for _ in range(self.config.n_interaction_iterations):

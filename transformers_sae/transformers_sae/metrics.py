@@ -41,14 +41,12 @@ def _handle_batch(fn):
 
 @_handle_batch
 def cos_dist_loss(actual: torch.Tensor, target: torch.Tensor):
-    return 1 - torch.nn.functional.cosine_similarity(
-        actual.float(), target.float(), dim=-1
-    )
+    return 1 - torch.nn.functional.cosine_similarity(actual, target, dim=-1)
 
 
 @_handle_batch
 def mse_loss(actual: torch.Tensor, target: torch.Tensor):
-    return ((actual.float() - target.float()) ** 2).mean(dim=-1)
+    return ((actual - target) ** 2).mean(dim=-1)
 
 
 # Not using decorator, since we want the geometric mean.
@@ -59,8 +57,8 @@ def kl_loss(
     return_type: _ReturnType = "tensor",
 ) -> torch.Tensor | np.ndarray | float:
     result = torch.nn.KLDivLoss(reduction="none", log_target=True)(
-        actual.float().log_softmax(-1),
-        target.float().log_softmax(-1),
+        actual.log_softmax(-1),
+        target.log_softmax(-1),
     ).sum(dim=-1)[batch.token_mask.bool()]
     if return_type == "np":
         return tensor_to_numpy(result.flatten().cpu())
@@ -76,8 +74,8 @@ kl_eval = kl_loss
 
 @_handle_batch
 def rre_eval(actual: torch.Tensor, target: torch.Tensor):
-    return torch.linalg.vector_norm(actual.float() - target.float(), dim=-1) / (
-        torch.linalg.vector_norm(target.float(), dim=-1) + 1e-8
+    return torch.linalg.vector_norm(actual - target, dim=-1, dtype=torch.float32) / (
+        torch.linalg.vector_norm(target, dim=-1, dtype=torch.float32) + 1e-8
     )
 
 

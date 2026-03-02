@@ -57,14 +57,11 @@ def _run_replacement_model(
             hook_stack.enter_context(
                 module.register_forward_hook(partial(_hook_output, hook_name))
             )
-        with torch.autocast(
-            "cuda" if model.device.type == "cuda" else "cpu", dtype=torch.bfloat16
-        ):
-            model_to_run(
-                *input_args,
-                **input_kwargs,
-                use_cache=False,
-            )
+        model_to_run(
+            *input_args,
+            **input_kwargs,
+            use_cache=False,
+        )
 
     return {k: ensure_tensor(v) for k, v in activation_cache.items()}
 
