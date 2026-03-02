@@ -367,7 +367,7 @@ def _train_evals(
                 base_model,
                 eval_model,
                 training_batch,
-                start_layer=target_layer,
+                list({target_layer, target_layer + 1, base_model.num_layers}),
             ),
             # Want evals for this layer, next layer, and/or on logits
             list({target_layer, target_layer + 1, base_model.num_layers}),

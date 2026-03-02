@@ -132,19 +132,15 @@ def make_batch_for_evals(
     base_model: torch.nn.Module,
     full_replacement_model: ReplacementModel,
     training_batch: TrainingBatch,
-    start_layer: int = 0,
-    end_layer: Optional[int] = None,
+    wanted_layers: List[int],
 ) -> TrainingBatch:
-    if end_layer is None:
-        end_layer = base_model.num_layers + 1
-
+    start_layer = min(wanted_layers)
+    end_layer = max(wanted_layers) + 1
     baseline_activations = copy(training_batch.baseline_activations)
     replacement_activations = copy(training_batch.replacement_activations)
 
     needs_baseline_layers = [
-        layer
-        for layer in range(start_layer, end_layer)
-        if layer not in baseline_activations
+        layer for layer in wanted_layers if layer not in baseline_activations
     ]
 
     # Get activation data for any layers we don't already have it for
@@ -197,6 +193,8 @@ def make_batch_for_evals(
     if needs_replacement_layers:
         hooks = {}
         for layer in needs_replacement_layers:
+            if layer not in wanted_layers:
+                continue
             if layer >= full_replacement_model.num_layers:
                 hooks[layer] = full_replacement_model.lm_head
             else:
@@ -248,6 +246,8 @@ def make_batch_for_evals(
             new_replacement_run[(start_layer, "layer_output")] = replacement_start_input
 
         for layer in needs_replacement_layers:
+            if layer not in wanted_layers:
+                continue
             if layer == base_model.num_layers:
                 replacement_activations[layer] = ActivationBatch(
                     log_probs=new_replacement_run[layer].log_softmax(-1),

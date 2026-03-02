@@ -151,8 +151,7 @@ def run_validations(
                     TrainingBatch(
                         batch, {}, baseline_activations, replacement_layers=[]
                     ),
-                    start_layer,
-                    end_layer,
+                    list(range(start_layer, end_layer)),
                 ),
                 list(range(start_layer, end_layer)),
                 aggregate=False,
