@@ -307,11 +307,11 @@ def run_evals(
     for layer in layers:
         replacement = batch.replacement_activations[layer]
         baseline = batch.baseline_activations[layer]
-        if baseline.logits is not None:
+        if baseline.log_probs is not None:
             result[layer] = LayerEval(
                 kl=kl_eval(
-                    replacement.logits,
-                    baseline.logits,
+                    replacement.log_probs,
+                    baseline.log_probs,
                     batch.input_data,
                     eval_type,
                 )

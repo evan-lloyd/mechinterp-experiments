@@ -18,7 +18,7 @@ class ActivationBatch:
     layer_output: torch.Tensor | None = None
     sae_features: torch.Tensor | None = None
     sae_output: torch.Tensor | None = None
-    logits: torch.Tensor | None = None
+    log_probs: torch.Tensor | None = None
 
 
 @dataclass
@@ -79,7 +79,7 @@ def make_activation_batch(
     request_attrs_by_layer = defaultdict(list)
     for r in request_spec:
         if r[0] == replacement_model.num_layers:
-            attrs = ("logits",)
+            attrs = ("log_probs",)
             submodule_paths = ("lm_head",)
         else:
             if r[1] == "sae":
@@ -113,6 +113,10 @@ def make_activation_batch(
         end_layer,
         start_at_sae,
     )
+    if (replacement_model.num_layers, "log_probs") in model_run:
+        model_run[(replacement_model.num_layers, "log_probs")] = model_run[
+            (replacement_model.num_layers, "log_probs")
+        ].log_softmax(-1)
     result = {}
     for layer in sorted(list(request_attrs_by_layer.keys())):
         result[layer] = ActivationBatch(
@@ -162,7 +166,7 @@ def make_batch_for_evals(
         for layer in needs_baseline_layers:
             if layer == base_model.num_layers:
                 baseline_activations[layer] = ActivationBatch(
-                    logits=new_baseline_run[layer]
+                    log_probs=new_baseline_run[layer].log_softmax(-1)
                 )
             else:
                 baseline_activations[layer] = ActivationBatch(
@@ -246,7 +250,7 @@ def make_batch_for_evals(
         for layer in needs_replacement_layers:
             if layer == base_model.num_layers:
                 replacement_activations[layer] = ActivationBatch(
-                    logits=new_replacement_run[layer],
+                    log_probs=new_replacement_run[layer].log_softmax(-1),
                 )
             else:
                 replacement_activations[layer] = ActivationBatch(

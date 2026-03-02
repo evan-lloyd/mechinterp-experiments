@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Literal
 
 import numpy as np
@@ -55,20 +56,27 @@ def kl_loss(
     target: torch.Tensor,
     batch: DataBatch,
     return_type: _ReturnType = "tensor",
+    overwrite_inputs: bool = False,
 ) -> torch.Tensor | np.ndarray | float:
-    with MemoryTrackingMode() as mm:
-        # actual = actual[batch.token_mask.bool()].log_softmax(-1)
-        # target = target[batch.token_mask.bool()].log_softmax(-1)
+    # Save ~50% memory by overwriting our input tensors. This is of course potentially
+    # risky, but we don't always need to save log_probs after this, and this is by far
+    # the most memory-expensive operation.
+    # from torch source (aten/src/ATen/native/Loss.cpp): output = at::exp(target) * (target - input);
+    # TODO: it seems like we should be able to write a more memory-efficient version of this with
+    # a custom backward function that lets us do some operations in-place.
+    if overwrite_inputs:
+        torch.subtract(target, actual, out=actual)
+        target.exp_()
+        torch.mul(target, actual, out=actual)
+        result = actual.sum(dim=-1)[batch.token_mask.bool()]
+    else:
         result = torch.nn.functional.kl_div(
-            actual.log_softmax(-1),
-            target.log_softmax(-1),
-            # actual.log_softmax(-1),
-            # target.log_softmax(-1),
+            actual,
+            target,
             reduction="none",
             log_target=True,
-        ).sum(dim=-1)
-    # print("kl_loss", mm.memory_max, mm.memory_cur)
-    
+        ).sum(dim=-1)[batch.token_mask.bool()]
+
     if return_type == "np":
         return tensor_to_numpy(result.flatten().cpu())
     else:
@@ -78,7 +86,7 @@ def kl_loss(
         return result.item()
 
 
-kl_eval = kl_loss
+kl_eval = partial(kl_loss, overwrite_inputs=True)
 
 
 @_handle_batch

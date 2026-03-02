@@ -5,7 +5,7 @@ import torch
 from ..activation_data import ActivationBatch, TrainingBatch, make_activation_batch
 from ..data_batch import DataBatch
 from ..metrics import cos_dist_loss, kl_loss, mse_loss
-from ..replacement_model import make_replacement_model, ReplacementModel
+from ..replacement_model import ReplacementModel, make_replacement_model
 from ..sae import SAE
 from .training_step import Stepper
 
@@ -73,12 +73,12 @@ class NextLayerTrainingStepper(Stepper):
         self, training_batch: TrainingBatch, config: "TrainingConfig"
     ) -> Dict[str, torch.Tensor]:
         if (
-            training_batch.baseline_activations[self.target_layer + 1].logits
+            training_batch.baseline_activations[self.target_layer + 1].log_probs
             is not None
         ):
             downstream_reconstruction_loss = kl_loss(
-                training_batch.replacement_activations[self.target_layer + 1].logits,
-                training_batch.baseline_activations[self.target_layer + 1].logits,
+                training_batch.replacement_activations[self.target_layer + 1].log_probs,
+                training_batch.baseline_activations[self.target_layer + 1].log_probs,
                 training_batch.input_data,
             )
         else:

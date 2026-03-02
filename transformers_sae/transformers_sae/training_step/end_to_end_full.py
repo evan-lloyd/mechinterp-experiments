@@ -66,8 +66,8 @@ class EndToEndFullTrainingStepper(Stepper):
             )
 
         downstream_kl_loss = kl_loss(
-            training_batch.replacement_activations[self.base_model.num_layers].logits,
-            training_batch.baseline_activations[self.base_model.num_layers].logits,
+            training_batch.replacement_activations[self.base_model.num_layers].log_probs,
+            training_batch.baseline_activations[self.base_model.num_layers].log_probs,
             training_batch.input_data,
         )
 
