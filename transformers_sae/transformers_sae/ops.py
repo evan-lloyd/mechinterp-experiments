@@ -6,7 +6,7 @@ import weakref
 import zipfile
 from collections import defaultdict
 from io import StringIO
-from typing import TYPE_CHECKING, Dict, Iterable, List, Sequence, Tuple
+from typing import TYPE_CHECKING, Dict, Iterable, List, Sequence, Tuple, Collection
 
 import cloudpickle
 import matplotlib.pyplot as plt
@@ -160,6 +160,7 @@ def save_training_result(
     result: "TrainingResult" | Dict[int, List["SAECheckpoint"]],
     out_dir: str,
     keep_in_ram: bool = True,
+    blocking: bool = True,
 ):
     """Save a TrainingResult to the given directory.
 
@@ -186,11 +187,16 @@ def save_training_result(
             if not keep_in_ram:
                 checkpoint.sae = None
 
-    thread = threading.Thread(target=_save_async, daemon=True)
-    thread.start()
+    if blocking:
+        _save_async()
+    else:
+        thread = threading.Thread(target=_save_async, daemon=True)
+        thread.start()
 
 
-def load_training_result(from_dir: str) -> "TrainingResult":
+def load_training_result(
+    from_dir: str, for_layers: Collection[int] | None = None
+) -> "TrainingResult":
     """Load a TrainingResult from the given directory.
 
     Loads all checkpoint files and reconstructs the TrainingResult structure.
@@ -219,6 +225,8 @@ def load_training_result(from_dir: str) -> "TrainingResult":
     # Create TrainingResult and populate with checkpoints
     result = TrainingResult(saes)
     for layer, checkpoint_list in checkpoints_by_layer.items():
+        if for_layers is not None and layer not in for_layers:
+            continue
         # Replace the initial checkpoint list with loaded checkpoints
         result._layer_results[layer] = [cp for _, cp in checkpoint_list]
 
@@ -420,7 +428,9 @@ class MemoryTrackingMode(TorchDispatchMode):
         self.memory_use[dev][st] = wt
         self.update_stats()
 
-    def __init__(self, *args, ignore_tensors: Iterable[torch.Tensor] | None = None, **kwargs):
+    def __init__(
+        self, *args, ignore_tensors: Iterable[torch.Tensor] | None = None, **kwargs
+    ):
         super().__init__(*args, **kwargs)
         self.ignore_tensors = WeakIdKeyDictionary(
             {t.untyped_storage(): None for t in ignore_tensors or {}}

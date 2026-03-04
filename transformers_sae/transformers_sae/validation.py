@@ -123,39 +123,44 @@ def run_validations(
             )
 
             batch.to(model.device)
-            if cache_dir is not None:
-                baseline_run = load_cache(
-                    model.num_layers,
-                    cache_dir,
-                    step * inference_batch_size,
-                    batch,
-                )
-                baseline_activations = {}
-                for k, v in baseline_run.items():
-                    if k in range(start_layer, end_layer):
-                        baseline_activations[k] = ActivationBatch(
-                            layer_output=v.to(model.device)
-                        )
-            else:
-                baseline_activations = make_activation_batch(
-                    model,
-                    [(layer, "layer") for layer in range(start_layer, end_layer)],
-                    batch,
-                    start_layer=-1,  # not cached, so we start from raw input
-                    end_layer=end_layer,
-                )
-            evals = run_evals(
-                make_batch_for_evals(
-                    model,
-                    full_replacement_model,
-                    TrainingBatch(
-                        batch, {}, baseline_activations, replacement_layers=[]
+
+            with torch.autocast(
+                device_type="cuda" if model.device.type == "cuda" else "cpu",
+                dtype=torch.bfloat16,
+            ):
+                if cache_dir is not None:
+                    baseline_run = load_cache(
+                        model.num_layers,
+                        cache_dir,
+                        step * inference_batch_size,
+                        batch,
+                    )
+                    baseline_activations = {}
+                    for k, v in baseline_run.items():
+                        if k in range(start_layer, end_layer):
+                            baseline_activations[k] = ActivationBatch(
+                                layer_output=v.to(model.device)
+                            )
+                else:
+                    baseline_activations = make_activation_batch(
+                        model,
+                        [(layer, "layer") for layer in range(start_layer, end_layer)],
+                        batch,
+                        start_layer=-1,  # not cached, so we start from raw input
+                        end_layer=end_layer,
+                    )
+                evals = run_evals(
+                    make_batch_for_evals(
+                        model,
+                        full_replacement_model,
+                        TrainingBatch(
+                            batch, {}, baseline_activations, replacement_layers=[]
+                        ),
+                        list(range(start_layer, end_layer)),
                     ),
                     list(range(start_layer, end_layer)),
-                ),
-                list(range(start_layer, end_layer)),
-                aggregate=False,
-            )
+                    aggregate=False,
+                )
 
             for layer in evals.keys():
                 results.layer_results[layer].update(evals[layer])
@@ -258,11 +263,16 @@ def run_single_layer_replacements(
                 )
 
                 batch.to(model.device)
-                evals = run_evals(
-                    stepper.make_batch(batch, cache),
-                    [model.num_layers],
-                    aggregate=False,
-                )
+
+                with torch.autocast(
+                    device_type="cuda" if model.device.type == "cuda" else "cpu",
+                    dtype=torch.bfloat16,
+                ):
+                    evals = run_evals(
+                        stepper.make_batch(batch, cache),
+                        [model.num_layers],
+                        aggregate=False,
+                    )
 
                 results.layer_results[layer].update(evals[model.num_layers])
 
@@ -361,7 +371,6 @@ def generate_with_replacement(
         replacement_model,
         tokenizer,
         do_sample=do_sample,
-        temperature=0.5,
         stream=stream,
         max_new_tokens=max_new_tokens,
         use_cache=True,

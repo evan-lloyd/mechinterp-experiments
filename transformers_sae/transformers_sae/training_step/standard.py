@@ -49,9 +49,7 @@ class StandardTrainingStepper(Stepper):
             training_batch.input_data,
         )
 
-        reconstruction_loss.backward()
-
-        return {
+        return reconstruction_loss, {
             "total_loss": reconstruction_loss.item(),
             "raw_loss.reconstruction": reconstruction_loss.item(),
         }

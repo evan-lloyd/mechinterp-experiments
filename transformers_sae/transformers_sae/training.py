@@ -197,7 +197,7 @@ def make_optimizer(saes: Dict[int, SAE], layers: List[int], config: TrainingConf
     for pg in param_groups:
         pg["base_lr"] = pg["lr"]
 
-    return torch.optim.AdamW(param_groups, lr=config.lr)
+    return torch.optim.Adam(param_groups, lr=config.lr, betas=(0.0, 0.999))
 
 
 def training_loop(
@@ -253,10 +253,7 @@ def training_loop(
             cache = None
         batch.to(stepper.base_model.device)
 
-        with torch.autocast(
-            device_type="cuda" if stepper.base_model.device.type == "cuda" else "cpu",
-            dtype=torch.bfloat16,
-        ):
+        with stepper.autocast():
             training_batch = stepper.make_batch(batch, cache)
             loss, step_result = stepper.step(training_batch, config)
 
@@ -270,13 +267,7 @@ def training_loop(
             num_used_tokens += batch.num_tokens
 
         if num_used_tokens >= eval_threshold:
-            with torch.autocast(
-                device_type="cuda"
-                if stepper.base_model.device.type == "cuda"
-                else "cpu",
-                dtype=torch.bfloat16,
-            ):
-                evals = eval_fn(training_batch)
+            evals = eval_fn(training_batch)
             progress.set_postfix(evals, refresh=False)
             eval_threshold = min(
                 eval_threshold + config.eval_interval,
@@ -328,6 +319,7 @@ def training_loop(
                     {stepper.target_layer: [checkpoints[-1]]},
                     checkpoint_dir,
                     keep_in_ram=False,
+                    blocking=False,
                 )
 
             # Initialize new checkpoint
@@ -361,6 +353,10 @@ def training_loop(
 def _train_evals(
     base_model: ReplacementModel, eval_model: ReplacementModel, target_layer: int
 ):
+    @torch.autocast(
+        device_type="cuda" if base_model.device.type == "cuda" else "cpu",
+        dtype=torch.bfloat16,
+    )
     def eval_fn(training_batch: TrainingBatch) -> Dict[str, float]:
         result = run_evals(
             make_batch_for_evals(
@@ -546,6 +542,7 @@ def train(
                     {layer: [train_result[layer][-1]]},
                     checkpoint_dir,
                     keep_in_ram=True,
+                    blocking=True,
                 )
             sae.eval()
 

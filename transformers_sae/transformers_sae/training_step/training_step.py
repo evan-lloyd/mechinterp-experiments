@@ -61,6 +61,14 @@ class Stepper(ABC):
         self, batch: DataBatch, baseline_activations: ActivationBatch
     ) -> Dict[int, ActivationBatch]: ...
 
+    def autocast(self):
+        return torch.autocast(
+            device_type="cuda"
+            if self.replacement_model.device.type == "cuda"
+            else "cpu",
+            dtype=torch.bfloat16,
+        )
+
     def run_baseline(
         self, batch: DataBatch, cache: torch.Tensor | None
     ) -> Dict[int, ActivationBatch]:

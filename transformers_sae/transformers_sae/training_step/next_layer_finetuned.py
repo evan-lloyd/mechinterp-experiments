@@ -69,7 +69,7 @@ class NextLayerFinetunedTrainingStepper(Stepper):
 
         # Need SAE features for next layer?
         if self.target_layer + 1 < self.replacement_model.num_layers:
-            with torch.no_grad():
+            with torch.no_grad(), self.autocast():
                 baseline_activations[
                     self.target_layer + 1
                 ].sae_features = self.replacement_model.get_layer(

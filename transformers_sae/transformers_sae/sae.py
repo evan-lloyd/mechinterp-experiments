@@ -140,9 +140,7 @@ class SAE(torch.nn.Module):
 
     @_check_device
     def forward(self, x: torch.Tensor, *args, **kwargs):
-        return (
-            self.decode(
-                self.encode(x.to(self.encoder.dtype), should_cast=False),
-                should_cast=False,
-            ).to(x.dtype),
-        )
+        return self.decode(
+            self.encode(x.to(self.encoder.dtype), should_cast=False),
+            should_cast=False,
+        ).to(x.dtype)

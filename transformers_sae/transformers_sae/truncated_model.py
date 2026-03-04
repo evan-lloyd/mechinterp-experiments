@@ -46,9 +46,14 @@ def truncated_model(
             super().__init__()
             self.sae = model.get_layer(start_layer).sae
 
+        def __getattr__(self, name: str):
+            if name not in ("forward", "sae"):
+                return getattr(model.get_layer(start_layer), name)
+            return super().__getattr__(name)
+
         def forward(self, x: torch.Tensor, *args, **kwargs):
             result = self.sae(x.float(), should_cast=False)
-            return (result[0].to(x.dtype),)
+            return (result.to(x.dtype),)
 
     patched_layers = torch.nn.ModuleList(
         model.get_submodule(model.layer_path)[max(start_layer, 0) : end_layer]
@@ -68,14 +73,13 @@ def truncated_model(
 
         def forward(self, x: torch.Tensor, *args, **kwargs):
             residual = x
-            for layer in self.layers:
-                layer_args, layer_kwargs = model.get_layer_args(*args, **kwargs)
+            for i, layer in enumerate(self.layers):
+                layer_args, layer_kwargs = model.get_layer_args(
+                    i + max(start_layer, 0), layer, *args, **kwargs
+                )
                 residual = ensure_tensor(layer(residual, *layer_args, **layer_kwargs))
             if end_layer > model.num_layers:
-                residual = model.get_submodule(model.norm_path)(residual)
-                residual = model.lm_head(
-                    residual.view(-1, residual.shape[-2], residual.shape[-1])
-                )
+                residual = model.get_logits(residual)
             return (residual,)
 
     try:

@@ -15,16 +15,24 @@ class SAEReplacementLayer(torch.nn.Module):
         self.original_layer = original_layer
         self.sae = sae
 
+    def __getattr__(self, name: str):
+        if name == "forward":
+            return object.__getattribute__(self, "forward")
+        elif name in ("sae", "original_layer"):
+            return object.__getattribute__(self, "_modules")[name]
+        return getattr(self.original_layer, name)
+
     def forward(self, *args, **kwargs):
         original_output = self.original_layer(*args, **kwargs)
-        if isinstance(original_output, tuple):
+        tuple_expected = isinstance(original_output, tuple)
+        if tuple_expected:
             original_output, *rest = original_output
         else:
             rest = []
         reconstruction = self.sae(original_output, *args, **kwargs)
-        if not isinstance(reconstruction, tuple):
-            reconstruction = (reconstruction,)
-        return reconstruction + tuple(rest)
+        if tuple_expected:
+            return (reconstruction,) + tuple(rest)
+        return reconstruction
 
 
 class ReplacementModel:
@@ -33,12 +41,18 @@ class ReplacementModel:
     context_length: int
     d_model: int
     layer_path: str
-    norm_path: str
 
     def __init__(self):
         raise NotImplementedError(
             "ReplacementModel should not be instantiated directly; use make_replacement_model instead"
         )
+
+    def get_logits(self, residual, **kwargs):
+        residual = self.transformer.ln_f(residual)
+        residual = self.lm_head(
+            residual.view(-1, residual.shape[-2], residual.shape[-1])
+        )
+        return residual
 
     def get_layer(self, i: int):
         if i < self.num_layers:
@@ -46,7 +60,7 @@ class ReplacementModel:
         else:
             return self.lm_head
 
-    def get_layer_args(self, *args, **kwargs):
+    def get_layer_args(self, layer_idx, layer, *args, **kwargs):
         return args, dict(
             attention_mask=kwargs.get("attention_mask"),
             use_cache=kwargs.get("use_cache"),
@@ -70,6 +84,42 @@ class ReplacementModel:
         return input_args, input_kwargs
 
 
+class GemmaReplacement(ReplacementModel):
+    def get_model_args(self, batch, model_input, start_at_embedding):
+        input_args, input_kwargs = super().get_model_args(
+            batch, model_input, start_at_embedding
+        )
+        if not start_at_embedding:
+            input_kwargs["position_embeddings"] = self.model.rotary_emb(
+                model_input, batch.position_ids
+            )
+        input_kwargs["attention_mask"] = {
+            "full_attention": input_kwargs["attention_mask"],
+            # TODO: this is only correct while we are using a context that's <= sliding attention
+            "sliding_attention": input_kwargs["attention_mask"],
+        }
+
+        return input_args, input_kwargs
+
+    def get_logits(self, residual, **kwargs):
+        logits = self.lm_head(self.model.norm(residual))
+        if self.config.final_logit_softcapping is not None:
+            logits = logits / self.config.final_logit_softcapping
+            logits = torch.tanh(logits)
+            logits = logits * self.config.final_logit_softcapping
+        return logits
+
+    def get_layer_args(self, layer_idx, layer, *args, **kwargs):
+        layer_args, layer_kwargs = super().get_layer_args(
+            layer_idx, layer, *args, **kwargs
+        )
+        layer_kwargs["position_embeddings"] = kwargs.get("position_embeddings")
+        layer_kwargs["attention_mask"] = kwargs.get("attention_mask")[
+            layer.attention_type
+        ]
+        return layer_args, layer_kwargs
+
+
 def _shallow_copy_model(source: torch.nn.Module):
     copied = copy.copy(source)
     copied._modules = {}
@@ -91,7 +141,6 @@ def make_replacement_model(
     original: ReplacementModel,
     sae_layers: Dict[int, SAE],
     layer_path: str = "transformer.h",
-    norm_path: str = "transformer.ln_f",
 ) -> ReplacementModel: ...
 
 
@@ -103,7 +152,6 @@ def make_replacement_model(
     context_length: int,
     d_model: int,
     layer_path: str = "transformer.h",
-    norm_path: str = "transformer.ln_f",
 ) -> ReplacementModel: ...
 
 
@@ -114,7 +162,6 @@ def make_replacement_model(
     context_length: Optional[int] = None,
     d_model: Optional[int] = None,
     layer_path: str = "transformer.h",
-    norm_path: str = "transformer.ln_f",
     replacement_class: Type[ReplacementModel] = ReplacementModel,
 ) -> ReplacementModel:
     # Shallow copy into a new module instance, adding ReplacementModel as a mixin
@@ -123,7 +170,6 @@ def make_replacement_model(
 
     if isinstance(original, ReplacementModel):
         layer_path = original.layer_path
-        norm_path = original.norm_path
 
     for target_layer, sae in sae_layers.items():
         module_path = f"{layer_path}.{target_layer}"
@@ -149,7 +195,6 @@ def make_replacement_model(
 
     object.__setattr__(new_instance, "sae_layers", replacement_layers)
     object.__setattr__(new_instance, "layer_path", layer_path)
-    object.__setattr__(new_instance, "norm_path", norm_path)
 
     assert isinstance(new_instance, ReplacementModel)
     return new_instance

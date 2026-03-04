@@ -1,14 +1,14 @@
 import torch
 from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from transformers_sae.ops import MemoryTrackingMode
-from transformers_sae.replacement_model import make_replacement_model, ReplacementModel
+from transformers_sae.replacement_model import GemmaReplacement, make_replacement_model
 
 # Tweak TRAINING_BATCH_SIZE for your hardware if necessary
 if torch.cuda.is_available():
     TRAINING_DEVICE = "cuda:0"
-    TRAINING_BATCH_SIZE = 1
+    TRAINING_BATCH_SIZE = 2
 elif torch.mps.is_available():
     TRAINING_DEVICE = "mps:0"
     TRAINING_BATCH_SIZE = 2
@@ -33,23 +33,6 @@ validation_dataset = load_dataset(
 )
 
 
-class GemmaReplacement(ReplacementModel):
-    def get_model_args(self, batch, model_input, start_at_embedding):
-        input_args, input_kwargs = super().get_model_args(
-            batch, model_input, start_at_embedding
-        )
-        if not start_at_embedding:
-            input_kwargs["position_embeddings"] = self.model.rotary_emb(
-                model_input, batch.position_ids
-            )
-        return input_args, input_kwargs
-
-    def get_layer_args(self, *args, **kwargs):
-        layer_args, layer_kwargs = super().get_layer_args(*args, **kwargs)
-        layer_kwargs["position_embeddings"] = kwargs.get("position_embeddings")
-        return layer_args, layer_kwargs
-
-
 with MemoryTrackingMode() as mtm:
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
@@ -60,13 +43,14 @@ with MemoryTrackingMode() as mtm:
         #     load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16
         # ),
     )
+    model.eval()
+    model.requires_grad_(False)
     model = make_replacement_model(
         model,
         {},
         num_layers=model.config.num_hidden_layers,
-        context_length=1024,  # model.config.max_position_embeddings,
+        context_length=1024,  # also used by Gemma scope
         d_model=model.config.hidden_size,
-        norm_path="model.norm",
         layer_path="model.layers",
         replacement_class=GemmaReplacement,
     )
@@ -80,12 +64,12 @@ VALIDATION_CACHE_DIR = None if torch.cuda.is_available() else ".validation_cache
 NUM_TRAINING_TOKENS = int(1e7) if torch.cuda.is_available() else int(1e6)
 EVAL_INTERVAL = int(1e5)
 NUM_VALIDATION_TOKENS = int(1e6) if torch.cuda.is_available() else int(1e5)
-D_SAE = model.d_model * 4
+# to match Gemma Scope
+D_SAE = 16384
+# D_SAE = model.d_model * 8
 TOPK = 100
 TOKENIZER_BATCH_SIZE = 256
 FINETUNE_FRACTION = 0.1
-# Note this will use up ~1.8GB of space, set to False if you want to skip
-SAVE_FINAL_RESULTS = True
 
 import numpy as np
 
@@ -105,8 +89,8 @@ empty_saes = {
                 d_model=model.d_model,
                 d_sae=D_SAE,
                 device=TRAINING_DEVICE,
-                # dtype=torch.float32,
-                dtype=torch.bfloat16,
+                train_dtype=torch.float32,
+                inference_dtype=torch.bfloat16,
                 encoder_kind="topk",
                 top_k=TOPK,
             )
@@ -129,7 +113,8 @@ training_config = {
         training_batch_size=TRAINING_BATCH_SIZE,
         num_train_tokens=NUM_TRAINING_TOKENS,
         eval_interval=EVAL_INTERVAL,
-        train_layers=list(range(model.num_layers)),
+        train_layers=[25],
+        # train_layers=list(range(model.num_layers)),
         lr=1e-3,
         interaction_lr=1e-3,
         lr_schedule=linear_decay_during_finetune,  # per Karvonen (2025)
@@ -147,36 +132,6 @@ training_config = {
 training_results = {}
 validation_results = {}
 
-import os
-
-from transformers_sae.activation_cache import build_cache
-
-if TRAINING_CACHE_DIR and (
-    not os.path.exists(TRAINING_CACHE_DIR) or not os.listdir(TRAINING_CACHE_DIR)
-):
-    build_cache(
-        TRAINING_CACHE_DIR,
-        model,
-        tokenizer,
-        training_dataset,
-        tokenizer_batch_size=TOKENIZER_BATCH_SIZE,
-        inference_batch_size=TRAINING_BATCH_SIZE,
-        num_tokens=NUM_TRAINING_TOKENS,
-    )
-
-if VALIDATION_CACHE_DIR and (
-    not os.path.exists(VALIDATION_CACHE_DIR) or not os.listdir(VALIDATION_CACHE_DIR)
-):
-    build_cache(
-        VALIDATION_CACHE_DIR,
-        model,
-        tokenizer,
-        validation_dataset,
-        tokenizer_batch_size=TOKENIZER_BATCH_SIZE,
-        inference_batch_size=TRAINING_BATCH_SIZE,
-        num_tokens=NUM_VALIDATION_TOKENS,
-    )
-
 training_results = train(
     model,
     tokenizer,
@@ -186,10 +141,58 @@ training_results = train(
     cache_dir=TRAINING_CACHE_DIR,
     checkpoints_at=list(
         range(
-            int(1e6),
+            int(1e7),
             training_config[TrainingMethod.next_layer].num_train_tokens,
-            int(1e6),
+            int(1e7),
         )
     ),
-    checkpoint_dir="/workspace/gemma_2_2b/next_layer/",
+    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer/",
+    force_retrain=True,
 )
+
+validations = run_validations(
+    model,
+    tokenizer,
+    training_results.final_saes,
+    validation_dataset,
+    TOKENIZER_BATCH_SIZE,
+    TRAINING_BATCH_SIZE,
+    NUM_VALIDATION_TOKENS,
+    cache_dir=VALIDATION_CACHE_DIR,
+    start_layer=25,
+)
+
+print(
+    f"mean rre={ {k: np.mean(v.rre).item() for k, v in validations.layer_results.items() if v.rre is not None} })"
+)
+print(
+    f"mean l0={ {k: np.mean(v.l0).item() for k, v in validations.layer_results.items() if v.l0 is not None} })"
+)
+print(
+    f"geom mean kl={ {k: np.exp(np.mean(np.log(np.clip(v.kl, min=1e-9)))).item() for k, v in validations.layer_results.items() if v.kl is not None} })"
+)
+print(
+    f"arith mean kl={ {k: np.mean(v.kl) for k, v in validations.layer_results.items() if v.kl is not None} })"
+)
+print(
+    f"live features={ {k: sum(v.live_features) / D_SAE for k, v in validations.layer_results.items() if v.live_features is not None} }"
+)
+
+from transformers_sae.validation import generate_with_replacement
+
+with torch.autocast(
+    device_type="cuda" if model.device.type == "cuda" else "cpu",
+    dtype=torch.bfloat16,
+):
+    generate_with_replacement(
+        model,
+        tokenizer,
+        "The capital of France",
+        # {25: gemma_scope},
+        # {},
+        {
+            layer: sae
+            for layer, sae in training_results.final_saes.items()
+            if layer > 24
+        },
+    )
