@@ -120,13 +120,29 @@ def tokenize_strings(
             num_rows,
             row_lens,
             torch.empty((0,)),
+            torch.empty((0,)),
         ), list(token_ids.values())
+
+    special_ids = torch.tensor(tokenizer.all_special_ids)
+    special_token_indices = torch.empty((0,), dtype=torch.long)
 
     for input_batch, row_len, new_tokens in zip(input_batches, row_lens, new_tokenses):
         row_lens.append(row_len)
         input_id_stack.append(
             torch.cat([torch.tensor(in_, dtype=torch.int64) for in_ in input_batch])
         )
+        special_token_indices = torch.cat(
+            (
+                special_token_indices,
+                (input_id_stack[-1].unsqueeze(-1) == special_ids)
+                .any(dim=-1)
+                .nonzero()
+                .squeeze(-1)
+                #  We're building this one row at a time, so account for current offset
+                + (len(input_id_stack) - 1) * context_length,
+            )
+        )
+
         position_id_stack.append(
             torch.cat(
                 [
@@ -192,6 +208,8 @@ def tokenize_strings(
     unused_inputs = list(token_ids.values())
     position_ids = torch.stack(position_id_stack)
     token_mask = (position_ids >= 0).to(dtype=torch.float32)
+    # Make sure these don't show up in evals/loss calculations
+    token_mask.view(-1)[special_token_indices] = 0.0
 
     # These have to be non-negative on CUDA kernels
     position_ids = torch.where(position_ids >= 0, position_ids, 0)
@@ -204,6 +222,7 @@ def tokenize_strings(
         num_rows,
         row_lens,
         token_mask,
+        special_token_indices,
     ), unused_inputs
 
 

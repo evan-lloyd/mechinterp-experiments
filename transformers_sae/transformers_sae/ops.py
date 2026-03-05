@@ -6,7 +6,7 @@ import weakref
 import zipfile
 from collections import defaultdict
 from io import StringIO
-from typing import TYPE_CHECKING, Dict, Iterable, List, Sequence, Tuple, Collection
+from typing import TYPE_CHECKING, Collection, Dict, Iterable, List, Sequence, Tuple
 
 import cloudpickle
 import matplotlib.pyplot as plt
@@ -19,9 +19,10 @@ from safetensors.torch import save_file as save_file_torch
 from torch.utils._python_dispatch import TorchDispatchMode
 from torch.utils._pytree import tree_map_only
 from torch.utils.weak import WeakIdKeyDictionary
-from transformers import AutoModel, AutoTokenizer, TextStreamer
+from transformers import AutoTokenizer, TextStreamer
 
 if TYPE_CHECKING:
+    from .replacement_model import ReplacementModel
     from .sae import SAE
     from .training import SAECheckpoint, TrainingResult
 
@@ -244,7 +245,7 @@ def clone_sae(sae: "SAE", to_device: str | None = None):
 
 def generate(
     inputs,
-    model: AutoModel,
+    model: "ReplacementModel",
     tokenizer: AutoTokenizer,
     stream=True,
     stream_callback=None,
@@ -253,17 +254,62 @@ def generate(
     if isinstance(inputs, str):
         inputs = tokenizer(inputs, return_tensors="pt").to(model.device)
 
+    special_ids = torch.tensor(tokenizer.all_special_ids).to(model.device)
+    special_token_indices = (
+        (inputs.input_ids.view(-1).unsqueeze(-1) == special_ids)
+        .any(dim=-1)
+        .nonzero()
+        .squeeze(-1)
+    )
+
+    def _set_special_token_indices(module, args, kwargs):
+        kwargs["special_token_indices"] = special_token_indices
+        return args, kwargs
+
     class TextStreamerWithCallback(TextStreamer):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.cur_token_index = None
+
         def put(self, value):
-            super().put(value)
+            if stream:
+                super().put(value)
 
             if stream_callback:
-                stream_callback(value[0])
+                stream_callback(value)
 
-    streamer = TextStreamerWithCallback(tokenizer, skip_prompt=True) if stream else None
+            # We get called with the initial input, which we've already extracted special_token_indices from
+            if self.cur_token_index is None:
+                self.cur_token_index = value.numel()
+            else:
+                nonlocal special_token_indices
+                if value in tokenizer.all_special_ids:
+                    special_token_indices = torch.cat(
+                        (
+                            special_token_indices,
+                            torch.tensor(
+                                [self.cur_token_index],
+                                device=special_token_indices.device,
+                            ),
+                        )
+                    )
+                self.cur_token_index += 1
+
+        def end(self):
+            super().end()
+            self.cur_token_index = None
+
+    streamer = TextStreamerWithCallback(tokenizer, skip_prompt=True)
 
     try:
-        with torch.inference_mode():
+        with (
+            torch.inference_mode(),
+            # Need to go through a hook because generate "helpfully" raises due to our non-standard
+            # keyword arg for special_token_indices.
+            model.register_forward_pre_hook(
+                _set_special_token_indices, with_kwargs=True
+            ),
+        ):
             return model.generate(
                 **inputs,
                 streamer=streamer,

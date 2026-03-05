@@ -366,6 +366,7 @@ def generate_with_replacement(
     replacement_model = make_replacement_model(
         model, {layer: sae for layer, sae in saes.items()}
     )
+
     result = generate(
         input,
         replacement_model,

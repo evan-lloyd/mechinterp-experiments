@@ -27,13 +27,13 @@ with MemoryTrackingMode() as mtm:
         "roneneldan/TinyStories-33M",
         device_map=TRAINING_DEVICE,
         dtype=torch.bfloat16,
-        quantization_config=BitsAndBytesConfig(
-            # load_in_8bit=True,
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb4bit_use_double_quant=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
-        ),
+        # quantization_config=BitsAndBytesConfig(
+        #     # load_in_8bit=True,
+        #     load_in_4bit=True,
+        #     bnb_4bit_quant_type="nf4",
+        #     bnb4bit_use_double_quant=True,
+        #     bnb_4bit_compute_dtype=torch.bfloat16,
+        # ),
     )
     model = make_replacement_model(
         model,
@@ -44,7 +44,7 @@ with MemoryTrackingMode() as mtm:
     )
 
 print(model)
-print(mtm.memory_max)
+print(mtm.memory_max, mtm.memory_cur)
 TRAINING_CACHE_DIR = None if torch.cuda.is_available() else ".training_cache"
 VALIDATION_CACHE_DIR = None if torch.cuda.is_available() else ".validation_cache"
 NUM_TRAINING_TOKENS = int(1e7) if torch.cuda.is_available() else int(1e6)
@@ -61,10 +61,7 @@ import numpy as np
 
 from transformers_sae.sae import (
     SAE,
-    DecoderConfig,
-    EncoderConfig,
-    SAEConfig,
-    TopKActivationFunctionConfig,
+    make_sae_config,
 )
 from transformers_sae.training import TrainingConfig, TrainingMethod, fine_tune, train
 from transformers_sae.validation import run_validations
@@ -77,24 +74,17 @@ def SAE_SPECS():
 empty_saes = {
     method: {
         layer: SAE(
-            SAEConfig(
+            make_sae_config(
                 d_model=model.d_model,
                 d_sae=D_SAE,
                 device=TRAINING_DEVICE,
-                encoder=EncoderConfig(
-                    d_model=model.d_model,
-                    d_sae=D_SAE,
-                    device=TRAINING_DEVICE,
-                    activation_function=TopKActivationFunctionConfig(k=TOPK),
-                ),
-                decoder=DecoderConfig(
-                    d_model=model.d_model,
-                    d_sae=D_SAE,
-                    device=TRAINING_DEVICE,
-                ),
+                train_dtype=torch.float32,
+                inference_dtype=torch.bfloat16,
+                encoder_kind="topk",
+                top_k=TOPK,
             )
         )
-        for layer in range(model.config.num_layers)
+        for layer in range(model.num_layers)
     }
     for method in SAE_SPECS()
 }
@@ -130,36 +120,6 @@ training_config = {
 training_results = {}
 validation_results = {}
 
-import os
-
-from transformers_sae.activation_cache import build_cache
-
-if TRAINING_CACHE_DIR and (
-    not os.path.exists(TRAINING_CACHE_DIR) or not os.listdir(TRAINING_CACHE_DIR)
-):
-    build_cache(
-        TRAINING_CACHE_DIR,
-        model,
-        tokenizer,
-        training_dataset,
-        tokenizer_batch_size=TOKENIZER_BATCH_SIZE,
-        inference_batch_size=TRAINING_BATCH_SIZE,
-        num_tokens=NUM_TRAINING_TOKENS,
-    )
-
-if VALIDATION_CACHE_DIR and (
-    not os.path.exists(VALIDATION_CACHE_DIR) or not os.listdir(VALIDATION_CACHE_DIR)
-):
-    build_cache(
-        VALIDATION_CACHE_DIR,
-        model,
-        tokenizer,
-        validation_dataset,
-        tokenizer_batch_size=TOKENIZER_BATCH_SIZE,
-        inference_batch_size=TRAINING_BATCH_SIZE,
-        num_tokens=NUM_VALIDATION_TOKENS,
-    )
-
 for spec in (
     # TrainingMethod.standard,
     TrainingMethod.next_layer,
@@ -174,9 +134,9 @@ for spec in (
         training_dataset,
         training_config[spec],
         cache_dir=TRAINING_CACHE_DIR,
-        checkpoints_at=[int((1.0 - FINETUNE_FRACTION) * NUM_TRAINING_TOKENS)]
-        if spec in (TrainingMethod.standard, TrainingMethod.next_layer)
-        else None,
+        # checkpoints_at=[int((1.0 - FINETUNE_FRACTION) * NUM_TRAINING_TOKENS)]
+        # if spec in (TrainingMethod.standard, TrainingMethod.next_layer)
+        # else None,
     )
     validation_results[spec] = run_validations(
         model,
@@ -188,9 +148,19 @@ for spec in (
         inference_batch_size=training_config[spec].training_batch_size,
         cache_dir=VALIDATION_CACHE_DIR,
     )
+    validations = validation_results[spec]
     print(
-        f"mean rre={ {k: np.mean(v.rre).item() for k, v in validation_results[spec].layer_results.items() if v.rre is not None} })"
+        f"mean rre={ {k: np.mean(v.rre).item() for k, v in validations.layer_results.items() if v.rre is not None} }"
     )
     print(
-        f"geom mean kl={ {k: np.exp(np.mean(np.log(np.clip(v.kl, min=1e-9)))).item() for k, v in validation_results[spec].layer_results.items() if v.kl is not None} })"
+        f"mean l0={ {k: np.mean(v.l0).item() for k, v in validations.layer_results.items() if v.l0 is not None} }"
+    )
+    print(
+        f"geom mean kl={ {k: np.exp(np.mean(np.log(np.clip(v.kl, min=1e-9)))).item() for k, v in validations.layer_results.items() if v.kl is not None} })"
+    )
+    print(
+        f"arith mean kl={ {k: np.mean(v.kl).item() for k, v in validations.layer_results.items() if v.kl is not None} }"
+    )
+    print(
+        f"live features={ {k: sum(v.live_features) / D_SAE for k, v in validations.layer_results.items() if v.live_features is not None} }"
     )

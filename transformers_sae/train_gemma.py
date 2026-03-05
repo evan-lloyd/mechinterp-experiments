@@ -115,8 +115,9 @@ training_config = {
         eval_interval=EVAL_INTERVAL,
         train_layers=[25],
         # train_layers=list(range(model.num_layers)),
-        lr=1e-3,
-        interaction_lr=1e-3,
+        betas=(0.0, 0.999),  # TODO: is this actually good for our training method? not for tinystories anyway
+        lr=1e-4,
+        interaction_lr=1e-4,
         lr_schedule=linear_decay_during_finetune,  # per Karvonen (2025)
         downstream_reconstruction_weight=1.0,
         reconstruction_weight=1.0,
@@ -163,16 +164,16 @@ validations = run_validations(
 )
 
 print(
-    f"mean rre={ {k: np.mean(v.rre).item() for k, v in validations.layer_results.items() if v.rre is not None} })"
+    f"mean rre={ {k: np.mean(v.rre).item() for k, v in validations.layer_results.items() if v.rre is not None} }"
 )
 print(
-    f"mean l0={ {k: np.mean(v.l0).item() for k, v in validations.layer_results.items() if v.l0 is not None} })"
+    f"mean l0={ {k: np.mean(v.l0).item() for k, v in validations.layer_results.items() if v.l0 is not None} }"
 )
 print(
     f"geom mean kl={ {k: np.exp(np.mean(np.log(np.clip(v.kl, min=1e-9)))).item() for k, v in validations.layer_results.items() if v.kl is not None} })"
 )
 print(
-    f"arith mean kl={ {k: np.mean(v.kl) for k, v in validations.layer_results.items() if v.kl is not None} })"
+    f"arith mean kl={ {k: np.mean(v.kl).item() for k, v in validations.layer_results.items() if v.kl is not None} }"
 )
 print(
     f"live features={ {k: sum(v.live_features) / D_SAE for k, v in validations.layer_results.items() if v.live_features is not None} }"
@@ -187,7 +188,7 @@ with torch.autocast(
     generate_with_replacement(
         model,
         tokenizer,
-        "The capital of France",
+        "The capital of France,",
         # {25: gemma_scope},
         # {},
         {

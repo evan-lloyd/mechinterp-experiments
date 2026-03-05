@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Dict, List, Mapping, Optional
+from typing import Callable, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 import torch
@@ -46,6 +46,7 @@ class TrainingConfig:
     training_batch_size: int
     eval_interval: int
     train_layers: List[int]
+    betas: Tuple[float, float] = (0.9, 0.999)
     lr: float = 1e-3
     reconstruction_weight: Mapping[int, float] = 1.0
     downstream_reconstruction_weight: Mapping[int, float] = 1.0
@@ -197,7 +198,7 @@ def make_optimizer(saes: Dict[int, SAE], layers: List[int], config: TrainingConf
     for pg in param_groups:
         pg["base_lr"] = pg["lr"]
 
-    return torch.optim.Adam(param_groups, lr=config.lr, betas=(0.0, 0.999))
+    return torch.optim.Adam(param_groups, lr=config.lr, betas=config.betas)
 
 
 def training_loop(

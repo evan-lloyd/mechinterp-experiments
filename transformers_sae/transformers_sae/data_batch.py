@@ -14,6 +14,7 @@ class DataBatch:
     num_dataset_rows: int
     input_lens: List[int]
     token_mask: torch.Tensor
+    special_token_indices: torch.Tensor
 
     def to(self, *args, **kwargs):
         self.input_ids = self.input_ids.to(*args, **kwargs)

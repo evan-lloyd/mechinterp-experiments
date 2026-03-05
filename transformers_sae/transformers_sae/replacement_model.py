@@ -22,14 +22,19 @@ class SAEReplacementLayer(torch.nn.Module):
             return object.__getattribute__(self, "_modules")[name]
         return getattr(self.original_layer, name)
 
-    def forward(self, *args, **kwargs):
+    def forward(self, *args, special_token_indices: torch.Tensor, **kwargs):
         original_output = self.original_layer(*args, **kwargs)
         tuple_expected = isinstance(original_output, tuple)
         if tuple_expected:
             original_output, *rest = original_output
         else:
             rest = []
-        reconstruction = self.sae(original_output, *args, **kwargs)
+        reconstruction = self.sae(
+            original_output,
+            *args,
+            special_token_indices=special_token_indices,
+            **kwargs,
+        )
         if tuple_expected:
             return (reconstruction,) + tuple(rest)
         return reconstruction
@@ -41,6 +46,7 @@ class ReplacementModel:
     context_length: int
     d_model: int
     layer_path: str
+    transformers_class: type
 
     def __init__(self):
         raise NotImplementedError(
@@ -61,10 +67,13 @@ class ReplacementModel:
             return self.lm_head
 
     def get_layer_args(self, layer_idx, layer, *args, **kwargs):
-        return args, dict(
+        layer_kwargs = dict(
             attention_mask=kwargs.get("attention_mask"),
             use_cache=kwargs.get("use_cache"),
         )
+        if layer_idx in self.sae_layers:
+            layer_kwargs["special_token_indices"] = kwargs.get("special_token_indices")
+        return (args, layer_kwargs)
 
     def get_model_args(
         self,
@@ -81,6 +90,7 @@ class ReplacementModel:
             )
             input_args = [model_input]
             input_kwargs = {"attention_mask": batch.attention_mask}
+        input_kwargs["special_token_indices"] = batch.special_token_indices
         return input_args, input_kwargs
 
 
@@ -180,15 +190,21 @@ def make_replacement_model(
 
     if not isinstance(original, ReplacementModel):
         new_instance.__class__ = type(
-            replacement_class.__name__, (replacement_class, original.__class__), {}
+            f"{replacement_class.__name__}Instance",
+            (replacement_class, original.__class__),
+            {},
         )
         object.__setattr__(new_instance, "num_layers", num_layers)
         object.__setattr__(new_instance, "context_length", context_length)
         object.__setattr__(new_instance, "d_model", d_model)
+        object.__setattr__(new_instance, "transformers_class", original.__class__)
     else:
         object.__setattr__(new_instance, "num_layers", original.num_layers)
         object.__setattr__(new_instance, "context_length", original.context_length)
         object.__setattr__(new_instance, "d_model", original.d_model)
+        object.__setattr__(
+            new_instance, "transformers_class", original.transformers_class
+        )
         for layer, sae in original.sae_layers.items():
             if layer not in replacement_layers:
                 replacement_layers[layer] = sae

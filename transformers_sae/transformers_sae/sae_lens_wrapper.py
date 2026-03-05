@@ -22,9 +22,14 @@ class SAELensSAE(torch.nn.Module):
     def encoder(self):
         return self.sae_lens_sae.hook_sae_acts_post
 
-    def forward(self, x: torch.Tensor, *args, **kwargs):
+    def forward(
+        self, x: torch.Tensor, *args, special_token_indices: torch.Tensor, **kwargs
+    ):
         orig_dtype = x.dtype
-        return self.sae_lens_sae(x.to(self.dtype)).to(orig_dtype)
+        result = self.sae_lens_sae(x.to(self.dtype)).to(orig_dtype)
+        # We want special tokens to "pass through" the SAE, since we don't train on them.
+        result.view(-1)[special_token_indices] = x.view(-1)[special_token_indices]
+        return result
 
     def offload(self):
         self.to(torch.device("cpu"))

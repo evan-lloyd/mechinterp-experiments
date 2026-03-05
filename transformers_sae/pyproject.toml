@@ -41,3 +41,8 @@ torch = [
 
 [tool.ty]
 rules = { all = "warn", missing-argument = "error" }
+
+[tool.ruff.lint.per-file-ignores]
+"*.ipynb" = [
+    "E703",
+] # allow trailing semi-colons in notebooks to suppress output

@@ -139,8 +139,15 @@ class SAE(torch.nn.Module):
         return self.encoder(x, should_cast)
 
     @_check_device
-    def forward(self, x: torch.Tensor, *args, **kwargs):
-        return self.decode(
+    def forward(
+        self, x: torch.Tensor, *args, special_token_indices: torch.Tensor, **kwargs
+    ):
+        decoder_result = self.decode(
             self.encode(x.to(self.encoder.dtype), should_cast=False),
             should_cast=False,
         ).to(x.dtype)
+        # We want special tokens to "pass through" the SAE, since we don't train on them.
+        decoder_result.view(-1)[special_token_indices] = x.view(-1)[
+            special_token_indices
+        ]
+        return decoder_result
