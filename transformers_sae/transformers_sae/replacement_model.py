@@ -22,7 +22,7 @@ class SAEReplacementLayer(torch.nn.Module):
             return object.__getattribute__(self, "_modules")[name]
         return getattr(self.original_layer, name)
 
-    def forward(self, *args, special_token_indices: torch.Tensor, **kwargs):
+    def forward(self, *args, pass_through_positions: torch.Tensor, **kwargs):
         original_output = self.original_layer(*args, **kwargs)
         tuple_expected = isinstance(original_output, tuple)
         if tuple_expected:
@@ -32,7 +32,7 @@ class SAEReplacementLayer(torch.nn.Module):
         reconstruction = self.sae(
             original_output,
             *args,
-            special_token_indices=special_token_indices,
+            pass_through_positions=pass_through_positions,
             **kwargs,
         )
         if tuple_expected:
@@ -72,7 +72,8 @@ class ReplacementModel:
             use_cache=kwargs.get("use_cache"),
         )
         if layer_idx in self.sae_layers:
-            layer_kwargs["special_token_indices"] = kwargs.get("special_token_indices")
+            layer_kwargs["pass_through_positions"] = kwargs.get("pass_through_positions")
+            layer_kwargs["token_mask"] = kwargs.get("token_mask")
         return (args, layer_kwargs)
 
     def get_model_args(
@@ -83,14 +84,20 @@ class ReplacementModel:
     ):
         if start_at_embedding:
             input_args = []
-            input_kwargs = batch.model_kwargs()
+            input_kwargs = {
+                "input_ids": batch.input_ids,
+                "position_ids": batch.position_ids,
+                "attention_mask": batch.attention_mask,
+            }
         else:
             assert model_input is not None, (
                 "Must provide first layer's input if not starting from embedding"
             )
             input_args = [model_input]
             input_kwargs = {"attention_mask": batch.attention_mask}
-        input_kwargs["special_token_indices"] = batch.special_token_indices
+
+        input_kwargs["pass_through_positions"] = batch.special_token_indices
+        input_kwargs["token_mask"] = batch.token_mask
         return input_args, input_kwargs
 
 

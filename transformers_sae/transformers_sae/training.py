@@ -166,6 +166,7 @@ def make_optimizer(saes: Dict[int, SAE], layers: List[int], config: TrainingConf
                 param
                 for layer in layers
                 for param in saes[layer].decoder.linear.parameters()
+                if param.requires_grad
             ],
             "lr": config.decoder_lr or config.lr,
         },
@@ -174,6 +175,7 @@ def make_optimizer(saes: Dict[int, SAE], layers: List[int], config: TrainingConf
                 param
                 for layer in layers
                 for param in saes[layer].encoder.linear.parameters()
+                if param.requires_grad
             ],
             "lr": config.encoder_lr or config.lr,
         },
@@ -190,6 +192,7 @@ def make_optimizer(saes: Dict[int, SAE], layers: List[int], config: TrainingConf
                     saes[layer].encoder.interaction
                     for layer in layers
                     if isinstance(saes[layer].encoder, InteractionEncoder)
+                    and saes[layer].encoder.interaction.requires_grad
                 ],
                 "lr": config.interaction_lr or config.lr,
             }

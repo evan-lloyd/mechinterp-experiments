@@ -256,14 +256,23 @@ def generate(
 
     special_ids = torch.tensor(tokenizer.all_special_ids).to(model.device)
     special_token_indices = (
-        (inputs.input_ids.view(-1).unsqueeze(-1) == special_ids)
-        .any(dim=-1)
-        .nonzero()
-        .squeeze(-1)
+        (inputs.input_ids.view(-1).unsqueeze(-1) == special_ids).any(dim=-1).nonzero()
     )
 
-    def _set_special_token_indices(module, args, kwargs):
-        kwargs["special_token_indices"] = special_token_indices
+    # We also need to mask out special tokens for, eg, BatchTopK
+    token_mask = torch.ones(inputs.input_ids.shape, device=model.device)
+    token_mask.view(-1)[special_token_indices] = 0.0
+
+    def _set_pass_through_positions(module, args, kwargs):
+        # Should disable SAE entirely
+        # kwargs["pass_through_positions"] = torch.arange(
+        #     0, kwargs["position_ids"].shape[1], device=module.device
+        # )
+        kwargs["pass_through_positions"] = special_token_indices[
+            special_token_indices >= kwargs["position_ids"][0, 0]
+        ]
+
+        kwargs["token_mask"] = token_mask[:, kwargs["position_ids"][0]]
         return args, kwargs
 
     class TextStreamerWithCallback(TextStreamer):
@@ -282,16 +291,40 @@ def generate(
             if self.cur_token_index is None:
                 self.cur_token_index = value.numel()
             else:
-                nonlocal special_token_indices
+                nonlocal special_token_indices, token_mask
                 if value in tokenizer.all_special_ids:
                     special_token_indices = torch.cat(
                         (
                             special_token_indices,
                             torch.tensor(
-                                [self.cur_token_index],
+                                [[self.cur_token_index]],
                                 device=special_token_indices.device,
                             ),
-                        )
+                        ),
+                        dim=-1,
+                    )
+                    token_mask = torch.cat(
+                        (
+                            token_mask,
+                            torch.zeros(
+                                (token_mask.shape[0], 1),
+                                dtype=token_mask.dtype,
+                                device=token_mask.device,
+                            ),
+                        ),
+                        dim=-1,
+                    )
+                else:
+                    token_mask = torch.cat(
+                        (
+                            token_mask,
+                            torch.ones(
+                                (token_mask.shape[0], 1),
+                                dtype=token_mask.dtype,
+                                device=token_mask.device,
+                            ),
+                        ),
+                        dim=-1,
                     )
                 self.cur_token_index += 1
 
@@ -305,9 +338,9 @@ def generate(
         with (
             torch.inference_mode(),
             # Need to go through a hook because generate "helpfully" raises due to our non-standard
-            # keyword arg for special_token_indices.
+            # keyword arg for pass_through_positions.
             model.register_forward_pre_hook(
-                _set_special_token_indices, with_kwargs=True
+                _set_pass_through_positions, with_kwargs=True
             ),
         ):
             return model.generate(

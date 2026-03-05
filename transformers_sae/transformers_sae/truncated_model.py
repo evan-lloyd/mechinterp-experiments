@@ -53,11 +53,12 @@ def truncated_model(
 
         def forward(self, x: torch.Tensor, *args, **kwargs):
             result = self.sae(
-                x.float(),
-                should_cast=False,
-                special_token_indices=kwargs.get("special_token_indices"),
+                x,
+                should_cast=True,
+                token_mask=kwargs.get("token_mask"),
+                pass_through_positions=kwargs.get("pass_through_positions"),
             )
-            return (result.to(x.dtype),)
+            return (result,)
 
     patched_layers = torch.nn.ModuleList(
         model.get_submodule(model.layer_path)[max(start_layer, 0) : end_layer]

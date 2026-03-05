@@ -61,7 +61,7 @@ print(mtm.memory_cur)
 
 TRAINING_CACHE_DIR = None if torch.cuda.is_available() else ".training_cache"
 VALIDATION_CACHE_DIR = None if torch.cuda.is_available() else ".validation_cache"
-NUM_TRAINING_TOKENS = int(1e7) if torch.cuda.is_available() else int(1e6)
+NUM_TRAINING_TOKENS = int(1e8) if torch.cuda.is_available() else int(1e6)
 EVAL_INTERVAL = int(1e5)
 NUM_VALIDATION_TOKENS = int(1e6) if torch.cuda.is_available() else int(1e5)
 # to match Gemma Scope
@@ -91,7 +91,7 @@ empty_saes = {
                 device=TRAINING_DEVICE,
                 train_dtype=torch.float32,
                 inference_dtype=torch.bfloat16,
-                encoder_kind="topk",
+                encoder_kind="batch_topk",
                 top_k=TOPK,
             )
         )

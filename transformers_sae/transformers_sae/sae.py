@@ -1,13 +1,14 @@
-from torchgen.model import Type
 from dataclasses import dataclass
-from typing import Optional, TypeAlias, Literal
+from typing import Optional
 
 import torch
 
 from .decoder import Decoder, DecoderConfig
 from .encoder import (  # noqa: F401
+    BatchTopKActivationFunctionConfig,
     Encoder,
     EncoderConfig,
+    EncoderKind,
     InteractionEncoder,
     InteractionEncoderConfig,
     ReluActivationFunctionConfig,
@@ -26,9 +27,6 @@ class SAEConfig:
     decoder: DecoderConfig
 
 
-EncoderKind: TypeAlias = Literal["relu", "topk"]
-
-
 def make_sae_config(
     *,
     d_model: int,
@@ -44,6 +42,9 @@ def make_sae_config(
     elif encoder_kind == "topk":
         assert top_k is not None, "Must specify top_k for TopK SAE"
         activation_config = TopKActivationFunctionConfig(top_k)
+    elif encoder_kind == "batch_topk":
+        assert top_k is not None, "Must specify top_k for BatchTopK SAE"
+        activation_config = BatchTopKActivationFunctionConfig(top_k)
     else:
         raise ValueError(f"Unknown encoder_kind {encoder_kind}")
 
@@ -132,22 +133,31 @@ class SAE(torch.nn.Module):
 
     @_check_device
     def decode(self, x: torch.Tensor, should_cast: bool = True):
-        return self.decoder(x, should_cast)
+        return self.decoder(x, should_cast=should_cast)
 
     @_check_device
-    def encode(self, x: torch.Tensor, should_cast: bool = True):
-        return self.encoder(x, should_cast)
+    def encode(
+        self, x: torch.Tensor, token_mask: torch.Tensor, should_cast: bool = True
+    ):
+        return self.encoder(x, token_mask=token_mask, should_cast=should_cast)
 
     @_check_device
     def forward(
-        self, x: torch.Tensor, *args, special_token_indices: torch.Tensor, **kwargs
+        self,
+        x: torch.Tensor,
+        *args,
+        pass_through_positions: torch.Tensor,
+        token_mask: torch.Tensor,
+        **kwargs,
     ):
         decoder_result = self.decode(
-            self.encode(x.to(self.encoder.dtype), should_cast=False),
+            self.encode(
+                x.to(self.encoder.dtype), token_mask=token_mask, should_cast=False
+            ),
             should_cast=False,
         ).to(x.dtype)
         # We want special tokens to "pass through" the SAE, since we don't train on them.
-        decoder_result.view(-1)[special_token_indices] = x.view(-1)[
-            special_token_indices
-        ]
+        decoder_result.view(x.shape[0] * x.shape[1], x.shape[2])[
+            pass_through_positions, :
+        ] = x.view(x.shape[0] * x.shape[1], x.shape[2])[pass_through_positions, :]
         return decoder_result

@@ -65,7 +65,10 @@ class NextLayerTrainingStepper(Stepper):
                     self.target_layer + 1
                 ].sae_features = self.replacement_model.get_layer(
                     self.target_layer + 1
-                ).sae.encode(baseline_activations[self.target_layer + 1].layer_output)
+                ).sae.encode(
+                    baseline_activations[self.target_layer + 1].layer_output,
+                    token_mask=batch.token_mask,
+                )
 
         return baseline_activations
 

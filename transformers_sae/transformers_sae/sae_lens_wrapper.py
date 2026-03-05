@@ -23,12 +23,19 @@ class SAELensSAE(torch.nn.Module):
         return self.sae_lens_sae.hook_sae_acts_post
 
     def forward(
-        self, x: torch.Tensor, *args, special_token_indices: torch.Tensor, **kwargs
+        self,
+        x: torch.Tensor,
+        *args,
+        pass_through_positions: torch.Tensor,
+        token_mask: torch.Tensor,
+        **kwargs,
     ):
         orig_dtype = x.dtype
         result = self.sae_lens_sae(x.to(self.dtype)).to(orig_dtype)
         # We want special tokens to "pass through" the SAE, since we don't train on them.
-        result.view(-1)[special_token_indices] = x.view(-1)[special_token_indices]
+        result.view(x.shape[0] * x.shape[1], x.shape[2])[pass_through_positions, :] = (
+            x.view(x.shape[0] * x.shape[1], x.shape[2])[pass_through_positions, :]
+        )
         return result
 
     def offload(self):
@@ -53,6 +60,7 @@ class SAELensSAE(torch.nn.Module):
     def encode(
         self,
         x: torch.Tensor,
+        token_mask: torch.Tensor,
         should_cast: bool = True,
     ):
         out_dtype = x.dtype
