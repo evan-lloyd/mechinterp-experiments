@@ -1,14 +1,18 @@
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 
 import torch
 
 from .ops import ensure_tensor
-from .replacement_model import ReplacementModel
+from .replacement_model import ReplacementModel, SAEReplacementLayer
 
 
 @contextmanager
 def truncated_model(
-    model: ReplacementModel, start_layer: int, end_layer: int, start_at_sae: bool
+    model: ReplacementModel,
+    start_layer: int,
+    end_layer: int,
+    start_at_sae: bool,
+    sae_kwargs: dict,
 ):
     """Modifies a transformer model in place for the duration of the context manager,
     such that only the layers between start_layer and end_layer are executed.
@@ -55,8 +59,7 @@ def truncated_model(
             result = self.sae(
                 x,
                 should_cast=True,
-                token_mask=kwargs.get("token_mask"),
-                pass_through_positions=kwargs.get("pass_through_positions"),
+                **sae_kwargs,
             )
             return (result,)
 
@@ -80,9 +83,28 @@ def truncated_model(
             residual = x
             for i, layer in enumerate(self.layers):
                 layer_args, layer_kwargs = model.get_layer_args(
-                    i + max(start_layer, 0), layer, *args, **kwargs
+                    i + max(start_layer, 0),
+                    layer,
+                    *args,
+                    **kwargs,
                 )
-                residual = ensure_tensor(layer(residual, *layer_args, **layer_kwargs))
+                if isinstance(layer, SAEReplacementLayer):
+                    residual = ensure_tensor(
+                        layer(
+                            residual,
+                            *layer_args,
+                            **layer_kwargs,
+                            **sae_kwargs,
+                        )
+                    )
+                else:
+                    residual = ensure_tensor(
+                        layer(
+                            residual,
+                            *layer_args,
+                            **layer_kwargs,
+                        )
+                    )
             if end_layer > model.num_layers:
                 residual = model.get_logits(residual)
             return (residual,)
@@ -90,14 +112,30 @@ def truncated_model(
     try:
         orig_layers = model.get_submodule(model.layer_path)
 
-        # If starting from embedding, we only need to handle early stopping
+        # If starting from embedding, we need to handle early stopping and injecting
+        # additional arguments into the call to each SAE layer.
         if start_layer == -1:
+
+            def _set_layer_kwargs(module, args, kwargs):
+                kwargs = {**kwargs, **sae_kwargs}
+                return args, kwargs
+
+            yield_context = ExitStack()
+            for layer in patched_layers:
+                if isinstance(layer, SAEReplacementLayer):
+                    yield_context.enter_context(
+                        layer.register_forward_pre_hook(
+                            _set_layer_kwargs, with_kwargs=True
+                        )
+                    )
             model.set_submodule(model.layer_path, patched_layers)
             truncated_model = model
         else:
             truncated_model = _TruncatedTransformer()
+            yield_context = nullcontext()
         try:
-            yield truncated_model
+            with yield_context:
+                yield truncated_model
         except _EarlyStopping:
             pass
     finally:

@@ -113,7 +113,7 @@ training_config = {
         training_batch_size=TRAINING_BATCH_SIZE,
         num_train_tokens=NUM_TRAINING_TOKENS,
         eval_interval=EVAL_INTERVAL,
-        train_layers=[25],
+        train_layers=[24, 25],
         # train_layers=list(range(model.num_layers)),
         betas=(0.0, 0.999),  # TODO: is this actually good for our training method? not for tinystories anyway
         lr=1e-4,
@@ -148,7 +148,7 @@ training_results = train(
         )
     ),
     checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer/",
-    force_retrain=True,
+    force_retrain=False,
 )
 
 validations = run_validations(
@@ -160,7 +160,7 @@ validations = run_validations(
     TRAINING_BATCH_SIZE,
     NUM_VALIDATION_TOKENS,
     cache_dir=VALIDATION_CACHE_DIR,
-    start_layer=25,
+    start_layer=training_config[TrainingMethod.next_layer].train_layers[0],
 )
 
 print(
@@ -194,6 +194,6 @@ with torch.autocast(
         {
             layer: sae
             for layer, sae in training_results.final_saes.items()
-            if layer > 24
+            if layer >= training_config[TrainingMethod.next_layer].train_layers[0]
         },
     )

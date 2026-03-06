@@ -141,6 +141,12 @@ class SAE(torch.nn.Module):
     ):
         return self.encoder(x, token_mask=token_mask, should_cast=should_cast)
 
+    def pop_sae_kwargs(self, kwargs):
+        return {
+            "token_mask": kwargs.pop("token_mask"),
+            "pass_through_positions": kwargs.pop("pass_through_positions"),
+        }
+
     @_check_device
     def forward(
         self,

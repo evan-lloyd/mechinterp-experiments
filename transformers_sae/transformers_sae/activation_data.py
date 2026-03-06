@@ -38,7 +38,7 @@ def _run_replacement_model(
     end_layer: Optional[int] = None,
     start_at_sae: bool = False,
 ):
-    input_args, input_kwargs = model.get_model_args(
+    input_args, input_kwargs = model.get_base_model_args(
         batch, start_input, start_layer == -1
     )
 
@@ -51,7 +51,13 @@ def _run_replacement_model(
         end_layer = model.num_layers + 1
     with (
         ExitStack() as hook_stack,
-        truncated_model(model, start_layer, end_layer, start_at_sae) as model_to_run,
+        truncated_model(
+            model,
+            start_layer,
+            end_layer,
+            start_at_sae,
+            model.get_sae_kwargs(batch),
+        ) as model_to_run,
     ):
         for hook_name, module in hooks.items():
             hook_stack.enter_context(

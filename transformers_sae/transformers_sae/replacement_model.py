@@ -22,7 +22,9 @@ class SAEReplacementLayer(torch.nn.Module):
             return object.__getattribute__(self, "_modules")[name]
         return getattr(self.original_layer, name)
 
-    def forward(self, *args, pass_through_positions: torch.Tensor, **kwargs):
+    def forward(self, *args, **kwargs):
+        additional_sae_kwargs = self.sae.pop_sae_kwargs(kwargs)
+
         original_output = self.original_layer(*args, **kwargs)
         tuple_expected = isinstance(original_output, tuple)
         if tuple_expected:
@@ -32,8 +34,8 @@ class SAEReplacementLayer(torch.nn.Module):
         reconstruction = self.sae(
             original_output,
             *args,
-            pass_through_positions=pass_through_positions,
             **kwargs,
+            **additional_sae_kwargs,
         )
         if tuple_expected:
             return (reconstruction,) + tuple(rest)
@@ -68,15 +70,21 @@ class ReplacementModel:
 
     def get_layer_args(self, layer_idx, layer, *args, **kwargs):
         layer_kwargs = dict(
-            attention_mask=kwargs.get("attention_mask"),
-            use_cache=kwargs.get("use_cache"),
+            attention_mask=kwargs["attention_mask"],
+            use_cache=kwargs["use_cache"],
         )
-        if layer_idx in self.sae_layers:
-            layer_kwargs["pass_through_positions"] = kwargs.get("pass_through_positions")
-            layer_kwargs["token_mask"] = kwargs.get("token_mask")
         return (args, layer_kwargs)
 
-    def get_model_args(
+    def get_sae_kwargs(
+        self,
+        batch: DataBatch,
+    ):
+        return {
+            "pass_through_positions": batch.special_token_indices,
+            "token_mask": batch.token_mask,
+        }
+
+    def get_base_model_args(
         self,
         batch: DataBatch,
         model_input: torch.Tensor | None,
@@ -96,14 +104,12 @@ class ReplacementModel:
             input_args = [model_input]
             input_kwargs = {"attention_mask": batch.attention_mask}
 
-        input_kwargs["pass_through_positions"] = batch.special_token_indices
-        input_kwargs["token_mask"] = batch.token_mask
         return input_args, input_kwargs
 
 
 class GemmaReplacement(ReplacementModel):
-    def get_model_args(self, batch, model_input, start_at_embedding):
-        input_args, input_kwargs = super().get_model_args(
+    def get_base_model_args(self, batch, model_input, start_at_embedding):
+        input_args, input_kwargs = super().get_base_model_args(
             batch, model_input, start_at_embedding
         )
         if not start_at_embedding:
@@ -130,10 +136,8 @@ class GemmaReplacement(ReplacementModel):
         layer_args, layer_kwargs = super().get_layer_args(
             layer_idx, layer, *args, **kwargs
         )
-        layer_kwargs["position_embeddings"] = kwargs.get("position_embeddings")
-        layer_kwargs["attention_mask"] = kwargs.get("attention_mask")[
-            layer.attention_type
-        ]
+        layer_kwargs["position_embeddings"] = kwargs["position_embeddings"]
+        layer_kwargs["attention_mask"] = kwargs["attention_mask"][layer.attention_type]
         return layer_args, layer_kwargs
 
 

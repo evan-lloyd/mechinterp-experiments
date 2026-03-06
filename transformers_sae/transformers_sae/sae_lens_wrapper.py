@@ -1,8 +1,6 @@
 import torch
 from sae_lens import SAE as SAELens
 
-from .sae import SAE, SAEConfig
-
 
 class SAELensSAE(torch.nn.Module):
     def __init__(
@@ -21,6 +19,12 @@ class SAELensSAE(torch.nn.Module):
     @property
     def encoder(self):
         return self.sae_lens_sae.hook_sae_acts_post
+
+    def pop_sae_kwargs(self, kwargs):
+        return {
+            "token_mask": kwargs.pop("token_mask"),
+            "pass_through_positions": kwargs.pop("pass_through_positions"),
+        }
 
     def forward(
         self,
