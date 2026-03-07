@@ -94,7 +94,7 @@ def run_validations(
 
         for layer in range(start_layer, end_layer):
             if layer in saes:
-                # saes[layer].eval()
+                saes[layer].eval()
                 saes[layer].onload()
 
         for step, batch in enumerate(
