@@ -71,10 +71,13 @@ def run_validations(
     start_layer: int = 0,
     end_layer: Optional[int] = None,
     offload: bool = True,
+    eval_layers: Optional[List[int]] = None,
 ):
+    if end_layer is None:
+        end_layer = model.num_layers + 1
+    if eval_layers is None:
+        eval_layers = list(range(start_layer, end_layer))
     try:
-        if end_layer is None:
-            end_layer = model.num_layers + 1
         full_replacement_model = make_replacement_model(
             model,
             {
@@ -144,7 +147,8 @@ def run_validations(
                 else:
                     baseline_activations = make_activation_batch(
                         model,
-                        [(layer, "layer") for layer in range(start_layer, end_layer)],
+                        [(layer, "layer") for layer in eval_layers],
+                        # [(layer, "layer") for layer in range(start_layer, end_layer)],
                         batch,
                         start_layer=-1,  # not cached, so we start from raw input
                         end_layer=end_layer,
@@ -156,9 +160,9 @@ def run_validations(
                         TrainingBatch(
                             batch, {}, baseline_activations, replacement_layers=[]
                         ),
-                        list(range(start_layer, end_layer)),
+                        eval_layers,
                     ),
-                    list(range(start_layer, end_layer)),
+                    eval_layers,
                     aggregate=False,
                 )
 

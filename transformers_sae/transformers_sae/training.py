@@ -14,7 +14,13 @@ from .activation_cache import load_cache
 from .activation_data import TrainingBatch, make_batch_for_evals
 from .encoder import InteractionEncoder
 from .multiline_progress import MultilineProgress
-from .ops import find_latest_checkpoint, load_checkpoint, save_training_result
+from .ops import (
+    find_checkpoint_after,
+    find_latest_checkpoint,
+    load_checkpoint,
+    get_state_dict_from_checkpoint,
+    save_training_result,
+)
 from .replacement_model import ReplacementModel, make_replacement_model
 from .sae import SAE
 from .tokenization import make_dataloader
@@ -390,61 +396,6 @@ def _train_evals(
     return eval_fn
 
 
-def fine_tune(
-    model: ReplacementModel,
-    tokenizer: AutoTokenizer,
-    train_result: TrainingResult,
-    checkpoint_index: int,
-    dataset: IterableDataset,
-    config: TrainingConfig,
-    cache_dir: Optional[str] = None,
-    checkpoints_at: Optional[List[int]] = None,
-    offload_after_training: bool = True,
-):
-    if config.method not in (
-        TrainingMethod.finetuned,
-        TrainingMethod.next_layer_finetuned,
-    ):
-        raise ValueError(f"{config.method.value} is not a valid method for finetuning")
-
-    try:
-        train_result = train_result.clone_from_checkpoint(checkpoint_index)
-        training_saes = train_result.checkpoint_saes(0)
-
-        # For consistency across methods, we always run our evals with the full replacement model
-        # starting from the target layer
-        eval_model = make_replacement_model(model, training_saes)
-        for layer in sorted(config.train_layers, reverse=True):
-            training_saes[layer].onload()
-            optimizer = make_optimizer(training_saes, [layer], config)
-            if config.method is TrainingMethod.finetuned:
-                stepper = KLFinetuneTrainingStepper(model, layer, training_saes)
-            elif config.method is TrainingMethod.next_layer_finetuned:
-                stepper = NextLayerFinetunedTrainingStepper(model, layer, training_saes)
-
-            training_loop(
-                stepper,
-                train_result[layer],
-                _train_evals(model, eval_model, layer),
-                tokenizer,
-                dataset,
-                config,
-                cache_dir,
-                optimizer,
-                f"Layer {layer}",
-                make_checkpoints_at=checkpoints_at,
-                previous_trained_tokens=train_result[layer][0].total_tokens_trained,
-            )
-        return train_result
-    finally:
-        if offload_after_training:
-            try:
-                for sae in train_result.final_saes.values():
-                    sae.offload()
-            except Exception:
-                pass
-
-
 def train(
     model: ReplacementModel,
     tokenizer: AutoTokenizer,
@@ -456,15 +407,23 @@ def train(
     offload_after_training: bool = True,
     checkpoint_dir: Optional[str] = None,
     force_retrain: bool = False,
+    fine_tune_source_dir: Optional[str] = None,
 ) -> TrainingResult:
-    if config.method not in (
+    if fine_tune_source_dir is None and config.method not in (
         TrainingMethod.standard,
         TrainingMethod.next_layer,
         TrainingMethod.e2e,
         TrainingMethod.e2e_full,
     ):
         raise ValueError(
-            f"Training method {config.method.value} must be finetuned from a checkpoint of another method"
+            f"Training method {config.method.value} must be finetuned from a checkpoint of another method; specify fine_tune_source_dir"
+        )
+    elif fine_tune_source_dir is not None and config.method not in (
+        TrainingMethod.finetuned,
+        TrainingMethod.next_layer_finetuned,
+    ):
+        raise ValueError(
+            f"Training method {config.method.value} does not accept fine-tuning; you should unset fine_tune_source_dir"
         )
     try:
         model.eval()
@@ -498,6 +457,18 @@ def train(
                 ]
                 training_saes[layer] = sae
                 token_offset = checkpoint.total_tokens_trained
+            elif fine_tune_source_dir is not None:
+                # Init weights from source checkpoint
+                source_checkpoint, token_offset = find_checkpoint_after(
+                    fine_tune_source_dir,
+                    layer,
+                    int((1.0 - config.finetune_fraction) * config.num_train_tokens),
+                )
+                sae = training_saes[layer]
+                sae.load_state_dict(
+                    get_state_dict_from_checkpoint(source_checkpoint), assign=True
+                )
+                sae.onload()
             else:
                 # Init weights from next layer, if it exists
                 sae = training_saes[layer]
@@ -523,6 +494,10 @@ def train(
                 stepper = EndToEndTrainingStepper(model, layer, training_saes)
             elif config.method is TrainingMethod.e2e_full:
                 stepper = EndToEndFullTrainingStepper(model, layer, training_saes)
+            elif config.method is TrainingMethod.finetuned:
+                stepper = KLFinetuneTrainingStepper(model, layer, training_saes)
+            elif config.method is TrainingMethod.next_layer_finetuned:
+                stepper = NextLayerFinetunedTrainingStepper(model, layer, training_saes)
             training_loop(
                 stepper,
                 train_result[layer],

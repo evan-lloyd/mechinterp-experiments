@@ -135,9 +135,8 @@ class NextLayerFinetunedTrainingStepper(Stepper):
             + weighted_downstream_reconstruction_loss
             + weighted_downstream_kl_loss
         ) / effective_loss_terms
-        loss.backward()
 
-        return {
+        return loss, {
             "total_loss": loss.item(),
             "raw_loss.reconstruction": reconstruction_loss.item(),
             "raw_loss.downstream_reconstruction": downstream_reconstruction_loss.item(),
