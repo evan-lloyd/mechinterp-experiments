@@ -8,7 +8,7 @@ from transformers_sae.replacement_model import GemmaReplacement, make_replacemen
 # Tweak TRAINING_BATCH_SIZE for your hardware if necessary
 if torch.cuda.is_available():
     TRAINING_DEVICE = "cuda:0"
-    TRAINING_BATCH_SIZE = 2
+    TRAINING_BATCH_SIZE = 1
 elif torch.mps.is_available():
     TRAINING_DEVICE = "mps:0"
     TRAINING_BATCH_SIZE = 2

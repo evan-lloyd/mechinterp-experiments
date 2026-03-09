@@ -268,9 +268,10 @@ def generate(
         # kwargs["pass_through_positions"] = torch.arange(
         #     0, kwargs["position_ids"].shape[1], device=module.device
         # )
-        kwargs["pass_through_positions"] = special_token_indices[
-            special_token_indices >= kwargs["position_ids"][0, 0]
-        ]
+        kwargs["pass_through_positions"] = (
+            special_token_indices[special_token_indices >= kwargs["position_ids"][0, 0]]
+            - kwargs["position_ids"][0, 0]
+        )
 
         kwargs["token_mask"] = token_mask[:, kwargs["position_ids"][0]]
         return args, kwargs
@@ -336,7 +337,7 @@ def generate(
 
     try:
         with (
-            torch.inference_mode(),
+            torch.no_grad(),
             # Need to go through a hook because generate "helpfully" raises due to our non-standard
             # keyword arg for pass_through_positions.
             model.register_forward_pre_hook(
