@@ -20,13 +20,15 @@ class NextLayerFinetunedTrainingStepper(Stepper):
     def __init__(
         self, base_model: ReplacementModel, target_layer: int, saes: Dict[int, SAE]
     ):
-        replacement_model_dict = {target_layer: saes[target_layer]}
-        if target_layer + 1 in saes:
-            replacement_model_dict[target_layer + 1] = saes[target_layer + 1]
-
         super().__init__(
             base_model,
-            make_replacement_model(base_model, replacement_model_dict),
+            make_replacement_model(
+                base_model,
+                {
+                    layer: saes[layer]
+                    for layer in range(target_layer, base_model.num_layers)
+                },
+            ),
         )
         self.target_layer = target_layer
         self.sae = saes[target_layer]
