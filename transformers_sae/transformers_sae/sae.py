@@ -36,6 +36,7 @@ def make_sae_config(
     inference_dtype: torch.dtype,
     encoder_kind: EncoderKind,
     top_k: int | None = None,
+    with_interaction: bool = False,
 ) -> SAEConfig:
     if encoder_kind == "relu":
         activation_config = ReluActivationFunctionConfig()
@@ -49,7 +50,12 @@ def make_sae_config(
         raise ValueError(f"Unknown encoder_kind {encoder_kind}")
 
     device = torch.device(device)
-    encoder_config = EncoderConfig(
+
+    if with_interaction:
+        encoder_cfg_cls = InteractionEncoderConfig
+    else:
+        encoder_cfg_cls = EncoderConfig
+    encoder_config = encoder_cfg_cls(
         d_model, d_sae, device, train_dtype, inference_dtype, activation_config
     )
     decoder_config = DecoderConfig(d_model, d_sae, device, train_dtype, inference_dtype)

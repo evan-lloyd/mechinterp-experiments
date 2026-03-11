@@ -118,7 +118,9 @@ class Encoder(torch.nn.Module):
     def _activation_fn(self, x: torch.Tensor, token_mask: torch.Tensor):
         if self.config.activation_function.kind == "relu":
             return x.relu()
-        elif self.config.activation_function.kind == "topk":
+        elif self.config.activation_function.kind == "topk" or (
+            not self.training and self.config.activation_function.kind == "batch_topk"
+        ):
             topk = torch.topk(
                 x, k=self.config.activation_function.k, dim=-1, sorted=False
             )
