@@ -269,12 +269,30 @@ def training_loop(
 
         loss.backward()
 
-        # After first batch, step before doing evals
-        if num_used_tokens + previous_trained_tokens > 0:
+        # Orthogonalize the gradient update with respect to each decoder row
+        with torch.no_grad():
+            dot_prods = (
+                sae.decoder.linear.weight * sae.decoder.linear.weight.grad
+            ).sum(dim=0, keepdim=True)
+            norm = (sae.decoder.linear.weight * sae.decoder.linear.weight).sum(dim=0, keepdim=True)
+            sae.decoder.linear.weight.grad -= (
+                dot_prods / norm * sae.decoder.linear.weight
+            )
+
+        def _do_step():
+            nonlocal loss, num_used_tokens
             optimizer.step()
             optimizer.zero_grad()
-            del loss
+            loss = None
             num_used_tokens += batch.num_tokens
+            with torch.no_grad():
+                sae.decoder.linear.weight /= torch.linalg.vector_norm(
+                    sae.decoder.linear.weight, dim=0, keepdim=True
+                )
+
+        # After first batch, step before doing evals
+        if num_used_tokens + previous_trained_tokens > 0:
+            _do_step()
 
         if num_used_tokens >= eval_threshold:
             evals = eval_fn(training_batch)
@@ -297,10 +315,7 @@ def training_loop(
 
         # On the first batch only, we do evals before updating params
         if num_used_tokens + previous_trained_tokens == 0:
-            optimizer.step()
-            optimizer.zero_grad()
-            del loss
-            num_used_tokens += batch.num_tokens
+            _do_step()
 
         should_make_checkpoint = False
         # Handle edge case where we hit multiple checkpoint thresholds after one batch

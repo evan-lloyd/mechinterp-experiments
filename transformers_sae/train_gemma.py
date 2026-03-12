@@ -1,14 +1,18 @@
+import numpy as np
 import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from transformers_sae.ops import MemoryTrackingMode
 from transformers_sae.replacement_model import GemmaReplacement, make_replacement_model
+from transformers_sae.sae import SAE, make_sae_config
+from transformers_sae.training import TrainingConfig, TrainingMethod, train
+from transformers_sae.validation import generate_with_replacement, run_validations
 
 # Tweak TRAINING_BATCH_SIZE for your hardware if necessary
 if torch.cuda.is_available():
     TRAINING_DEVICE = "cuda:0"
-    TRAINING_BATCH_SIZE = 1
+    TRAINING_BATCH_SIZE = 2
 elif torch.mps.is_available():
     TRAINING_DEVICE = "mps:0"
     TRAINING_BATCH_SIZE = 2
@@ -71,12 +75,6 @@ TOPK = 100
 TOKENIZER_BATCH_SIZE = 256
 FINETUNE_FRACTION = 0.1
 
-import numpy as np
-
-from transformers_sae.sae import SAE, make_sae_config
-from transformers_sae.training import TrainingConfig, TrainingMethod, fine_tune, train
-from transformers_sae.validation import run_validations
-
 
 def SAE_SPECS():
     return TrainingMethod.__iter__()
@@ -113,9 +111,12 @@ training_config = {
         training_batch_size=TRAINING_BATCH_SIZE,
         num_train_tokens=NUM_TRAINING_TOKENS,
         eval_interval=EVAL_INTERVAL,
-        train_layers=list(range(0, model.num_layers)),
+        train_layers=list(range(model.num_layers - 1, model.num_layers)),
         # train_layers=list(range(model.num_layers)),
-        betas=(0.0, 0.999),  # TODO: is this actually good for our training method? not for tinystories anyway
+        betas=(
+            0.0,
+            0.999,
+        ),  # TODO: is this actually good for our training method? not for tinystories anyway
         lr=1e-4,
         interaction_lr=1e-4,
         lr_schedule=linear_decay_during_finetune,  # per Karvonen (2025)
@@ -178,8 +179,6 @@ print(
 print(
     f"live features={ {k: sum(v.live_features) / D_SAE for k, v in validations.layer_results.items() if v.live_features is not None} }"
 )
-
-from transformers_sae.validation import generate_with_replacement
 
 with torch.autocast(
     device_type="cuda" if model.device.type == "cuda" else "cpu",

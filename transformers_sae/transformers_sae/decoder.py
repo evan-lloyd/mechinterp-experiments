@@ -31,6 +31,7 @@ class Decoder(torch.nn.Module):
                 device=to_device or self.config.device,
                 dtype=self.config.train_dtype,
             )
+            self.linear.weight /= torch.linalg.vector_norm(self.linear.weight, dim=0, keepdim=True)
         elif isinstance(init_from, Decoder):
             self.linear.weight = torch.nn.Parameter(
                 init_from.linear.weight.to(to_device or self.config.device, copy=True)
