@@ -39,24 +39,22 @@ def _fill_context(
     max_tokens: Optional[int | float],
     max_batch_size: Optional[int | float],
     context_length: int,
-) -> Iterator[Tuple[List[torch.Tensor], int, int]]:
+) -> Iterator[Tuple[List[torch.Tensor], int]]:
     if max_tokens is None:
         max_tokens = inf
     if max_batch_size is None:
         max_batch_size = inf
     row_len = 0
     total_tokens = 0
-    new_tokens = 0
     batch_size = 0
     need_new_row = False
     used_inputs = []
     while token_ids and total_tokens < max_tokens:
         if need_new_row:
             batch_size += 1
-            yield used_inputs, row_len, new_tokens
+            yield used_inputs, row_len
             used_inputs = []
             row_len = 0
-            new_tokens = 0
 
             if batch_size >= max_batch_size:
                 return
@@ -66,12 +64,15 @@ def _fill_context(
         for i, cur_input in token_ids.items():
             if len(cur_input) + row_len <= context_length:
                 total_tokens += len(cur_input)
-                new_tokens += len(cur_input)
                 used_inputs.append(cur_input)
                 row_len += len(cur_input)
                 del token_ids[i]
                 need_new_row = False
                 break
+
+    # We may have an incomplete row, which we should still yield
+    if row_len > 0:
+        yield used_inputs, row_len
 
 
 def tokenize_strings(
@@ -96,19 +97,17 @@ def tokenize_strings(
     num_rows = 0
     input_batches = []
     row_lens = []
-    new_tokenses = []
 
     # Minimize the amount of work we do in case we need to seek to token_offset. If we haven't generated
     # enough tokens then we will be skipping this batch anyway, so no need to make tensors for it.
-    for input_batch, row_len, new_tokens in _fill_context(
+    for input_batch, row_len in _fill_context(
         token_ids, max_tokens, max_batch_size, context_length
     ):
-        num_tokens += new_tokens
+        num_tokens += row_len
         batch_size += 1
         num_rows += len(input_batch)
         input_batches.append(input_batch)
         row_lens.append(row_len)
-        new_tokenses.append(new_tokens)
 
     if num_tokens <= token_offset:
         return DataBatch(
@@ -126,7 +125,7 @@ def tokenize_strings(
     special_ids = torch.tensor(tokenizer.all_special_ids)
     special_token_indices = torch.empty((0,), dtype=torch.long)
 
-    for input_batch, row_len, new_tokens in zip(input_batches, row_lens, new_tokenses):
+    for input_batch, row_len in zip(input_batches, row_lens):
         row_lens.append(row_len)
         input_id_stack.append(
             torch.cat([torch.tensor(in_, dtype=torch.int64) for in_ in input_batch])
@@ -151,12 +150,12 @@ def tokenize_strings(
                 ]
             )
         )
-        if new_tokens < context_length:
+        if row_len < context_length:
             position_id_stack[-1] = torch.cat(
                 (
                     position_id_stack[-1],
                     torch.full(
-                        (context_length - new_tokens,),
+                        (context_length - row_len,),
                         -1,
                         dtype=torch.int64,
                     ),
@@ -166,7 +165,7 @@ def tokenize_strings(
                 (
                     input_id_stack[-1],
                     torch.full(
-                        (context_length - new_tokens,),
+                        (context_length - row_len,),
                         tokenizer.bos_token_id,
                         dtype=torch.int64,
                     ),
@@ -192,9 +191,9 @@ def tokenize_strings(
         #           [1., 1., 1., 1., 1., 1., 1., 1., 1., 0., 0., 0., 0.]])
         mask_blocks = [ones[0 : len(i), 0 : len(i)] for i in input_batch]
         # Pad?
-        if new_tokens < context_length:
+        if row_len < context_length:
             mask_blocks.append(
-                zeros[0 : context_length - new_tokens, 0 : context_length - new_tokens]
+                zeros[0 : context_length - row_len, 0 : context_length - row_len]
             )
 
         # TODO: how hard would it be to write a custom kernel for this, or find some other way to
