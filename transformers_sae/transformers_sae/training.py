@@ -269,26 +269,12 @@ def training_loop(
 
         loss.backward()
 
-        # Orthogonalize the gradient update with respect to each decoder row
-        with torch.no_grad():
-            dot_prods = (
-                sae.decoder.linear.weight * sae.decoder.linear.weight.grad
-            ).sum(dim=0, keepdim=True)
-            norm = (sae.decoder.linear.weight * sae.decoder.linear.weight).sum(dim=0, keepdim=True)
-            sae.decoder.linear.weight.grad -= (
-                dot_prods / norm * sae.decoder.linear.weight
-            )
-
         def _do_step():
             nonlocal loss, num_used_tokens
             optimizer.step()
             optimizer.zero_grad()
             loss = None
             num_used_tokens += batch.num_tokens
-            with torch.no_grad():
-                sae.decoder.linear.weight /= torch.linalg.vector_norm(
-                    sae.decoder.linear.weight, dim=0, keepdim=True
-                )
 
         # After first batch, step before doing evals
         if num_used_tokens + previous_trained_tokens > 0:
@@ -491,7 +477,6 @@ def train(
                 token_offset = 0
 
             if token_offset >= config.num_train_tokens:
-                sae.eval()
                 continue
 
             if checkpoints_at is not None:
@@ -499,8 +484,6 @@ def train(
             else:
                 make_checkpoints_at = None
 
-            sae.train()
-            optimizer = make_optimizer(training_saes, [layer], config)
             if config.method is TrainingMethod.standard:
                 stepper = StandardTrainingStepper(model, layer, training_saes)
             elif config.method is TrainingMethod.next_layer:
@@ -513,6 +496,19 @@ def train(
                 stepper = KLFinetuneTrainingStepper(model, layer, training_saes)
             elif config.method is TrainingMethod.next_layer_finetuned:
                 stepper = NextLayerFinetunedTrainingStepper(model, layer, training_saes)
+
+            # Keep SAEs used in the replacement model in train mode, so eg for BatchTopK
+            # we automatically retune the threshold based on now having an SAE at the previous layer.
+            # Unused layers should be in eval mode.
+            for other_layer in range(layer, model.num_layers):
+                if other_layer in stepper.replacement_model.sae_layers:
+                    training_saes[other_layer].train()
+                    training_saes[other_layer].requires_grad_(layer == other_layer)
+                else:
+                    training_saes[other_layer].eval()
+
+            optimizer = make_optimizer(training_saes, [layer], config)
+
             training_loop(
                 stepper,
                 train_result[layer],
@@ -538,7 +534,6 @@ def train(
                     keep_in_ram=True,
                     blocking=True,
                 )
-            sae.eval()
 
         return train_result
     finally:

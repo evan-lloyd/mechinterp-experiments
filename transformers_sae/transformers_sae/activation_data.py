@@ -236,7 +236,6 @@ def make_batch_for_evals(
                 needs_replacement_layers[0]
             ].layer_output
             replacement_start_at_sae = True
-
         new_replacement_run = _run_replacement_model(
             full_replacement_model,
             hooks,

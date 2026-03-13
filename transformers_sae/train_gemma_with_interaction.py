@@ -45,9 +45,6 @@ with MemoryTrackingMode() as mtm:
         device_map=TRAINING_DEVICE,
         dtype=torch.bfloat16,
         use_safetensors=True,
-        # quantization_config=BitsAndBytesConfig(
-        #     load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16
-        # ),
     )
     model.eval()
     model.requires_grad_(False)
@@ -65,11 +62,11 @@ print(model)
 print(mtm.memory_max)
 print(mtm.memory_cur)
 
-TRAINING_CACHE_DIR = None if torch.cuda.is_available() else ".training_cache"
-VALIDATION_CACHE_DIR = None if torch.cuda.is_available() else ".validation_cache"
-NUM_TRAINING_TOKENS = int(1e8) if torch.cuda.is_available() else int(1e6)
-EVAL_INTERVAL = int(1e5)
-NUM_VALIDATION_TOKENS = int(1e6) if torch.cuda.is_available() else int(1e5)
+TRAINING_CACHE_DIR = None
+VALIDATION_CACHE_DIR = None
+NUM_TRAINING_TOKENS = int(1e8)
+EVAL_INTERVAL = int(1e6)
+NUM_VALIDATION_TOKENS = int(1e6)
 # to match Gemma Scope
 D_SAE = 16384
 D_MODEL = model.d_model
@@ -116,7 +113,8 @@ training_config = TrainingConfig(
     training_batch_size=TRAINING_BATCH_SIZE,
     num_train_tokens=NUM_TRAINING_TOKENS,
     eval_interval=EVAL_INTERVAL,
-    train_layers=list(range(0, model.num_layers)),
+    train_layers=list(range(model.num_layers - 1, model.num_layers)),
+    # train_layers=list(range(0, model.num_layers)),
     betas=(
         0.0,
         0.999,

@@ -1,5 +1,4 @@
 from transformers_sae.multiline_progress import MultilineProgress
-from transformers_sae.metrics import l0_eval
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np

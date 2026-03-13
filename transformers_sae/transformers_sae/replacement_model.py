@@ -49,6 +49,7 @@ class ReplacementModel:
     d_model: int
     layer_path: str
     transformers_class: type
+    layer_class: type
 
     def __init__(self):
         raise NotImplementedError(
@@ -173,6 +174,8 @@ def make_replacement_model(
     context_length: int,
     d_model: int,
     layer_path: str = "transformer.h",
+    replacement_class: Type[ReplacementModel] = ReplacementModel,
+    layer_class: Type[SAEReplacementLayer] = SAEReplacementLayer,
 ) -> ReplacementModel: ...
 
 
@@ -184,6 +187,7 @@ def make_replacement_model(
     d_model: Optional[int] = None,
     layer_path: str = "transformer.h",
     replacement_class: Type[ReplacementModel] = ReplacementModel,
+    layer_class: Type[SAEReplacementLayer] = SAEReplacementLayer,
 ) -> ReplacementModel:
     # Shallow copy into a new module instance, adding ReplacementModel as a mixin
     new_instance = _shallow_copy_model(original)
@@ -191,11 +195,12 @@ def make_replacement_model(
 
     if isinstance(original, ReplacementModel):
         layer_path = original.layer_path
+        layer_class = original.layer_class
 
     for target_layer, sae in sae_layers.items():
         module_path = f"{layer_path}.{target_layer}"
         original_layer = original.get_submodule(module_path)
-        replacement_layer = SAEReplacementLayer(original_layer, sae)
+        replacement_layer = layer_class(original_layer, sae)
         new_instance.set_submodule(module_path, replacement_layer)
         replacement_layers[target_layer] = replacement_layer
 
@@ -222,6 +227,7 @@ def make_replacement_model(
 
     object.__setattr__(new_instance, "sae_layers", replacement_layers)
     object.__setattr__(new_instance, "layer_path", layer_path)
+    object.__setattr__(new_instance, "layer_class", layer_class)
 
     assert isinstance(new_instance, ReplacementModel)
     return new_instance
