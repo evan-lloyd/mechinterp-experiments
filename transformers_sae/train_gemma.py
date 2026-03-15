@@ -111,7 +111,7 @@ training_config = {
         training_batch_size=TRAINING_BATCH_SIZE,
         num_train_tokens=NUM_TRAINING_TOKENS,
         eval_interval=EVAL_INTERVAL,
-        train_layers=list(range(model.num_layers - 3, model.num_layers)),
+        train_layers=list(range(0, model.num_layers)),
         # train_layers=list(range(model.num_layers)),
         betas=(
             0.0,
@@ -171,7 +171,7 @@ print(
     f"mean l0={ {k: np.mean(v.l0).item() for k, v in validations.layer_results.items() if v.l0 is not None} }"
 )
 print(
-    f"geom mean kl={ {k: np.exp(np.mean(np.log(np.clip(v.kl, min=1e-9)))).item() for k, v in validations.layer_results.items() if v.kl is not None} })"
+    f"geom mean kl={ {k: np.exp(np.mean(np.log(np.clip(v.kl, min=1e-9)))).item() for k, v in validations.layer_results.items() if v.kl is not None} }"
 )
 print(
     f"arith mean kl={ {k: np.mean(v.kl).item() for k, v in validations.layer_results.items() if v.kl is not None} }"
