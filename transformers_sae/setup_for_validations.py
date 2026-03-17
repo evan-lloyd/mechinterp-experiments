@@ -82,7 +82,8 @@ def main() -> int:
     for remote_path, model_name, training_method, layer, tokens in downloads:
         filename = os.path.basename(remote_path)
         local_path = os.path.join(local_root, model_name, training_method, filename)
-        files_to_download.append((remote_path, local_path))
+        if not os.path.exists(local_path):
+            files_to_download.append((remote_path, local_path))
 
     for _, local_path in files_to_download:
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
