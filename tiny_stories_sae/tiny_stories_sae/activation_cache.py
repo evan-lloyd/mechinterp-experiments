@@ -14,7 +14,7 @@ from transformers import AutoTokenizer
 
 from .data_batch import DataBatch
 from .ops import ensure_directory
-from .tokenization import CONTEXT_LENGTH, input_generator
+from .tokenization import DEFAULT_CONTEXT_LENGTH, make_dataloader
 
 
 @torch.no_grad
@@ -147,13 +147,13 @@ def build_cache(
         model.config.num_layers,
         inference_batch_size,
         1,
-        CONTEXT_LENGTH,
+        DEFAULT_CONTEXT_LENGTH,
         model.config.hidden_size,
     )
     num_used_tokens = 0
 
     model.eval()
-    for batch in input_generator(
+    for batch in make_dataloader(
         model,
         tokenizer,
         dataset,

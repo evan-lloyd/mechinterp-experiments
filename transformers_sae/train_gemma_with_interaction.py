@@ -113,7 +113,7 @@ training_config = TrainingConfig(
     training_batch_size=TRAINING_BATCH_SIZE,
     num_train_tokens=NUM_TRAINING_TOKENS,
     eval_interval=EVAL_INTERVAL,
-    train_layers=list(range(0, model.num_layers)),
+    train_layers=list(range(10, model.num_layers)),
     # train_layers=list(range(0, model.num_layers)),
     betas=(
         0.0,

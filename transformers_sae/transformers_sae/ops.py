@@ -183,52 +183,14 @@ def load_checkpoint(in_file: str) -> "SAECheckpoint":
             sae = SAE(sae_config)
             with safe_open(sae_path, framework="pt") as f:
                 state_dict = {key: f.get_tensor(key) for key in f.keys()}
-            sae.load_state_dict(state_dict, assign=True)
 
-        checkpoint = SAECheckpoint(
-            total_tokens_trained=scalars["total_tokens_trained"],
-            step_tokens_trained=step_tokens_trained,
-            step_metrics=step_metrics,
-            sae=sae,
-        )
+            # Hack to load some checkpoints from an older code revision
+            old_batch_topk_threshold = state_dict.pop(
+                "encoder.batch_topk_threshold", None
+            )
+            if old_batch_topk_threshold is not None:
+                state_dict["encoder.activation.0.threshold"] = old_batch_topk_threshold
 
-        return checkpoint
-
-
-def load_checkpoint(in_file: str) -> "SAECheckpoint":
-    from .sae import SAE
-    from .training import SAECheckpoint
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # Extract zip file
-        with zipfile.ZipFile(in_file, "r") as zf:
-            zf.extractall(tmpdir)
-
-        # Load scalar values
-        scalars_path = os.path.join(tmpdir, "scalars.cloudpickle")
-        with open(scalars_path, "rb") as f:
-            scalars = cloudpickle.load(f)
-
-        # Load metrics
-        metrics_path = os.path.join(tmpdir, "metrics.safetensors")
-        with safe_open(metrics_path, framework="numpy") as f:
-            step_tokens_trained = f.get_tensor("step_tokens_trained")
-            step_metrics = {}
-            for key in f.keys():
-                if key.startswith("step_metrics."):
-                    metric_name = key[len("step_metrics.") :]
-                    step_metrics[metric_name] = f.get_tensor(key)
-
-        # Load SAE if it exists
-        sae = None
-        sae_path = os.path.join(tmpdir, "sae_weights.safetensors")
-        config_path = os.path.join(tmpdir, "sae_config.cloudpickle")
-        if os.path.exists(sae_path) and os.path.exists(config_path):
-            with open(config_path, "rb") as f:
-                sae_config = cloudpickle.load(f)
-            sae = SAE(sae_config)
-            with safe_open(sae_path, framework="pt") as f:
-                state_dict = {key: f.get_tensor(key) for key in f.keys()}
             sae.load_state_dict(state_dict, assign=True)
 
         checkpoint = SAECheckpoint(

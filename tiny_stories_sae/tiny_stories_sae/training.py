@@ -19,7 +19,7 @@ from .encoder import InteractionEncoder
 from .multiline_progress import MultilineProgress
 from .replacement_model import ReplacementModel, make_replacement_model
 from .sae import SAE
-from .tokenization import input_generator
+from .tokenization import make_dataloader
 from .training_step import (
     EndToEndTrainingStepper,
     KLFinetuneTrainingStepper,
@@ -240,7 +240,7 @@ def training_loop(
         num_header_lines=1,
     )
     for step, batch in enumerate(
-        input_generator(
+        make_dataloader(
             stepper.base_model,
             tokenizer,
             dataset,

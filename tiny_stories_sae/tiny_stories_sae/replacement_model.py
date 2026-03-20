@@ -24,6 +24,11 @@ class SAEReplacementLayer(torch.nn.Module):
 
 class ReplacementModel:
     sae_layers: Dict[int, SAE]
+    num_layers: int
+    context_length: int
+    d_model: int
+    device: torch.device
+    dtype: torch.dtype
 
     def __init__(self):
         raise NotImplementedError(
@@ -48,6 +53,7 @@ def make_replacement_model(
     original: torch.nn.Module,
     sae_layers: Dict[int, SAE],
     module_path_prefix: str = "transformer.h.",
+    context_length: int = 512,
 ) -> ReplacementModel:
     # Shallow copy into a new module instance, adding ReplacementModel as a mixin
     new_instance = _shallow_copy_model(original)
@@ -63,6 +69,9 @@ def make_replacement_model(
         replacement_layers[target_layer] = replacement_layer
 
     object.__setattr__(new_instance, "sae_layers", replacement_layers)
+    object.__setattr__(new_instance, "num_layers", original.config.num_layers)
+    object.__setattr__(new_instance, "context_length", context_length)
+    object.__setattr__(new_instance, "d_model", original.config.hidden_size)
 
     assert isinstance(new_instance, ReplacementModel)
     return new_instance

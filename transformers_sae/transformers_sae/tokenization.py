@@ -189,7 +189,7 @@ def tokenize_strings(
         #           [1., 1., 1., 1., 1., 1., 1., 1., 1., 0., 0., 1., 1.],
         #           [1., 1., 1., 1., 1., 1., 1., 1., 1., 0., 0., 0., 1.],
         #           [1., 1., 1., 1., 1., 1., 1., 1., 1., 0., 0., 0., 0.]])
-        mask_blocks = [ones[0 : len(i), 0 : len(i)] for i in input_batch]
+        mask_blocks = [ones[0 : len(i), 0 : len(i)].tril() for i in input_batch]
         # Pad?
         if row_len < context_length:
             mask_blocks.append(

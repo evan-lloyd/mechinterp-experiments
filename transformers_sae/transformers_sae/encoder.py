@@ -287,6 +287,15 @@ class InteractionEncoder(Encoder):
         else:
             raise ValueError(f"Invalid initialization source: {type(init_from)}")
 
+    def train(self, mode: bool = True):
+        super().train(mode)
+        self.interaction = torch.nn.Parameter(
+            self.interaction.to(
+                dtype=self.config.train_dtype if mode else self.config.inference_dtype
+            ),
+            requires_grad=mode,
+        )
+
     def forward(
         self, x: torch.Tensor, token_mask: torch.Tensor, should_cast: bool = True
     ):

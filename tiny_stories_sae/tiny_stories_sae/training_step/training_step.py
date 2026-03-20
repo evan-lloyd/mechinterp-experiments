@@ -6,7 +6,7 @@ import torch
 from ..activation_data import ActivationBatch, TrainingBatch, make_activation_batch
 from ..data_batch import DataBatch
 from ..ops import clone_sae
-from ..replacement_model import ReplacementModel
+from ..replacement_model import ReplacementModel, make_replacement_model
 from ..sae import SAE
 
 if TYPE_CHECKING:
@@ -22,7 +22,7 @@ class Stepper(ABC):
         base_model: torch.nn.Module,
         replacement_model: torch.nn.Module,
     ):
-        self.base_model = base_model
+        self.base_model = make_replacement_model(base_model, {})
         self.replacement_model = replacement_model
 
     @property

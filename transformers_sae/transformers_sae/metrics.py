@@ -6,7 +6,7 @@ import torch
 from bitarray import bitarray
 
 from .activation_data import DataBatch
-from .ops import MemoryTrackingMode, tensor_to_numpy
+from .ops import tensor_to_numpy
 
 """NB: The losses here are deliberately taking a mean, rather than sum, on the final dimension, to factor out
 the implicit dependence on d_model (mse) or d_vocab (kl). This is probably non-standard, but is effectively
