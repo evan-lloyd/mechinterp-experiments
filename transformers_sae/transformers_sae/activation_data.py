@@ -135,8 +135,8 @@ def make_activation_batch(
 
 
 def make_batch_for_evals(
-    base_model: torch.nn.Module,
-    full_replacement_model: ReplacementModel,
+    base_model: ReplacementModel,
+    replacement_model: ReplacementModel,
     training_batch: TrainingBatch,
     wanted_layers: List[int],
 ) -> TrainingBatch:
@@ -175,12 +175,12 @@ def make_batch_for_evals(
                     layer_output=new_baseline_run[layer]
                 )
 
-    # The existing batch may have not been a full replacement model. We can still shave off time
+    # The existing batch may have not used a full replacement model. We can still shave off time
     # by starting at the first layer that wasn't replaced.
     missing_replacement_model_layers = sorted(
         list(
             # We never replace the logits layer, so don't count it as missing
-            set(range(start_layer, min(end_layer, full_replacement_model.num_layers)))
+            set(range(start_layer, min(end_layer, replacement_model.num_layers)))
             - set(training_batch.replacement_layers)
         )
     )
@@ -193,6 +193,7 @@ def make_batch_for_evals(
         or (
             missing_replacement_model_layers
             and layer >= missing_replacement_model_layers[0]
+            and layer in replacement_model.sae_layers
         )
     ]
 
@@ -201,18 +202,18 @@ def make_batch_for_evals(
         for layer in needs_replacement_layers:
             if layer not in wanted_layers:
                 continue
-            if layer >= full_replacement_model.num_layers:
-                hooks[layer] = full_replacement_model.lm_head
-            else:
-                hooks[(layer, "layer_output")] = full_replacement_model.get_layer(
+            if layer >= replacement_model.num_layers:
+                hooks[layer] = replacement_model.lm_head
+            elif layer in replacement_model.sae_layers:
+                hooks[(layer, "layer_output")] = replacement_model.get_layer(
                     layer
                 ).original_layer
-                hooks[(layer, "sae_features")] = full_replacement_model.get_layer(
+                hooks[(layer, "sae_features")] = replacement_model.get_layer(
                     layer
                 ).sae.encoder
-                hooks[(layer, "sae_output")] = full_replacement_model.get_layer(
-                    layer
-                ).sae
+                hooks[(layer, "sae_output")] = replacement_model.get_layer(layer).sae
+            else:
+                hooks[(layer, "layer_output")] = replacement_model.get_layer(layer)
         # The previously used replacement model was good up until this layer, so we can start here
         # if we have the data. Otherwise, we need to start at the start_layer from baseline data.
         if needs_replacement_layers[0] - 1 in replacement_activations:
@@ -237,7 +238,7 @@ def make_batch_for_evals(
             ].layer_output
             replacement_start_at_sae = True
         new_replacement_run = _run_replacement_model(
-            full_replacement_model,
+            replacement_model,
             hooks,
             training_batch.input_data,
             start_input=replacement_start_input,
@@ -260,8 +261,8 @@ def make_batch_for_evals(
             else:
                 replacement_activations[layer] = ActivationBatch(
                     layer_output=new_replacement_run[(layer, "layer_output")],
-                    sae_features=new_replacement_run[(layer, "sae_features")],
-                    sae_output=new_replacement_run[(layer, "sae_output")],
+                    sae_features=new_replacement_run.get((layer, "sae_features")),
+                    sae_output=new_replacement_run.get((layer, "sae_output")),
                 )
 
     return TrainingBatch(

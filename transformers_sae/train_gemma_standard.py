@@ -75,27 +75,19 @@ TOPK = 100
 TOKENIZER_BATCH_SIZE = 256
 FINETUNE_FRACTION = 0.1
 
-
-def SAE_SPECS():
-    return TrainingMethod.__iter__()
-
-
 empty_saes = {
-    method: {
-        layer: SAE(
-            make_sae_config(
-                d_model=model.d_model,
-                d_sae=D_SAE,
-                device=TRAINING_DEVICE,
-                train_dtype=torch.float32,
-                inference_dtype=torch.bfloat16,
-                encoder_kind="batch_topk",
-                top_k=TOPK,
-            )
+    layer: SAE(
+        make_sae_config(
+            d_model=model.d_model,
+            d_sae=D_SAE,
+            device=TRAINING_DEVICE,
+            train_dtype=torch.float32,
+            inference_dtype=torch.bfloat16,
+            encoder_kind="batch_topk",
+            top_k=TOPK,
         )
-        for layer in range(model.num_layers)
-    }
-    for method in SAE_SPECS()
+    )
+    for layer in range(model.num_layers)
 }
 
 
@@ -105,50 +97,41 @@ def linear_decay_during_finetune(frac_trained: float):
     return 1.0 - (frac_trained - (1 - FINETUNE_FRACTION)) / FINETUNE_FRACTION
 
 
-training_config = {
-    method: TrainingConfig(
-        tokenizer_batch_size=TOKENIZER_BATCH_SIZE,
-        training_batch_size=TRAINING_BATCH_SIZE,
-        num_train_tokens=NUM_TRAINING_TOKENS,
-        eval_interval=EVAL_INTERVAL,
-        # train_layers=list(range(10, model.num_layers)),
-        train_layers=list(range(model.num_layers)),
-        betas=(
-            0.0,
-            0.999,
-        ),  # TODO: is this actually good for our training method? not for tinystories anyway
-        lr=1e-4,
-        interaction_lr=1e-4,
-        lr_schedule=linear_decay_during_finetune,  # per Karvonen (2025)
-        downstream_reconstruction_weight=1.0,
-        reconstruction_weight=1.0,
-        balance_reconstruction_losses=True,
-        method=method,
-        finetune_fraction=FINETUNE_FRACTION
-        if method in (TrainingMethod.finetuned, TrainingMethod.next_layer_finetuned)
-        else None,
-    )
-    for method in SAE_SPECS()
-}
-
-training_results = {}
-validation_results = {}
+training_config = TrainingConfig(
+    tokenizer_batch_size=TOKENIZER_BATCH_SIZE,
+    training_batch_size=TRAINING_BATCH_SIZE,
+    num_train_tokens=NUM_TRAINING_TOKENS,
+    eval_interval=EVAL_INTERVAL,
+    train_layers=[12],
+    # train_layers=list(range(model.num_layers)),
+    betas=(
+        0.0,
+        0.999,
+    ),  # TODO: is this actually good for our training method? not for tinystories anyway
+    lr=1e-4,
+    interaction_lr=1e-4,
+    lr_schedule=linear_decay_during_finetune,  # per Karvonen (2025)
+    downstream_reconstruction_weight=1.0,
+    reconstruction_weight=1.0,
+    balance_reconstruction_losses=True,
+    method=TrainingMethod.standard,
+)
 
 training_results = train(
     model,
     tokenizer,
-    empty_saes[TrainingMethod.next_layer],
+    empty_saes,
     training_dataset,
-    training_config[TrainingMethod.next_layer],
+    training_config,
     cache_dir=TRAINING_CACHE_DIR,
     checkpoints_at=list(
         range(
             int(1e7),
-            training_config[TrainingMethod.next_layer].num_train_tokens,
+            training_config.num_train_tokens,
             int(1e7),
         )
     ),
-    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer/",
+    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/standard/",
     force_retrain=False,
 )
 
@@ -161,7 +144,8 @@ validations = run_validations(
     TRAINING_BATCH_SIZE,
     NUM_VALIDATION_TOKENS,
     cache_dir=VALIDATION_CACHE_DIR,
-    start_layer=training_config[TrainingMethod.next_layer].train_layers[0],
+    start_layer=training_config.train_layers[0],
+    end_layer=training_config.train_layers[-1] + 1,
 )
 
 print(
@@ -193,6 +177,6 @@ with torch.autocast(
         {
             layer: sae
             for layer, sae in training_results.final_saes.items()
-            if layer >= training_config[TrainingMethod.next_layer].train_layers[0]
+            if layer >= training_config.train_layers[0]
         },
     )

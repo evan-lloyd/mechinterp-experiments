@@ -364,6 +364,11 @@ def training_loop(
 def _train_evals(
     base_model: ReplacementModel, eval_model: ReplacementModel, target_layer: int
 ):
+    wanted_layers = [target_layer]
+    if target_layer + 1 in eval_model.sae_layers:
+        wanted_layers.append(target_layer + 1)
+    wanted_layers.append(base_model.num_layers)
+
     @torch.autocast(
         device_type="cuda" if base_model.device.type == "cuda" else "cpu",
         dtype=torch.bfloat16,
@@ -374,17 +379,18 @@ def _train_evals(
                 base_model,
                 eval_model,
                 training_batch,
-                list({target_layer, target_layer + 1, base_model.num_layers}),
+                wanted_layers,
             ),
             # Want evals for this layer, next layer, and/or on logits
-            list({target_layer, target_layer + 1, base_model.num_layers}),
+            wanted_layers,
             aggregate=True,
         )
         return (
             {"rre": result[target_layer].rre}
             | (
                 {"next_rre": result[target_layer + 1].rre}
-                if result[target_layer + 1].rre is not None
+                if target_layer + 1 in result
+                and result[target_layer + 1].rre is not None
                 else {}
             )
             | {
@@ -504,7 +510,7 @@ def train(
                 if other_layer in stepper.replacement_model.sae_layers:
                     training_saes[other_layer].train()
                     training_saes[other_layer].requires_grad_(layer == other_layer)
-                else:
+                elif other_layer in training_saes:
                     training_saes[other_layer].eval()
 
             optimizer = make_optimizer(training_saes, [layer], config)

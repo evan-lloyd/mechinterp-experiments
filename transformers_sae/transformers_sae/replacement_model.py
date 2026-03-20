@@ -179,6 +179,7 @@ def make_replacement_model(
 ) -> ReplacementModel: ...
 
 
+# TODO: all the customization (d_model, layer_path, etc) should be handled by the subclass
 def make_replacement_model(
     original: torch.nn.Module | ReplacementModel,
     sae_layers: Dict[int, SAE],

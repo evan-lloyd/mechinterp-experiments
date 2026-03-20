@@ -437,14 +437,14 @@ def current_plot_to_svg(filename: str | None = None, plot_dir: str = "/tmp"):
     plt.savefig(plot_svg, format="svg")
     plt.close()
     plot_svg.seek(0)
-    d = display(SVG(plot_svg.read()))
+    svg = SVG(plot_svg.read())
 
     if filename:
         plot_svg.seek(0)
         ensure_directory(plot_dir)
         open(f"{plot_dir}/{filename}.svg", "w").write(plot_svg.read())
 
-    return d
+    return svg
 
 
 def ensure_tensor(
