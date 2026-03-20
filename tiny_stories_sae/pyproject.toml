@@ -1,6 +1,6 @@
 [project]
-name = "next-layer-sae"
-requires-python = ">=3.12"
+name = "tiny-stories-sae"
+requires-python = ">=3.13"
 dependencies = [
     "bitarray>=3.8.0",
     "cloudpickle>=3.1.2",
@@ -10,7 +10,7 @@ dependencies = [
     "matplotlib>=3.10.8",
     "safetensors>=0.7.0",
     "scipy>=1.17.0",
-    "torch>=2.9.1",
+    "torch>=2.10",
     "transformers>=4.57.3",
     "zarr>=3.1.5",
 ]
@@ -20,8 +20,8 @@ version = "0.0.0"
 dev = ["jurigged>=0.6.1", "line-profiler>=5.0.1", "ruff>=0.14.10"]
 
 [[tool.uv.index]]
-name = "pytorch-cu126"
-url = "https://download.pytorch.org/whl/cu126"
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [[tool.uv.index]]
@@ -32,5 +32,5 @@ explicit = true
 [tool.uv.sources]
 torch = [
     { index = "pytorch-cpu", marker = "platform_system == 'Darwin'" },
-    { index = "pytorch-cu126", marker = "platform_system != 'Darwin'" },
+    { index = "pytorch-cu128", marker = "platform_system != 'Darwin'" },
 ]

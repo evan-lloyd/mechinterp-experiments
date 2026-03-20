@@ -21,7 +21,7 @@ from .metrics import kl_eval, l0_eval, live_features_eval, rre_eval
 from .ops import generate
 from .replacement_model import make_replacement_model
 from .sae import SAE
-from .tokenization import input_generator
+from .tokenization import make_dataloader
 from .training_step import KLFinetuneTrainingStepper
 
 
@@ -96,9 +96,11 @@ def run_validations(
             if layer in saes:
                 saes[layer].onload()
 
+        base_model = make_replacement_model(model, {})
+
         for step, batch in enumerate(
-            input_generator(
-                model,
+            make_dataloader(
+                base_model,
                 tokenizer,
                 dataset,
                 max_tokens=num_tokens,
@@ -218,9 +220,10 @@ def run_single_layer_replacements(
 
             num_tokens_consumed = 0
 
+            base_model = make_replacement_model(model, {})
             for step, batch in enumerate(
-                input_generator(
-                    model,
+                make_dataloader(
+                    base_model,
                     tokenizer,
                     dataset,
                     max_tokens=num_tokens,
