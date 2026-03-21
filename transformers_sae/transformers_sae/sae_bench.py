@@ -50,8 +50,8 @@ class WrappedSAE:
         self.sae = sae
         self.layer = layer
         self.cfg = WrappedSAEConfig(sae, layer)
-        self.dtype = "bfloat16"
-        self.device = "cuda:0"
+        self.dtype = str(sae.config.inference_dtype).replace("torch.", "")
+        self.device = str(sae.config.device)
 
     def forward(self, x: torch.Tensor):
         return self.sae.forward(
@@ -87,6 +87,27 @@ class WrappedSAE:
 @dataclass
 class WrapperCfg:
     device: "str"
+
+
+class BatchWrapper(torch.Tensor):
+    @staticmethod
+    def __new__(cls, x, extra_data, *args, **kwargs):
+        return super().__new__(cls, x, *args, **kwargs)
+
+    def __init__(self, t: torch.Tensor, batch: DataBatch):
+        super().__init__()
+        self.tensor = t
+        self.batch = batch
+
+    def __getattr__(self, name):
+        if name in ("batch", "tensor"):
+            return object.__getattribute__(self, name)
+        return self.tensor.__getattr__(name)
+
+    def __setattr__(self, name, value):
+        if name in ("batch", "tensor"):
+            return object.__setattr__(self, name, value)
+        return self.tensor.__setattr__(name, value)
 
 
 class ReplacementModelWrapper:
@@ -137,62 +158,62 @@ class ReplacementModelWrapper:
 
         # ActivationsStore concatenates multiple independent inputs into the same batch row, separated
         # by bos tokens. We need to account for this in the position ids.
-        bos_mask = tokens == self.tokenizer.bos_token_id
-        bos_idx = bos_mask.nonzero(as_tuple=False)
-        position_ids = torch.zeros_like(tokens)
-        for cur_idx, next_idx in zip(
-            bos_idx[:-1],
-            torch.cat(
-                (
-                    bos_idx[1:],
-                    torch.tensor(
-                        [[tokens.shape[0], tokens.shape[1]]],
-                        device=bos_idx.device,
-                        dtype=bos_idx.dtype,
-                    ),
-                ),
-            ),
-        ):
-            # Finish off this row?
-            if cur_idx[0] != next_idx[0]:
-                position_ids[cur_idx[0], cur_idx[1] + 1 :] = torch.arange(
-                    0, tokens.shape[1] - cur_idx[1] - 1
-                )
-            # Else, partial row
-            else:
-                position_ids[cur_idx[0], cur_idx[1] + 1 : next_idx[1]] = torch.arange(
-                    0, next_idx[1] - cur_idx[1] - 1
-                )
-
-        # TransformerLens attention_mask is not for token->token attention; it's a mask on individual
-        # tokens
-        if attention_mask is None:
-            attention_mask = ~bos_mask
+        # bos_mask = tokens == self.tokenizer.bos_token_id
+        # bos_idx = bos_mask.nonzero(as_tuple=False)
+        # print(bos_idx)
+        # position_ids = torch.zeros_like(tokens)
+        # for cur_idx, next_idx in zip(
+        #     bos_idx[:-1],
+        #     torch.cat(
+        #         (
+        #             bos_idx[1:],
+        #             torch.tensor(
+        #                 [[tokens.shape[0], tokens.shape[1]]],
+        #                 device=bos_idx.device,
+        #                 dtype=bos_idx.dtype,
+        #             ),
+        #         ),
+        #     ),
+        # ):
+        #     # Finish off this row?
+        #     if cur_idx[0] != next_idx[0]:
+        #         position_ids[cur_idx[0], cur_idx[1] + 1 :] = torch.arange(
+        #             0, tokens.shape[1] - cur_idx[1] - 1
+        #         )
+        #     # Else, partial row
+        #     else:
+        #         position_ids[cur_idx[0], cur_idx[1] + 1 : next_idx[1]] = torch.arange(
+        #             0, next_idx[1] - cur_idx[1] - 1
+        #         )
 
         # [batch_dim, 1, token_dim, token_dim]
-        transformers_attention_mask = create_causal_mask(
-            config=self.model.config,
-            inputs_embeds=tokens,  # Doesn't actually need the embedding, just uses the shape/device
-            attention_mask=attention_mask,
-            cache_position=torch.arange(0, tokens.shape[1], device=tokens.device),
-            past_key_values=None,
-            position_ids=position_ids,
-        )
+        # transformers_attention_mask = create_causal_mask(
+        #     config=self.model.config,
+        #     inputs_embeds=tokens,  # Doesn't actually need the embedding, just uses the shape/device
+        #     attention_mask=attention_mask,
+        #     cache_position=torch.arange(0, tokens.shape[1], device=tokens.device),
+        #     past_key_values=None,
+        #     position_ids=position_ids,
+        # )
+        # print(
+        #     "replacementmodelwrapper",
+        #     transformers_attention_mask[0, 0, 0:10, 0:10].bool(),
+        # )
 
-        batch = DataBatch(
-            input_ids=tokens,
-            position_ids=position_ids,
-            attention_mask=transformers_attention_mask,
-            num_tokens=tokens.numel()
-            - bos_idx.shape[0],  # Don't count sequence separators
-            batch_size=tokens.shape[0],
-            num_dataset_rows=1,
-            input_lens=[tokens.shape[1]] * tokens.shape[0],
-            token_mask=torch.ones_like(tokens),
-            special_token_indices=torch.empty(
-                (0,), dtype=torch.long, device=tokens.device
-            ),
-        )
+        # batch = DataBatch(
+        #     input_ids=tokens,
+        #     position_ids=position_ids,
+        #     attention_mask=transformers_attention_mask,
+        #     num_tokens=tokens.numel()
+        #     - bos_idx.shape[0],  # Don't count sequence separators
+        #     batch_size=tokens.shape[0],
+        #     num_dataset_rows=1,
+        #     input_lens=[tokens.shape[1]] * tokens.shape[0],
+        #     token_mask=attention_mask,
+        #     special_token_indices=torch.empty(
+        #         (0,), dtype=torch.long, device=tokens.device
+        #     ),
+        # )
         if start_at_layer is None:
             start_layer = -1
         else:
@@ -209,17 +230,24 @@ class ReplacementModelWrapper:
             end_layer = stop_at_layer
 
         input_args, input_kwargs = self.model.get_base_model_args(
-            batch, input, start_layer == -1
+            tokens.batch, input, start_layer == -1
         )
         with truncated_model(
             self.model, start_layer, end_layer, start_at_sae=False, sae_kwargs={}
         ) as model_to_run:
-            logits = model_to_run(*input_args, **input_kwargs, use_cache=False)[0]
+            logits = model_to_run(*input_args, **input_kwargs, use_cache=False)
+            if not isinstance(logits, torch.Tensor):
+                logits = logits[0]
         if return_type == "logits":
             return logits
         if return_type is None:
             return None
-        loss = self.loss_fn(logits, tokens, attention_mask, per_token=loss_per_token)
+
+        # TransformerLens attention_mask is not for token->token attention; it's a mask on individual
+        # tokens, like our token_mask
+        loss = self.loss_fn(
+            logits, tokens, tokens.batch.token_mask, per_token=loss_per_token
+        )
         if return_type == "loss":
             return loss
 
@@ -333,12 +361,15 @@ class TokenizationWrapper:
         self.data_iter = self.dataloader.__iter__()
 
     def shuffle_input_dataset(self, seed: int):
-        pass
+        self.dataloader_args["dataset"] = self.dataloader_args["dataset"].shuffle(
+            seed=seed
+        )
+        self.reset_input_dataset()
 
     def get_batch_tokens(self, eval_batch_size_prompts: int):
         batch = next(self.data_iter)
-        print(torch.logical_not(batch.attention_mask.bool())[0, 0, :, :])
-        return batch.input_ids.to(self.dataloader_args["model"].device)
+        batch.to(self.dataloader_args["model"].device)
+        return BatchWrapper(batch.input_ids, batch)
 
 
 def run_sae_bench_evals(
@@ -356,7 +387,6 @@ def run_sae_bench_evals(
 
     num_batches = ceil(num_tokens / (batch_size * model.context_length))
 
-    # TODO: take in a ReplacementModel instead of HookedTransformer
     core_eval_config = CoreEvalConfig(
         model_name=model.name_or_path,
         batch_size_prompts=batch_size,
@@ -390,18 +420,19 @@ def run_sae_bench_evals(
     # # Seems undesirable for evaluation!
     # activation_store.activations_mixing_fraction = 0.0
 
-    core_results = run_evals(
-        sae=wrapped_sae,
-        activation_store=activation_store,
-        model=wrapped_model,
-        eval_config=core_eval_config,
-        ignore_tokens={
-            tokenizer.pad_token_id,  # type: ignore
-            tokenizer.eos_token_id,  # type: ignore
-            tokenizer.bos_token_id,  # type: ignore
-        },
-        verbose=True,
-    )
+    with torch.autocast(device_type=model.device.type, dtype=torch.bfloat16, enabled=True):
+        core_results = run_evals(
+            sae=wrapped_sae,
+            activation_store=activation_store,
+            model=wrapped_model,
+            eval_config=core_eval_config,
+            ignore_tokens={
+                tokenizer.pad_token_id,  # type: ignore
+                tokenizer.eos_token_id,  # type: ignore
+                tokenizer.bos_token_id,  # type: ignore
+            },
+            verbose=True,
+        )
 
     sae.offload()
     return core_results

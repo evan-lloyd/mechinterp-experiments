@@ -21,3 +21,4 @@ class DataBatch:
         self.position_ids = self.position_ids.to(*args, **kwargs)
         self.attention_mask = self.attention_mask.to(*args, **kwargs)
         self.token_mask = self.token_mask.to(*args, **kwargs)
+        return self

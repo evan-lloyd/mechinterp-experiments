@@ -284,10 +284,14 @@ def save_validations(validations: Dict[int, "ValidationResult"], out_dir: str) -
     """Save a Dict[int, ValidationResult] to the given directory.
 
     Each ValidationResult is saved as {out_dir}/{key}.validation.cloudpickle.
+    If a file already exists, a message is displayed and the file is not overwritten.
     """
     os.makedirs(out_dir, exist_ok=True)
     for key, result in validations.items():
         filepath = os.path.join(out_dir, f"{key}.validation.cloudpickle")
+        if os.path.exists(filepath):
+            print(f"File already exists, skipping: {filepath}")
+            continue
         with open(filepath, "wb") as f:
             cloudpickle.dump(result, f)
 
