@@ -454,9 +454,9 @@ def current_plot_to_svg(filename: str | None = None, plot_dir: str = "/tmp"):
 def ensure_tensor(
     maybe_tensor: Tuple[torch.Tensor, ...] | torch.Tensor,
 ) -> torch.Tensor:
-    if isinstance(maybe_tensor, tuple):
-        return maybe_tensor[0]
-    return maybe_tensor
+    if isinstance(maybe_tensor, torch.Tensor):
+        return maybe_tensor
+    return maybe_tensor[0]
 
 
 def _sortable_table_html(

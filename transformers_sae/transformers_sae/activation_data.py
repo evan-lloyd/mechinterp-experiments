@@ -60,6 +60,9 @@ def _run_replacement_model(
         ) as model_to_run,
     ):
         for hook_name, module in hooks.items():
+            # Special case, since we make a new model on the fly
+            if module is model:
+                module = model_to_run
             hook_stack.enter_context(
                 module.register_forward_hook(partial(_hook_output, hook_name))
             )
@@ -86,7 +89,7 @@ def make_activation_batch(
     for r in request_spec:
         if r[0] == replacement_model.num_layers:
             attrs = ("log_probs",)
-            submodule_paths = ("lm_head",)
+            submodule_paths = ("",)
         else:
             if r[1] == "sae":
                 assert r[0] in replacement_model.sae_layers, f"No SAE at layer {r[0]}"
@@ -120,9 +123,9 @@ def make_activation_batch(
         start_at_sae,
     )
     if (replacement_model.num_layers, "log_probs") in model_run:
-        model_run[(replacement_model.num_layers, "log_probs")] = model_run[
-            (replacement_model.num_layers, "log_probs")
-        ].log_softmax(-1)
+        model_run[(replacement_model.num_layers, "log_probs")] = ensure_tensor(
+            model_run[(replacement_model.num_layers, "log_probs")]
+        ).log_softmax(-1)
     result = {}
     for layer in sorted(list(request_attrs_by_layer.keys())):
         result[layer] = ActivationBatch(
@@ -168,7 +171,7 @@ def make_batch_for_evals(
         for layer in needs_baseline_layers:
             if layer == base_model.num_layers:
                 baseline_activations[layer] = ActivationBatch(
-                    log_probs=new_baseline_run[layer].log_softmax(-1)
+                    log_probs=ensure_tensor(new_baseline_run[layer]).log_softmax(-1)
                 )
             else:
                 baseline_activations[layer] = ActivationBatch(
@@ -203,7 +206,7 @@ def make_batch_for_evals(
             if layer not in wanted_layers:
                 continue
             if layer >= replacement_model.num_layers:
-                hooks[layer] = replacement_model.lm_head
+                hooks[layer] = replacement_model
             elif layer in replacement_model.sae_layers:
                 hooks[(layer, "layer_output")] = replacement_model.get_layer(
                     layer
@@ -256,7 +259,7 @@ def make_batch_for_evals(
                 continue
             if layer == base_model.num_layers:
                 replacement_activations[layer] = ActivationBatch(
-                    log_probs=new_replacement_run[layer].log_softmax(-1),
+                    log_probs=ensure_tensor(new_replacement_run[layer]).log_softmax(-1),
                 )
             else:
                 replacement_activations[layer] = ActivationBatch(
