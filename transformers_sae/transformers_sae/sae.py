@@ -126,6 +126,8 @@ class SAE(torch.nn.Module):
         self.config.device = device
         self.config.encoder.device = device
         self.config.decoder.device = device
+        self.encoder.config.device = device
+        self.decoder.config.device = device
         self.to(device)
         return self
 
