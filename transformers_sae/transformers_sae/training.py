@@ -8,17 +8,18 @@ from typing import Callable, Dict, List, Mapping, Optional, Tuple
 import numpy as np
 import torch
 from datasets import IterableDataset
+from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
 from .activation_cache import load_cache
-from .activation_data import TrainingBatch, make_batch_for_evals
+from .activation_data import TrainingBatch, make_activation_batch, make_batch_for_evals
 from .encoder import InteractionEncoder
 from .multiline_progress import MultilineProgress
 from .ops import (
     find_checkpoint_after,
     find_latest_checkpoint,
-    load_checkpoint,
     get_state_dict_from_checkpoint,
+    load_checkpoint,
     save_training_result,
 )
 from .replacement_model import ReplacementModel, make_replacement_model
@@ -208,6 +209,69 @@ def make_optimizer(saes: Dict[int, SAE], layers: List[int], config: TrainingConf
         pg["base_lr"] = pg["lr"]
 
     return torch.optim.Adam(param_groups, lr=config.lr, betas=config.betas)
+
+
+@torch.no_grad()
+def tune_activation_thresholds(
+    model: ReplacementModel,
+    tokenizer: AutoTokenizer,
+    saes: Dict[int, SAE],
+    dataset: IterableDataset,
+    tokenizer_batch_size: int,
+    inference_batch_size: int,
+    num_tokens: int,
+    offload_after_training: bool = True,
+) -> None:
+    """For BatchTopK SAEs, do a special training run that adjusts only the thresholds used
+    in the BatchTopK activation function. This is mandatory for replacement models, since
+    the additional error will almost surely have distorted the scale of inputs reaching each
+    SAE, and so we will no longer hit the desired sparsity level without this step.
+
+    Note that this function adjusts the thresholds in-place, but does not save the result.
+    """
+    try:
+        replacement_model = make_replacement_model(model, saes)
+        for sae in saes.values():
+            sae.onload()
+            for a in sae.encoder.activation:
+                a.train(True)
+
+        progress = tqdm(
+            total=num_tokens, desc="Tuning BatchTopK thresholds for replacement model"
+        )
+        num_used_tokens = 0
+        for step, batch in enumerate(
+            make_dataloader(
+                replacement_model,
+                tokenizer,
+                dataset,
+                max_tokens=num_tokens,
+                tokenizer_batch_size=tokenizer_batch_size,
+                inference_batch_size=inference_batch_size,
+            )
+        ):
+            # NB: the activation functions handle their own exponential average update, so we
+            # don't need any explicit optimizers
+            batch.to(replacement_model.device)
+
+            # Run the model until just prior to outputting logits, since this will be enough
+            # to get activations to flow through each SAE.
+            make_activation_batch(
+                replacement_model, [], batch, end_layer=model.num_layers
+            )
+
+            num_used_tokens += batch.num_tokens
+            progress.total = max(num_tokens, num_used_tokens)
+            progress.update(batch.num_tokens)
+
+        progress.close()
+    finally:
+        if offload_after_training:
+            try:
+                for sae in saes.values():
+                    sae.offload()
+            except Exception:
+                pass
 
 
 def training_loop(

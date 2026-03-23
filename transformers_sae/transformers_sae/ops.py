@@ -1,10 +1,12 @@
 import math
 import os
 import tempfile
+import threading
 import uuid
 import weakref
 import zipfile
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 from typing import TYPE_CHECKING, Collection, Dict, Iterable, List, Sequence, Tuple
 
@@ -302,13 +304,22 @@ def load_validations(from_dir: str) -> Dict[int, "ValidationResult"]:
     Loads all .validation.cloudpickle files and reconstructs the dictionary.
     """
     validations = {}
-    for filename in os.listdir(from_dir):
+    lock = threading.Lock()
+
+    def load_single(filename: str):
         if not filename.endswith(".validation.cloudpickle"):
-            continue
+            return
         key = int(filename[: -len(".validation.cloudpickle")])
         filepath = os.path.join(from_dir, filename)
         with open(filepath, "rb") as f:
-            validations[key] = cloudpickle.load(f)
+            result = cloudpickle.load(f)
+        with lock:
+            validations[key] = result
+
+    filenames = os.listdir(from_dir)
+    with ThreadPoolExecutor() as executor:
+        executor.map(load_single, filenames)
+
     return validations
 
 

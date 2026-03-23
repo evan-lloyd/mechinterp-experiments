@@ -119,6 +119,17 @@ class SAE(torch.nn.Module):
                 torch.empty((0,), device=to_device or self.config.device)
             )
 
+    def change_inference_dtype(self, dtype: torch.dtype | str):
+        """Change our configured inference_dtype."""
+        if isinstance(dtype, str):
+            dtype = getattr(torch, dtype)
+        self.config.inference_dtype = dtype
+        self.config.encoder.inference_dtype = dtype
+        self.config.decoder.inference_dtype = dtype
+        self.encoder.config.inference_dtype = dtype
+        self.decoder.config.inference_dtype = dtype
+        return self
+
     def change_configured_device(self, device: torch.device | str):
         """Change our configured device, and move to it."""
         if isinstance(device, str):
