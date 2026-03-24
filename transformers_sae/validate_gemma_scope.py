@@ -141,6 +141,7 @@ for training_method in (
     )
     if len(existing_validations) == model.num_layers:
         print(f"Skipping {training_method}, validations already complete")
+        continue
 
     if not saes:
         saes = load_saes(f"{CHECKPOINT_BASE_PATH}/{training_method}")

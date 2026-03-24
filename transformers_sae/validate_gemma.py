@@ -122,14 +122,14 @@ for training_method in (
     )
     if len(existing_validations) == model.num_layers:
         print(f"Skipping {training_method}, validations already complete")
+        continue
 
     saes = load_saes(f"{CHECKPOINT_BASE_PATH}/{training_method}")
     assert len(saes) == model.num_layers, (
         f"Missing SAEs for {training_method}, only had {set(saes.keys())}"
     )
     orig_thresholds = {
-        layer: tuple(a.threshold.item() for a in sae.encoder.activation)
-        for layer, sae in saes.items()
+        layer: sae.activation_thresholds() for layer, sae in saes.items()
     }
     for start_layer in set(saes.keys()) - existing_validations:
         print(
