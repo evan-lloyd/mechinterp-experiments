@@ -14,6 +14,7 @@ from transformers import AutoTokenizer
 from .activation_cache import load_cache
 from .activation_data import TrainingBatch, make_activation_batch, make_batch_for_evals
 from .encoder import InteractionEncoder
+from .metrics import l0_eval
 from .multiline_progress import MultilineProgress
 from .ops import (
     find_checkpoint_after,
@@ -221,23 +222,30 @@ def tune_activation_thresholds(
     inference_batch_size: int,
     num_tokens: int,
     offload_after_training: bool = True,
+    lr_schedule: Optional[Callable[[float], float]] = None,
 ) -> None:
     """For BatchTopK SAEs, do a special training run that adjusts only the thresholds used
     in the BatchTopK activation function. This is mandatory for replacement models, since
     the additional error will almost surely have distorted the scale of inputs reaching each
-    SAE, and so we will no longer hit the desired sparsity level without this step.
+    SAE, and so we will no longer hit the desired sparsity level without this step. About 1e6
+    tokens seem to be sufficient.
 
-    Note that this function adjusts the thresholds in-place, but does not save the result.
+    Note that this function adjusts the thresholds in-place, but does not save the result to
+    disk.
     """
     try:
         replacement_model = make_replacement_model(model, saes)
         for sae in saes.values():
             sae.onload()
-            for a in sae.encoder.activation:
-                a.train(True)
+            sae.train_encoder()
 
-        progress = tqdm(
-            total=num_tokens, desc="Tuning BatchTopK thresholds for replacement model"
+        # progress = tqdm(
+        #     total=num_tokens, desc="Tuning BatchTopK thresholds for replacement model"
+        # )
+        progress = MultilineProgress(
+            total=num_tokens,
+            desc=["Tuning BatchTopK thresholds for replacement model"],
+            num_header_lines=1,
         )
         num_used_tokens = 0
         for step, batch in enumerate(
@@ -256,9 +264,31 @@ def tune_activation_thresholds(
 
             # Run the model until just prior to outputting logits, since this will be enough
             # to get activations to flow through each SAE.
-            make_activation_batch(
-                replacement_model, [], batch, end_layer=model.num_layers
+            if lr_schedule is not None:
+                for sae in saes.values():
+                    sae.set_activation_threshold_lr(
+                        lr_schedule(min(num_used_tokens / num_tokens, 1.0))
+                    )
+            activation_batch = make_activation_batch(
+                replacement_model,
+                [],
+                # [(layer, "sae") for layer in saes.keys()],
+                batch,
+                end_layer=model.num_layers,
             )
+            # metrics = {
+            #     f"l0{layer}": l0_eval(
+            #         activation_batch[layer].sae_features,
+            #         None,
+            #         batch,
+            #         "float",
+            #     )
+            #     for layer in saes.keys()
+            # }
+            # metrics.update(
+            #     {f"θ{layer}": sae.activation_thresholds() for layer, sae in saes.items()}
+            # )
+            # progress.set_postfix(metrics, refresh=False)
 
             num_used_tokens += batch.num_tokens
             progress.total = max(num_tokens, num_used_tokens)

@@ -1,8 +1,10 @@
-from sae_lens.saes.sae import SAEMetadata
+import re
+from importlib.resources import files
 from types import MappingProxyType
-from typing import Dict, Type
+from typing import Type
 
 import torch
+import yaml
 from sae_lens import SAE as SAELens
 from sae_lens import (
     JumpReLUSAE,
@@ -13,6 +15,7 @@ from sae_lens import (
     TopKSAEConfig,
 )
 from sae_lens import SAEConfig as SAELensConfig
+from sae_lens.saes.sae import SAEMetadata
 
 from transformers_sae.encoder import EncoderKind
 
@@ -26,12 +29,25 @@ class SAELensSAEWrapper(torch.nn.Module):
         sae_lens_sae: SAELens,
         device: torch.device,
         dtype: torch.dtype,
+        target_l0: int,
     ):
         super().__init__()
         self.sae_lens_config = sae_lens_config
         self.sae_lens_sae = sae_lens_sae
         self.device = device
         self.dtype = dtype
+        self.threshold_lr = 1e-4
+        self.target_l0 = target_l0
+        self.register_buffer(
+            "threshold_offset",
+            torch.tensor(
+                0.0,
+                dtype=torch.double,
+                device=device,
+                requires_grad=False,
+            ),
+            persistent=True,
+        )
 
     @property
     def encoder(self):
@@ -51,13 +67,15 @@ class SAELensSAEWrapper(torch.nn.Module):
         token_mask: torch.Tensor,
         **kwargs,
     ):
-        orig_dtype = x.dtype
-        result = self.sae_lens_sae(x.to(self.dtype)).to(orig_dtype)
+        decoder_result = self.decode(
+            self.encode(x.to(self.dtype), token_mask=token_mask, should_cast=False),
+            should_cast=False,
+        ).to(x.dtype)
         # We want special tokens to "pass through" the SAE, since we don't train on them.
-        result.view(x.shape[0] * x.shape[1], x.shape[2])[pass_through_positions, :] = (
-            x.view(x.shape[0] * x.shape[1], x.shape[2])[pass_through_positions, :]
-        )
-        return result
+        decoder_result.view(x.shape[0] * x.shape[1], x.shape[2])[
+            pass_through_positions, :
+        ] = x.view(x.shape[0] * x.shape[1], x.shape[2])[pass_through_positions, :]
+        return decoder_result
 
     def offload(self):
         self.to(torch.device("cpu"))
@@ -68,6 +86,15 @@ class SAELensSAEWrapper(torch.nn.Module):
     def train(self, mode: bool = True):
         super().train(mode)
         self.requires_grad_(mode)
+
+    def train_encoder(self):
+        self.train()
+
+    def activation_thresholds(self):
+        return (self.threshold_offset.item(),)
+
+    def set_activation_threshold_lr(self, lr: float):
+        self.threshold_lr = lr
 
     def decode(self, x: torch.Tensor, should_cast: bool = True):
         orig_dtype = x.dtype
@@ -87,16 +114,62 @@ class SAELensSAEWrapper(torch.nn.Module):
         out_dtype = x.dtype
         if should_cast:
             x = x.to(self.dtype)
-        result = self.sae_lens_sae.decode(x)
+
+        linear_out = None
+
+        def _capture_pre_act(_module, _args, out):
+            nonlocal linear_out
+            linear_out = out
+
+        orig_threshold = self.sae_lens_sae.threshold
+        try:
+            self.sae_lens_sae.threshold = torch.nn.Parameter(
+                self.sae_lens_sae.threshold + self.threshold_offset
+            )
+            with self.sae_lens_sae.hook_sae_acts_pre.register_forward_hook(
+                _capture_pre_act
+            ):
+                result = self.sae_lens_sae.encode(x)
+        finally:
+            self.sae_lens_sae.threshold = orig_threshold
+
+        # Update threshold_multiplier?
+        if self.training:
+            with torch.no_grad():
+                linear_out[~token_mask.bool()] = torch.finfo(linear_out.dtype).min
+
+            num_tokens = linear_out.shape[0] * linear_out.shape[1]
+            topk = torch.topk(
+                # Offset by the (treated as constant) existing JumpReLU threshold, so that
+                # we target our offset to get us the expected final L0.
+                (linear_out - self.sae_lens_sae.threshold).view(-1),
+                k=self.target_l0 * num_tokens,
+                dim=-1,
+                sorted=False,
+            )
+
+            with torch.no_grad(), torch.autocast(x.device.type, enabled=False):
+                self.threshold_offset = (
+                    1 - self.threshold_lr
+                ) * self.threshold_offset + self.threshold_lr * topk.values.min().to(
+                    torch.double
+                )
+
         if should_cast:
             result = result.to(out_dtype)
         return result
 
 
-def wrap_sae_lens_pretrained(**kwargs) -> SAELensSAEWrapper:
-    saelens, saelens_config, _ = SAELens.from_pretrained_with_cfg_and_sparsity(**kwargs)
+def wrap_sae_lens_pretrained(target_l0: int, **sae_lens_kwargs) -> SAELensSAEWrapper:
+    saelens, saelens_config, _ = SAELens.from_pretrained_with_cfg_and_sparsity(
+        **sae_lens_kwargs
+    )
     return SAELensSAEWrapper(
-        saelens_config, saelens, kwargs.get("device"), kwargs.get("dtype")
+        saelens_config,
+        saelens,
+        sae_lens_kwargs.get("device"),
+        sae_lens_kwargs.get("dtype"),
+        target_l0,
     )
 
 
