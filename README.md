@@ -3,3 +3,6 @@ Code to reproduce various experiments in mechanistic interpretability. Each fold
 
 ## tiny_stories_sae
 Experiments to improve performance of LLM "replacement models" in which each layer's output is transformed by an SAE. The core idea being tested here is adding an extra term to the SAE loss function for the reconstruction of the *next* layer's output, using the SAE already trained for that layer. (For the final layer, this auxiliary loss is the KL divergence between the logits with/without the SAE replacement.)  The hope is that this approximates the performance of [end-to-end](https://arxiv.org/abs/2405.12241) SAEs while being much less computationally expensive, and doing better when more than one layer is replaced. Described in more detail in the [accompanying blog post](https://elloworld.net/posts/replacement-aware-sae-training/).
+
+## transformers_sae
+Experiments adapting replacement-aware SAE training to models in the `transformers` ecosystem. Further documentation will accompany a forthcoming blog post, but you can see preliminary results on Gemma-2-2B [here](https://github.com/evan-lloyd/mechinterp-experiments/blob/main/transformers_sae/notebooks/gemma_plots.ipynb).
