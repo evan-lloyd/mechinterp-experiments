@@ -2,7 +2,6 @@
 
 set -euo pipefail
 
-LOCAL_ROOT="/workspace/sae_checkpoints"
 DEFAULT_MODEL_NAME="gemma_2_2b"
 
 usage() {
@@ -72,11 +71,11 @@ fi
 
 case "$data_type" in
   checkpoint)
-    local_dir="${LOCAL_ROOT}/${model_name}/${method_name}"
+    local_dir="${HF_BUCKET_LOCAL}/${model_name}/${method_name}"
     remote_dir="${HF_BUCKET_REMOTE}/${model_name}/${method_name}"
     ;;
   validation)
-    local_dir="${LOCAL_ROOT}/validations/${model_name}/${method_name}"
+    local_dir="${HF_BUCKET_LOCAL}/validations/${model_name}/${method_name}"
     remote_dir="${HF_BUCKET_REMOTE}/validations/${model_name}/${method_name}"
     ;;
   *)

@@ -447,7 +447,7 @@ def ensure_directory(path: str):
     os.makedirs(path, exist_ok=True)
 
 
-def current_plot_to_svg(filename: str | None = None, plot_dir: str = "/tmp"):
+def current_plot_to_svg(filename: str | None = None, plot_dir: str = ".plots"):
     plot_svg = StringIO()
     plt.savefig(plot_svg, format="svg")
     plt.close()
