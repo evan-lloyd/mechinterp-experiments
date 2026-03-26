@@ -338,18 +338,21 @@ def generate(
     tokenizer: AutoTokenizer,
     stream=True,
     stream_callback=None,
+    strip_input=False,
     **kwargs,
 ):
-    if isinstance(inputs, str):
-        inputs = tokenizer(inputs, return_tensors="pt").to(model.device)
+    if isinstance(inputs, (str, list)):
+        inputs = tokenizer(inputs, return_tensors="pt", padding=True).to(model.device)
 
     special_ids = torch.tensor(tokenizer.all_special_ids).to(model.device)
     special_token_indices = (
         (inputs.input_ids.view(-1).unsqueeze(-1) == special_ids).any(dim=-1).nonzero()
-    )
+    ).squeeze(-1)
 
     # We also need to mask out special tokens for, eg, BatchTopK
-    token_mask = torch.ones(inputs.input_ids.shape, device=model.device)
+    token_mask = torch.ones(
+        inputs.input_ids.shape, device=model.device, dtype=model.dtype
+    )
     token_mask.view(-1)[special_token_indices] = 0.0
 
     def _set_pass_through_positions(module, args, kwargs):
@@ -357,18 +360,13 @@ def generate(
         # kwargs["pass_through_positions"] = torch.arange(
         #     0, kwargs["position_ids"].shape[1], device=module.device
         # )
-        kwargs["pass_through_positions"] = (
-            special_token_indices[special_token_indices >= kwargs["position_ids"][0, 0]]
-            - kwargs["position_ids"][0, 0]
-        )
-
-        kwargs["token_mask"] = token_mask[:, kwargs["position_ids"][0]]
+        kwargs["pass_through_positions"] = special_token_indices
+        kwargs["token_mask"] = token_mask
         return args, kwargs
 
     class TextStreamerWithCallback(TextStreamer):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
-            self.cur_token_index = None
 
         def put(self, value):
             if stream:
@@ -377,50 +375,21 @@ def generate(
             if stream_callback:
                 stream_callback(value)
 
-            # We get called with the initial input, which we've already extracted special_token_indices from
-            if self.cur_token_index is None:
-                self.cur_token_index = value.numel()
-            else:
-                nonlocal special_token_indices, token_mask
-                if value in tokenizer.all_special_ids:
-                    special_token_indices = torch.cat(
-                        (
-                            special_token_indices,
-                            torch.tensor(
-                                [[self.cur_token_index]],
-                                device=special_token_indices.device,
-                            ),
-                        ),
-                        dim=-1,
-                    )
-                    token_mask = torch.cat(
-                        (
-                            token_mask,
-                            torch.zeros(
-                                (token_mask.shape[0], 1),
-                                dtype=token_mask.dtype,
-                                device=token_mask.device,
-                            ),
-                        ),
-                        dim=-1,
-                    )
-                else:
-                    token_mask = torch.cat(
-                        (
-                            token_mask,
-                            torch.ones(
-                                (token_mask.shape[0], 1),
-                                dtype=token_mask.dtype,
-                                device=token_mask.device,
-                            ),
-                        ),
-                        dim=-1,
-                    )
-                self.cur_token_index += 1
+            nonlocal special_token_indices, token_mask
+            special_token_indices = (
+                (value.to(model.device).unsqueeze(-1) == special_ids)
+                .any(dim=-1)
+                .nonzero()
+            ).squeeze(-1)
+            token_mask = torch.ones(
+                (value.shape[0], value.shape[1] if value.ndim > 1 else 1),
+                device=model.device,
+                dtype=model.dtype,
+            )
+            token_mask.view(-1)[special_token_indices] = 0.0
 
         def end(self):
             super().end()
-            self.cur_token_index = None
 
     streamer = TextStreamerWithCallback(tokenizer, skip_prompt=True)
 
@@ -433,12 +402,15 @@ def generate(
                 _set_pass_through_positions, with_kwargs=True
             ),
         ):
-            return model.generate(
+            result = model.generate(
                 **inputs,
                 streamer=streamer,
                 tokenizer=tokenizer,
                 **kwargs,
             )
+            if strip_input:
+                result = result[:, inputs.input_ids.shape[1] :]
+            return result
     except KeyboardInterrupt:
         print("\n*** Generation aborted by user ***")
 

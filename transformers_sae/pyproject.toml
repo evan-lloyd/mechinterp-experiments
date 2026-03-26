@@ -18,6 +18,7 @@ dependencies = [
     "transformers[mistral-common]>=4.57.3",
     "zarr>=3.1.5",
     "sae-bench>=0.5.1",
+    "deepeval>=3.9.3",
 ]
 version = "0.0.0"
 
