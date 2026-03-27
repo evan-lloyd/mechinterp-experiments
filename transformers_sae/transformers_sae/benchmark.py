@@ -32,35 +32,38 @@ class BenchmarkModel(DeepEvalBaseLLM):
 
     @torch.inference_mode()
     def batch_generate(self, prompts: List[str], schemas) -> List[str]:
-        output_token_ids = generate(
-            prompts,
-            self.model,
-            self.tokenizer,
-            stream=False,
-            use_cache=True,
-            strip_input=True,
-            max_new_tokens=1,
-        )
-        return [
-            AnswerWrapper(a.strip())
-            for a in self.tokenizer.batch_decode(output_token_ids)
-        ]
+        with torch.autocast(
+            device_type="cuda" if self.model.device.type == "cuda" else "cpu",
+            dtype=torch.bfloat16,
+        ):
+            output_token_ids = generate(
+                prompts,
+                self.model,
+                self.tokenizer,
+                stream=False,
+                use_cache=True,
+                strip_input=True,
+                max_new_tokens=1,
+            )
+            return [
+                AnswerWrapper(a.strip())
+                for a in self.tokenizer.batch_decode(output_token_ids)
+            ]
 
     async def a_generate(self, prompt: str) -> str:
         return self.generate(prompt)
 
 
 class MMLUBenchmark(MMLU):
-    def __init__(
-        self,
-        num_examples_per_task: int | None,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self.num_examples_per_task = num_examples_per_task
-
     def load_benchmark_dataset(self, task: MMLUTask):
-        return super().load_benchmark_dataset(task)[slice(self.num_examples_per_task)]
+        result = super().load_benchmark_dataset(task)
+
+        # Seems like a bug in the parent class; it sets the shots_dataset to
+        # whatever the first loaded task was, but they can give very different
+        # peformance.
+        self.shots_dataset = list(self.dataset["dev"])
+
+        return result
 
     def evaluate(self, *args, **kwargs):
         mmlu_python_module.tqdm = tqdm_auto

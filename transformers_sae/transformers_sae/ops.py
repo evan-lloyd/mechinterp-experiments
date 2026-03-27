@@ -345,20 +345,13 @@ def generate(
         inputs = tokenizer(inputs, return_tensors="pt", padding=True).to(model.device)
 
     special_ids = torch.tensor(tokenizer.all_special_ids).to(model.device)
-    special_token_indices = (
-        (inputs.input_ids.view(-1).unsqueeze(-1) == special_ids).any(dim=-1).nonzero()
-    ).squeeze(-1)
-
-    # We also need to mask out special tokens for, eg, BatchTopK
-    token_mask = torch.ones(
-        inputs.input_ids.shape, device=model.device, dtype=model.dtype
-    )
-    token_mask.view(-1)[special_token_indices] = 0.0
-
+    special_token_indices = None
+    token_mask = None
+    
     def _set_pass_through_positions(module, args, kwargs):
         # Should disable SAE entirely
         # kwargs["pass_through_positions"] = torch.arange(
-        #     0, kwargs["position_ids"].shape[1], device=module.device
+        #     0, kwargs["position_ids"].numel(), device=module.device
         # )
         kwargs["pass_through_positions"] = special_token_indices
         kwargs["token_mask"] = token_mask
@@ -377,7 +370,7 @@ def generate(
 
             nonlocal special_token_indices, token_mask
             special_token_indices = (
-                (value.to(model.device).unsqueeze(-1) == special_ids)
+                (value.to(model.device).view(-1).unsqueeze(-1) == special_ids)
                 .any(dim=-1)
                 .nonzero()
             ).squeeze(-1)
@@ -389,7 +382,8 @@ def generate(
             token_mask.view(-1)[special_token_indices] = 0.0
 
         def end(self):
-            super().end()
+            if stream:
+                super().end()
 
     streamer = TextStreamerWithCallback(tokenizer, skip_prompt=True)
 
