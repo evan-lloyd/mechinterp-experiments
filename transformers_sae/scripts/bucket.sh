@@ -7,11 +7,11 @@ DEFAULT_MODEL_NAME="gemma_2_2b"
 usage() {
   cat <<'EOF'
 Usage:
-  bucket.sh <upload|download> <checkpoint|validation> -n <method_name> [-m <model_name>]
+  bucket.sh <upload|download> <checkpoint|validation|benchmark> -n <method_name> [-m <model_name>]
 
 Arguments:
   command                upload or download
-  data_type              checkpoint or validation
+  data_type              checkpoint, validation, or benchmark
 
 Options:
   -n <method_name>       Required. Training method name.
@@ -22,6 +22,7 @@ Examples:
   bucket.sh upload checkpoint -n standard
   bucket.sh upload validation -n standard -m gemma_2_2b
   bucket.sh download checkpoint -n sparse_autoencoder
+  bucket.sh upload benchmark -n standard -m gemma_2_2b
 EOF
 }
 
@@ -78,8 +79,12 @@ case "$data_type" in
     local_dir="${HF_BUCKET_LOCAL}/validations/${model_name}/${method_name}"
     remote_dir="${HF_BUCKET_REMOTE}/validations/${model_name}/${method_name}"
     ;;
+  benchmark)
+    local_dir="${HF_BUCKET_LOCAL}/benchmarks/${model_name}/${method_name}"
+    remote_dir="${HF_BUCKET_REMOTE}/benchmarks/${model_name}/${method_name}"
+    ;;
   *)
-    echo "Error: data_type must be 'checkpoint' or 'validation'." >&2
+    echo "Error: data_type must be 'checkpoint', 'validation', or 'benchmark'." >&2
     usage
     exit 1
     ;;
