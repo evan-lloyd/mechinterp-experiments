@@ -6,13 +6,6 @@
 
 SCRIPTS_DIR="scripts"
 
-# Register completion if being sourced
-if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
-    complete -F _run_completions run.sh
-    complete -F _run_completions ./run.sh
-    return 0
-fi
-
 _run_completions() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local scripts=""
@@ -29,6 +22,13 @@ _run_completions() {
     
     COMPREPLY=($(compgen -W "$scripts" -- "$cur"))
 }
+
+# Register completion if being sourced
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+    complete -F _run_completions run.sh
+    complete -F _run_completions ./run.sh
+    return 0
+fi
 
 # Main execution
 if [[ $# -lt 1 ]]; then
