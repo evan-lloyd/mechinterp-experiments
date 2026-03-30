@@ -108,6 +108,12 @@ def live_features_eval(
     batch: DataBatch,
     return_type: _ReturnType = "float",
 ):
+    # TODO: handle this more cleanly, but for now detect if we should mock the result for profiling
+    if isinstance(features, torch._subclasses.FakeTensor):
+        if return_type == "float":
+            return 1.0
+        else:
+            return bitarray([1] * features.shape[1])
     result = bitarray((features[batch.token_mask.bool()].sum(dim=0) > 0).tolist())
     if return_type == "float":
         return sum(result) / features.shape[-1]

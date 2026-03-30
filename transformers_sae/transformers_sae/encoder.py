@@ -107,7 +107,8 @@ class BatchTopKActivationFunction(ActivationFunction):
 
             with torch.no_grad(), torch.autocast(x.device.type, enabled=False):
                 pos_values = topk.values > 0
-                if pos_values.any():
+                # TODO: handle mocking more cleanly
+                if not isinstance(pos_values, torch._subclasses.FakeTensor) and pos_values.any():
                     self.threshold = (1 - lr) * self.threshold + lr * topk.values[
                         pos_values
                     ].min().to(torch.double)
@@ -213,9 +214,12 @@ class Encoder(torch.nn.Module):
 
     def train(self, mode: bool = True):
         super().train(mode)
-        self.linear.to(
-            dtype=self.config.train_dtype if mode else self.config.inference_dtype
-        )
+
+        to_dtype = self.config.train_dtype if mode else self.config.inference_dtype
+        # Unsure why, but have to do it this way for compatibility with FakeTensorMode, which
+        # is useful to support for memory profiling purposes.
+        self.linear.weight.to(to_dtype)
+        self.linear.bias.to(to_dtype)
         self.requires_grad_(mode)
 
     @property

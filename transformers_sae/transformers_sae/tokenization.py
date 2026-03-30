@@ -321,6 +321,47 @@ def _input_generator(
         state.num_tokens_generated += batch.num_tokens
 
 
+def mock_data_generator(
+    context_length: int,
+    dtype: torch.dtype,
+    max_tokens: Optional[int],
+    max_batches: Optional[int],
+    inference_batch_size: int,
+    offset: Optional[int],
+):
+    assert max_tokens or max_batches, "Need some limit for mock data generation"
+
+    fake_tokens = offset
+    fake_batches = 0
+    while True:
+        if max_tokens and fake_tokens >= max_tokens:
+            break
+        if max_batches and fake_batches >= max_batches:
+            break
+
+        yield DataBatch(
+            input_ids=torch.zeros(
+                (inference_batch_size, context_length), dtype=torch.int64
+            ),
+            position_ids=torch.zeros(
+                (inference_batch_size, context_length), dtype=torch.int64
+            ),
+            attention_mask=torch.zeros(
+                (inference_batch_size, 1, context_length, context_length), dtype=dtype
+            ),
+            num_tokens=context_length * inference_batch_size,
+            batch_size=inference_batch_size,
+            num_dataset_rows=inference_batch_size,
+            input_lens=[context_length] * inference_batch_size,
+            token_mask=torch.ones(
+                (inference_batch_size, context_length), dtype=torch.float32
+            ),
+            special_token_indices=torch.empty((0,), dtype=torch.long),
+        )
+        fake_tokens += context_length * inference_batch_size
+        fake_batches += 1
+
+
 def make_dataloader(
     model: ReplacementModel,
     tokenizer: AutoTokenizer,
@@ -331,6 +372,17 @@ def make_dataloader(
     offset: int = 0,
     max_batches: int | None = None,
 ):
+    # If we're in fake tensor mode, mock out reading from the dataset
+    if torch._guards.detect_fake_mode():
+        return mock_data_generator(
+            model.context_length,
+            model.dtype,
+            max_tokens,
+            max_batches,
+            inference_batch_size,
+            offset,
+        )
+
     class InputGeneratorDataset(TorchIterableDataset):
         def __iter__(self):
             return iter(

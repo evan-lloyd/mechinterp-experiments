@@ -31,7 +31,9 @@ class Decoder(torch.nn.Module):
                 device=to_device or self.config.device,
                 dtype=self.config.train_dtype,
             )
-            self.linear.weight /= torch.linalg.vector_norm(self.linear.weight, dim=0, keepdim=True)
+            self.linear.weight /= torch.linalg.vector_norm(
+                self.linear.weight, dim=0, keepdim=True
+            )
         elif isinstance(init_from, Decoder):
             self.linear.weight = torch.nn.Parameter(
                 init_from.linear.weight.to(to_device or self.config.device, copy=True)
@@ -53,7 +55,11 @@ class Decoder(torch.nn.Module):
 
     def train(self, mode: bool = True):
         super().train(mode)
-        self.to(dtype=self.config.train_dtype if mode else self.config.inference_dtype)
+        to_dtype = self.config.train_dtype if mode else self.config.inference_dtype
+        # Unsure why, but have to do it this way for compatibility with FakeTensorMode, which
+        # is useful to support for memory profiling purposes.
+        self.linear.weight.to(to_dtype)
+        self.linear.bias.to(to_dtype)
         self.requires_grad_(mode)
 
     def forward(self, x: torch.Tensor, should_cast: bool = True):
