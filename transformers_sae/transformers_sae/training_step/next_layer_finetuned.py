@@ -1,11 +1,11 @@
-from typing import TYPE_CHECKING, Dict, List
+from typing import TYPE_CHECKING, Dict, List, Tuple
 
 import torch
 
 from ..activation_data import ActivationBatch, TrainingBatch, make_activation_batch
 from ..data_batch import DataBatch
 from ..metrics import cos_dist_loss, kl_loss, mse_loss
-from ..replacement_model import make_replacement_model, ReplacementModel
+from ..replacement_model import ReplacementModel, make_replacement_model
 from ..sae import SAE
 from .training_step import Stepper
 
@@ -85,7 +85,7 @@ class NextLayerFinetunedTrainingStepper(Stepper):
 
     def step(
         self, training_batch: TrainingBatch, config: "TrainingConfig"
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, Dict[int, Dict[str, float]]]:
         downstream_kl_loss = kl_loss(
             training_batch.replacement_activations[
                 self.base_model.num_layers
@@ -139,11 +139,13 @@ class NextLayerFinetunedTrainingStepper(Stepper):
         ) / effective_loss_terms
 
         return loss, {
-            "total_loss": loss.item(),
-            "raw_loss.reconstruction": reconstruction_loss.item(),
-            "raw_loss.downstream_reconstruction": downstream_reconstruction_loss.item(),
-            "raw_loss.kl": downstream_kl_loss.item(),
-            "weighted_loss.reconstruction": weighted_reconstruction_loss.item(),
-            "weighted_loss.downstream_reconstruction": weighted_downstream_reconstruction_loss.item(),
-            "weighted_loss.kl": weighted_downstream_kl_loss.item(),
+            self.target_layer: {
+                "total_loss": loss.item(),
+                "raw_loss.reconstruction": reconstruction_loss.item(),
+                "raw_loss.downstream_reconstruction": downstream_reconstruction_loss.item(),
+                "raw_loss.kl": downstream_kl_loss.item(),
+                "weighted_loss.reconstruction": weighted_reconstruction_loss.item(),
+                "weighted_loss.downstream_reconstruction": weighted_downstream_reconstruction_loss.item(),
+                "weighted_loss.kl": weighted_downstream_kl_loss.item(),
+            }
         }

@@ -1,11 +1,11 @@
-from typing import TYPE_CHECKING, Dict, List
+from typing import TYPE_CHECKING, Dict, List, Tuple
 
 import torch
 
 from ..activation_data import ActivationBatch, TrainingBatch, make_activation_batch
 from ..data_batch import DataBatch
 from ..metrics import kl_loss, mse_loss
-from ..replacement_model import make_replacement_model, ReplacementModel
+from ..replacement_model import ReplacementModel, make_replacement_model
 from ..sae import SAE
 from .training_step import Stepper
 
@@ -47,7 +47,7 @@ class EndToEndTrainingStepper(Stepper):
 
     def step(
         self, training_batch: TrainingBatch, config: "TrainingConfig"
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, Dict[int, Dict[str, float]]]:
         downstream_reconstruction_loss = torch.zeros(
             (1,), device=self.base_model.device
         )
@@ -59,7 +59,9 @@ class EndToEndTrainingStepper(Stepper):
             )
 
         downstream_kl_loss = kl_loss(
-            training_batch.replacement_activations[self.base_model.num_layers].log_probs,
+            training_batch.replacement_activations[
+                self.base_model.num_layers
+            ].log_probs,
             training_batch.baseline_activations[self.base_model.num_layers].log_probs,
             training_batch.input_data,
         )
@@ -94,12 +96,13 @@ class EndToEndTrainingStepper(Stepper):
         loss = (weighted_kl_loss + weighted_downstream_reconstruction_loss) / (
             min(num_downstream_layers + 1, 2)
         )
-        loss.backward()
 
-        return {
-            "total_loss": loss.item(),
-            "raw_loss.downstream_reconstruction": downstream_reconstruction_loss.item(),
-            "raw_loss.kl": downstream_kl_loss.item(),
-            "weighted_loss.downstream_reconstruction": weighted_downstream_reconstruction_loss.item(),
-            "weighted_loss.kl": weighted_kl_loss.item(),
+        return loss, {
+            self.target_layer: {
+                "total_loss": loss.item(),
+                "raw_loss.downstream_reconstruction": downstream_reconstruction_loss.item(),
+                "raw_loss.kl": downstream_kl_loss.item(),
+                "weighted_loss.downstream_reconstruction": weighted_downstream_reconstruction_loss.item(),
+                "weighted_loss.kl": weighted_kl_loss.item(),
+            }
         }

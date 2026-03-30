@@ -1,11 +1,11 @@
-from typing import TYPE_CHECKING, Dict, List
+from typing import TYPE_CHECKING, Dict, List, Tuple
 
 import torch
 
 from ..activation_data import ActivationBatch, TrainingBatch, make_activation_batch
 from ..data_batch import DataBatch
 from ..metrics import kl_loss, mse_loss
-from ..replacement_model import make_replacement_model, ReplacementModel
+from ..replacement_model import ReplacementModel, make_replacement_model
 from ..sae import SAE
 from .training_step import Stepper
 
@@ -49,9 +49,11 @@ class KLFinetuneTrainingStepper(Stepper):
 
     def step(
         self, training_batch: TrainingBatch, config: "TrainingConfig"
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, Dict[int, Dict[str, float]]]:
         downstream_kl_loss = kl_loss(
-            training_batch.replacement_activations[self.base_model.num_layers].log_probs,
+            training_batch.replacement_activations[
+                self.base_model.num_layers
+            ].log_probs,
             training_batch.baseline_activations[self.base_model.num_layers].log_probs,
             training_batch.input_data,
         )
@@ -71,12 +73,13 @@ class KLFinetuneTrainingStepper(Stepper):
         weighted_reconstruction_loss = reconstruction_scale * reconstruction_loss
 
         loss = (weighted_kl_loss + weighted_reconstruction_loss) / 2
-        loss.backward()
 
-        return {
-            "total_loss": loss.item(),
-            "raw_loss.reconstruction": reconstruction_loss.item(),
-            "raw_loss.kl": downstream_kl_loss.item(),
-            "weighted_loss.reconstruction": weighted_reconstruction_loss.item(),
-            "weighted_loss.kl": weighted_kl_loss.item(),
+        return loss, {
+            self.target_layer: {
+                "total_loss": loss.item(),
+                "raw_loss.reconstruction": reconstruction_loss.item(),
+                "raw_loss.kl": downstream_kl_loss.item(),
+                "weighted_loss.reconstruction": weighted_reconstruction_loss.item(),
+                "weighted_loss.kl": weighted_kl_loss.item(),
+            }
         }

@@ -5,7 +5,7 @@ import torch
 from ..activation_data import ActivationBatch, TrainingBatch, make_activation_batch
 from ..data_batch import DataBatch
 from ..metrics import kl_loss, mse_loss
-from ..replacement_model import make_replacement_model, ReplacementModel
+from ..replacement_model import ReplacementModel, make_replacement_model
 from ..sae import SAE
 from .training_step import Stepper
 
@@ -13,39 +13,27 @@ if TYPE_CHECKING:
     from ..training import TrainingConfig
 
 
-class EndToEndFullTrainingStepper(Stepper):
+class FullReplacementTrainingStepper(Stepper):
     sae: SAE
     target_layer: int
 
-    def __init__(
-        self, base_model: ReplacementModel, target_layer: int, saes: Dict[int, SAE]
-    ):
+    def __init__(self, base_model: ReplacementModel, saes: Dict[int, SAE]):
         super().__init__(
             base_model,
-            make_replacement_model(
-                base_model,
-                {
-                    layer: saes[layer]
-                    for layer in range(target_layer, base_model.num_layers)
-                },
-            ),
+            make_replacement_model(base_model, saes),
         )
-        self.target_layer = target_layer
-        self.sae = saes[target_layer]
+        self.saes = saes
 
     def run_replacement(
         self, batch: DataBatch, baseline_activations: ActivationBatch
     ) -> Dict[int, ActivationBatch]:
         return make_activation_batch(
             self.replacement_model,
-            [
-                (layer, "sae")
-                for layer in range(self.target_layer, self.base_model.num_layers)
-            ]
+            [(layer, "sae") for layer in self.saes.keys()]
             + [(self.replacement_model.num_layers, "layer")],
             batch,
-            start_input=baseline_activations[self.target_layer].layer_output,
-            start_layer=self.target_layer,
+            start_input=baseline_activations[0].layer_output,
+            start_layer=0,
             end_layer=self.replacement_model.num_layers + 1,
             start_at_sae=True,
         )

@@ -8,7 +8,16 @@ import zipfile
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
-from typing import TYPE_CHECKING, Collection, Dict, Iterable, List, Sequence, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Collection,
+    Dict,
+    Iterable,
+    List,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 import cloudpickle
 import matplotlib.pyplot as plt
@@ -206,7 +215,7 @@ def load_checkpoint(in_file: str) -> "SAECheckpoint":
 
 
 def save_training_result(
-    result: "TrainingResult" | Dict[int, List["SAECheckpoint"]],
+    result: Union["TrainingResult", Dict[int, List["SAECheckpoint"]]],
     out_dir: str,
     keep_in_ram: bool = True,
     blocking: bool = True,

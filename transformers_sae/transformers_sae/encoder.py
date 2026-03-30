@@ -108,10 +108,13 @@ class BatchTopKActivationFunction(ActivationFunction):
             with torch.no_grad(), torch.autocast(x.device.type, enabled=False):
                 pos_values = topk.values > 0
                 # TODO: handle mocking more cleanly
-                if not isinstance(pos_values, torch._subclasses.FakeTensor) and pos_values.any():
+                if (
+                    not isinstance(pos_values, torch._subclasses.FakeTensor)
+                    and pos_values.any()
+                ):
                     self.threshold = (1 - lr) * self.threshold + lr * topk.values[
                         pos_values
-                    ].min().to(torch.double)
+                    ].min().to(self.threshold.dtype)
             return result
         # JumpReLU during inference
         else:
@@ -182,7 +185,11 @@ class Encoder(torch.nn.Module):
             # This does not transfer well across layers, so restart at 0
             for submodule in self.activation:
                 submodule.threshold = torch.tensor(
-                    0.0, dtype=torch.double, device=self.config.device
+                    0.0,
+                    dtype=torch.double
+                    if self.config.device.type != "mps"
+                    else torch.float32,
+                    device=self.config.device,
                 )
 
         if isinstance(init_from, Encoder):
@@ -218,8 +225,8 @@ class Encoder(torch.nn.Module):
         to_dtype = self.config.train_dtype if mode else self.config.inference_dtype
         # Unsure why, but have to do it this way for compatibility with FakeTensorMode, which
         # is useful to support for memory profiling purposes.
-        self.linear.weight.to(to_dtype)
-        self.linear.bias.to(to_dtype)
+        self.linear.weight = torch.nn.Parameter(self.linear.weight.to(to_dtype))
+        self.linear.bias = torch.nn.Parameter(self.linear.bias.to(to_dtype))
         self.requires_grad_(mode)
 
     @property

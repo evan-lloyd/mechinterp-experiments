@@ -1,9 +1,16 @@
+import numpy as np
 import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from transformers_sae.ops import MemoryTrackingMode
 from transformers_sae.replacement_model import make_replacement_model
+from transformers_sae.sae import (
+    SAE,
+    make_sae_config,
+)
+from transformers_sae.training import TrainingConfig, TrainingMethod, train
+from transformers_sae.validation import run_validations
 
 # Tweak TRAINING_BATCH_SIZE for your hardware if necessary
 if torch.cuda.is_available():
@@ -27,13 +34,6 @@ with MemoryTrackingMode() as mtm:
         "roneneldan/TinyStories-33M",
         device_map=TRAINING_DEVICE,
         dtype=torch.bfloat16,
-        # quantization_config=BitsAndBytesConfig(
-        #     # load_in_8bit=True,
-        #     load_in_4bit=True,
-        #     bnb_4bit_quant_type="nf4",
-        #     bnb4bit_use_double_quant=True,
-        #     bnb_4bit_compute_dtype=torch.bfloat16,
-        # ),
     )
     model = make_replacement_model(
         model,
@@ -45,26 +45,15 @@ with MemoryTrackingMode() as mtm:
 
 print(model)
 print(mtm.memory_max, mtm.memory_cur)
-TRAINING_CACHE_DIR = None if torch.cuda.is_available() else ".training_cache"
-VALIDATION_CACHE_DIR = None if torch.cuda.is_available() else ".validation_cache"
-NUM_TRAINING_TOKENS = int(1e7) if torch.cuda.is_available() else int(1e6)
-EVAL_INTERVAL = int(1e5)
-NUM_VALIDATION_TOKENS = int(1e6) if torch.cuda.is_available() else int(1e5)
+TRAINING_CACHE_DIR = None
+VALIDATION_CACHE_DIR = None
+NUM_TRAINING_TOKENS = int(1e4)
+EVAL_INTERVAL = int(1e3)
+NUM_VALIDATION_TOKENS = int(1e4)
 D_SAE = model.d_model * 4
 TOPK = 100
 TOKENIZER_BATCH_SIZE = 128
 FINETUNE_FRACTION = 0.1
-# Note this will use up ~1.8GB of space, set to False if you want to skip
-SAVE_FINAL_RESULTS = True
-
-import numpy as np
-
-from transformers_sae.sae import (
-    SAE,
-    make_sae_config,
-)
-from transformers_sae.training import TrainingConfig, TrainingMethod, fine_tune, train
-from transformers_sae.validation import run_validations
 
 
 def SAE_SPECS():

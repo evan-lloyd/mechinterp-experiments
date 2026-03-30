@@ -58,8 +58,8 @@ class Decoder(torch.nn.Module):
         to_dtype = self.config.train_dtype if mode else self.config.inference_dtype
         # Unsure why, but have to do it this way for compatibility with FakeTensorMode, which
         # is useful to support for memory profiling purposes.
-        self.linear.weight.to(to_dtype)
-        self.linear.bias.to(to_dtype)
+        self.linear.weight = torch.nn.Parameter(self.linear.weight.to(to_dtype))
+        self.linear.bias = torch.nn.Parameter(self.linear.bias.to(to_dtype))
         self.requires_grad_(mode)
 
     def forward(self, x: torch.Tensor, should_cast: bool = True):

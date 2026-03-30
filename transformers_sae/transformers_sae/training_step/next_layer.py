@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Dict, List
+from typing import TYPE_CHECKING, Dict, List, Tuple
 
 import torch
 
@@ -74,7 +74,7 @@ class NextLayerTrainingStepper(Stepper):
 
     def step(
         self, training_batch: TrainingBatch, config: "TrainingConfig"
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, Dict[int, Dict[str, float]]]:
         if (
             training_batch.baseline_activations[self.target_layer + 1].log_probs
             is not None
@@ -116,9 +116,11 @@ class NextLayerTrainingStepper(Stepper):
         ) / 2
 
         return loss, {
-            "total_loss": loss.item(),
-            "raw_loss.reconstruction": reconstruction_loss.item(),
-            "raw_loss.downstream_reconstruction": downstream_reconstruction_loss.item(),
-            "weighted_loss.reconstruction": weighted_reconstruction_loss.item(),
-            "weighted_loss.downstream_reconstruction": weighted_downstream_reconstruction_loss.item(),
+            self.target_layer: {
+                "total_loss": loss.item(),
+                "raw_loss.reconstruction": reconstruction_loss.item(),
+                "raw_loss.downstream_reconstruction": downstream_reconstruction_loss.item(),
+                "weighted_loss.reconstruction": weighted_reconstruction_loss.item(),
+                "weighted_loss.downstream_reconstruction": weighted_downstream_reconstruction_loss.item(),
+            }
         }

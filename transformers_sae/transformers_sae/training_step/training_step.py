@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import torch
 
@@ -54,7 +54,7 @@ class Stepper(ABC):
     @abstractmethod
     def step(
         self, training_batch: TrainingBatch, config: "TrainingConfig"
-    ) -> Dict[str, torch.Tensor]: ...
+    ) -> Tuple[torch.Tensor, Dict[int, Dict[str, float]]]: ...
 
     @abstractmethod
     def run_replacement(

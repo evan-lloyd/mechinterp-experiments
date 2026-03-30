@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Dict
+from typing import TYPE_CHECKING, Dict, Tuple
 
 import torch
 
@@ -42,14 +42,19 @@ class StandardTrainingStepper(Stepper):
 
     def step(
         self, training_batch: TrainingBatch, config: "TrainingConfig"
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, Dict[int, Dict[str, float]]]:
         reconstruction_loss = mse_loss(
             training_batch.replacement_activations[self.target_layer].sae_output,
             training_batch.baseline_activations[self.target_layer].layer_output,
             training_batch.input_data,
         )
 
-        return reconstruction_loss, {
-            "total_loss": reconstruction_loss.item(),
-            "raw_loss.reconstruction": reconstruction_loss.item(),
-        }
+        return (
+            reconstruction_loss,
+            {
+                self.target_layer: {
+                    "total_loss": reconstruction_loss.item(),
+                    "raw_loss.reconstruction": reconstruction_loss.item(),
+                }
+            },
+        )

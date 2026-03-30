@@ -3,7 +3,18 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Dict, List, Mapping, Optional, Tuple
+from typing import (
+    Callable,
+    Dict,
+    ItemsView,
+    KeysView,
+    List,
+    Mapping,
+    Optional,
+    Tuple,
+    ValuesView,
+    Iterator,
+)
 
 import numpy as np
 import torch
@@ -14,7 +25,6 @@ from transformers import AutoTokenizer
 from .activation_cache import load_cache
 from .activation_data import TrainingBatch, make_activation_batch, make_batch_for_evals
 from .encoder import InteractionEncoder
-from .metrics import l0_eval
 from .multiline_progress import MultilineProgress
 from .ops import (
     find_checkpoint_after,
@@ -29,13 +39,14 @@ from .tokenization import make_dataloader
 from .training_step import (
     EndToEndFullTrainingStepper,
     EndToEndTrainingStepper,
+    FullReplacementTrainingStepper,
     KLFinetuneTrainingStepper,
     NextLayerFinetunedTrainingStepper,
     NextLayerTrainingStepper,
     StandardTrainingStepper,
     Stepper,
 )
-from .validation import run_evals
+from .validation import run_evals, LayerEval
 
 
 class TrainingMethod(Enum):
@@ -45,6 +56,7 @@ class TrainingMethod(Enum):
     finetuned = "KL Fine-tuning"
     next_layer_finetuned = "Next Layer + Fine-Tuning"
     e2e_full = "End-to-end Full Replacement"
+    full_replacement = "Full Replacement"
 
 
 @dataclass(kw_only=True)
@@ -98,14 +110,24 @@ class SAECheckpoint:
     def finalize(self):
         self._is_finalized = True
 
-    def append(self, other: Dict[str, float | np.ndarray]):
+    def append(self, other: Dict[str, float | np.ndarray] | LayerEval):
         assert not self._is_finalized, (
             "Attempted to add metrics to a finalized checkpoint"
         )
-        for k, v in other.items():
+
+        if isinstance(other, dict):
+            other_iter = other.items
+        elif isinstance(other, LayerEval):
+
+            def other_iter() -> Iterator[Tuple[str, np.ndarray | float | None]]:
+                for k in other.__class__.__dataclass_fields__:
+                    v = getattr(other, k)
+                    yield k, v
+
+        for k, v in other_iter():
             if isinstance(v, np.ndarray):
                 self.step_metrics[k] = np.concat((self.step_metrics[k], v))
-            else:
+            elif v is not None:
                 self.step_metrics[k] = np.append(self.step_metrics[k], v)
 
 
@@ -129,13 +151,13 @@ class TrainingResult:
     def __len__(self) -> int:
         return len(self._layer_results)
 
-    def keys(self):
+    def keys(self) -> KeysView[int]:
         return self._layer_results.keys()
 
-    def values(self):
+    def values(self) -> ValuesView[List[SAECheckpoint]]:
         return self._layer_results.values()
 
-    def items(self):
+    def items(self) -> ItemsView[int, List[SAECheckpoint]]:
         return self._layer_results.items()
 
     def get(self, layer: int, default=None):
@@ -269,26 +291,12 @@ def tune_activation_thresholds(
                     sae.set_activation_threshold_lr(
                         lr_schedule(min(num_used_tokens / num_tokens, 1.0))
                     )
-            activation_batch = make_activation_batch(
+            make_activation_batch(
                 replacement_model,
                 [],
-                # [(layer, "sae") for layer in saes.keys()],
                 batch,
                 end_layer=model.num_layers,
             )
-            # metrics = {
-            #     f"l0{layer}": l0_eval(
-            #         activation_batch[layer].sae_features,
-            #         None,
-            #         batch,
-            #         "float",
-            #     )
-            #     for layer in saes.keys()
-            # }
-            # metrics.update(
-            #     {f"θ{layer}": sae.activation_thresholds() for layer, sae in saes.items()}
-            # )
-            # progress.set_postfix(metrics, refresh=False)
 
             num_used_tokens += batch.num_tokens
             progress.total = max(num_tokens, num_used_tokens)
@@ -306,8 +314,9 @@ def tune_activation_thresholds(
 
 def training_loop(
     stepper: Stepper,
-    checkpoints: List[SAECheckpoint],
-    eval_fn: Callable[[TrainingBatch], Dict[str, float]],
+    train_result: TrainingResult,
+    result_layers: List[int],
+    eval_fn: Callable[[TrainingBatch], Tuple[Dict[int, LayerEval], Dict[str, float]]],
     tokenizer: AutoTokenizer,
     dataset: IterableDataset,
     config: TrainingConfig,
@@ -318,8 +327,6 @@ def training_loop(
     previous_trained_tokens: int = 0,
     checkpoint_dir: Optional[str] = None,
 ) -> None:
-    sae = checkpoints[-1].sae
-
     if make_checkpoints_at is None:
         make_checkpoints_at = []
     make_checkpoints_at = sorted(make_checkpoints_at)
@@ -375,23 +382,26 @@ def training_loop(
             _do_step()
 
         if num_used_tokens >= eval_threshold:
-            evals = eval_fn(training_batch)
-            progress.set_postfix(evals, refresh=False)
+            evals, postfix_dict = eval_fn(training_batch)
+            progress.set_postfix(postfix_dict, refresh=False)
             eval_threshold = min(
                 eval_threshold + config.eval_interval,
                 max_tokens - previous_trained_tokens,
             )
 
             # Update train results, only on eval steps
-            checkpoints[-1].step_tokens_trained = np.append(
-                checkpoints[-1].step_tokens_trained,
-                num_used_tokens + previous_trained_tokens,
-            )
-            checkpoints[-1].append(evals)
-            checkpoints[-1].append(step_result)
-            checkpoints[-1].total_tokens_trained = (
-                num_used_tokens + previous_trained_tokens
-            )
+            for layer, checkpoints in train_result.items():
+                if layer not in result_layers:
+                    continue
+                checkpoints[-1].step_tokens_trained = np.append(
+                    checkpoints[-1].step_tokens_trained,
+                    num_used_tokens + previous_trained_tokens,
+                )
+                checkpoints[-1].append(evals[layer])
+                checkpoints[-1].append(step_result[layer])
+                checkpoints[-1].total_tokens_trained = (
+                    num_used_tokens + previous_trained_tokens
+                )
 
         # On the first batch only, we do evals before updating params
         if num_used_tokens + previous_trained_tokens == 0:
@@ -412,28 +422,32 @@ def training_loop(
             should_make_checkpoint
             and num_used_tokens + previous_trained_tokens < max_tokens
         ):
-            # Finalize current checkpoint
-            checkpoints[-1].total_tokens_trained = (
-                num_used_tokens + previous_trained_tokens
-            )
-            checkpoints[-1].sae = stepper.make_checkpoint()
-            checkpoints[-1].finalize()
-
-            if checkpoint_dir:
-                save_training_result(
-                    {stepper.target_layer: [checkpoints[-1]]},
-                    checkpoint_dir,
-                    keep_in_ram=False,
-                    blocking=False,
+            for layer, checkpoints in train_result.items():
+                if layer not in result_layers:
+                    continue
+                # Finalize current checkpoint
+                checkpoint_sae = checkpoints[-1].sae
+                checkpoints[-1].total_tokens_trained = (
+                    num_used_tokens + previous_trained_tokens
                 )
+                checkpoints[-1].sae = stepper.make_checkpoint()
+                checkpoints[-1].finalize()
 
-            # Initialize new checkpoint
-            checkpoints.append(
-                SAECheckpoint(
-                    sae=sae,
-                    total_tokens_trained=num_used_tokens + previous_trained_tokens,
+                if checkpoint_dir:
+                    save_training_result(
+                        {layer: [checkpoints[-1]]},
+                        checkpoint_dir,
+                        keep_in_ram=False,
+                        blocking=False,
+                    )
+
+                # Initialize new checkpoint
+                checkpoints.append(
+                    SAECheckpoint(
+                        sae=checkpoint_sae,
+                        total_tokens_trained=num_used_tokens + previous_trained_tokens,
+                    )
                 )
-            )
 
         for pg in optimizer.param_groups:
             pg["lr"] = pg["base_lr"] * config.lr_schedule(
@@ -450,15 +464,20 @@ def training_loop(
         progress.total = max(max_tokens - previous_trained_tokens, num_used_tokens)
         progress.update(batch.num_tokens)
 
-    checkpoints[-1].total_tokens_trained = num_used_tokens + previous_trained_tokens
-    checkpoints[-1].finalize()
+    for layer, checkpoints in train_result.items():
+        if layer not in result_layers:
+            continue
+
+        checkpoints[-1].total_tokens_trained = num_used_tokens + previous_trained_tokens
+        checkpoints[-1].finalize()
     progress.close()
 
 
 def _train_evals(
-    base_model: ReplacementModel, eval_model: ReplacementModel, target_layer: int
-):
-    wanted_layers = [target_layer]
+    base_model: ReplacementModel, eval_model: ReplacementModel, layers: List[int]
+) -> Callable[[TrainingBatch], Tuple[Dict[int, LayerEval], Dict[str, float]]]:
+    wanted_layers = list(layers)
+    target_layer = max(wanted_layers)
     if target_layer + 1 in eval_model.sae_layers:
         wanted_layers.append(target_layer + 1)
     wanted_layers.append(base_model.num_layers)
@@ -467,7 +486,9 @@ def _train_evals(
         device_type="cuda" if base_model.device.type == "cuda" else "cpu",
         dtype=torch.bfloat16,
     )
-    def eval_fn(training_batch: TrainingBatch) -> Dict[str, float]:
+    def eval_fn(
+        training_batch: TrainingBatch,
+    ) -> Tuple[Dict[int, LayerEval], Dict[str, float]]:
         result = run_evals(
             make_batch_for_evals(
                 base_model,
@@ -479,7 +500,7 @@ def _train_evals(
             wanted_layers,
             aggregate=True,
         )
-        return (
+        return result, (
             {"rre": result[target_layer].rre}
             | (
                 {"next_rre": result[target_layer + 1].rre}
@@ -510,22 +531,6 @@ def train(
     force_retrain: bool = False,
     fine_tune_source_dir: Optional[str] = None,
 ) -> TrainingResult:
-    if fine_tune_source_dir is None and config.method not in (
-        TrainingMethod.standard,
-        TrainingMethod.next_layer,
-        TrainingMethod.e2e,
-        TrainingMethod.e2e_full,
-    ):
-        raise ValueError(
-            f"Training method {config.method.value} must be finetuned from a checkpoint of another method; specify fine_tune_source_dir"
-        )
-    elif fine_tune_source_dir is not None and config.method not in (
-        TrainingMethod.finetuned,
-        TrainingMethod.next_layer_finetuned,
-    ):
-        raise ValueError(
-            f"Training method {config.method.value} does not accept fine-tuning; you should unset fine_tune_source_dir"
-        )
     try:
         model.eval()
         training_saes = {
@@ -579,6 +584,11 @@ def train(
             if token_offset >= config.num_train_tokens:
                 continue
 
+            # We train all SAEs simultaneously in full_replacement, so don't start the training loop
+            # until we've initialized all of them.
+            if config.method is TrainingMethod.full_replacement and layer > 0:
+                continue
+
             if checkpoints_at is not None:
                 make_checkpoints_at = [t for t in checkpoints_at if t > token_offset]
             else:
@@ -596,26 +606,40 @@ def train(
                 stepper = KLFinetuneTrainingStepper(model, layer, training_saes)
             elif config.method is TrainingMethod.next_layer_finetuned:
                 stepper = NextLayerFinetunedTrainingStepper(model, layer, training_saes)
+            elif config.method is TrainingMethod.full_replacement:
+                stepper = FullReplacementTrainingStepper(model, training_saes)
 
-            # Keep SAEs used in the replacement model in train mode, so eg for BatchTopK
-            # we automatically retune the threshold based on now having an SAE at the previous layer.
-            # Unused layers should be in eval mode.
-            for other_layer in range(layer, model.num_layers):
-                if other_layer in stepper.replacement_model.sae_layers:
-                    training_saes[other_layer].train()
-                    training_saes[other_layer].requires_grad_(layer == other_layer)
-                elif other_layer in training_saes:
-                    training_saes[other_layer].eval()
+            if config.method is TrainingMethod.full_replacement:
+                optimizer = make_optimizer(
+                    training_saes, list(training_saes.keys()), config
+                )
+            else:
+                # Keep SAEs used in the replacement model in train mode, so eg for BatchTopK
+                # we automatically retune the threshold based on now having an SAE at the previous layer.
+                # Unused layers should be in eval mode.
+                for other_layer in range(layer, model.num_layers):
+                    if other_layer in stepper.replacement_model.sae_layers:
+                        training_saes[other_layer].train()
+                        training_saes[other_layer].requires_grad_(layer == other_layer)
+                    elif other_layer in training_saes:
+                        training_saes[other_layer].eval()
 
-            optimizer = make_optimizer(training_saes, [layer], config)
+                optimizer = make_optimizer(training_saes, [layer], config)
 
             training_loop(
                 stepper,
-                train_result[layer],
+                train_result,
+                list(range(model.num_layers))
+                if config.method is TrainingMethod.full_replacement
+                else [layer],
                 # For consistency across methods, we always run our evals with the full replacement model
                 # starting from the target layer
                 _train_evals(
-                    model, make_replacement_model(model, training_saes), layer
+                    model,
+                    make_replacement_model(model, training_saes),
+                    list(range(model.num_layers))
+                    if config.method is TrainingMethod.full_replacement
+                    else [layer],
                 ),
                 tokenizer,
                 dataset,
@@ -629,7 +653,14 @@ def train(
             )
             if checkpoint_dir:
                 save_training_result(
-                    {layer: [train_result[layer][-1]]},
+                    {
+                        result_layer: [train_result[result_layer][-1]]
+                        for result_layer in (
+                            range(model.num_layers)
+                            if config.method is TrainingMethod.full_replacement
+                            else [layer]
+                        )
+                    },
                     checkpoint_dir,
                     keep_in_ram=True,
                     blocking=True,
