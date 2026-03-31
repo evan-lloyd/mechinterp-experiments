@@ -430,7 +430,7 @@ def training_loop(
                 checkpoints[-1].total_tokens_trained = (
                     num_used_tokens + previous_trained_tokens
                 )
-                checkpoints[-1].sae = stepper.make_checkpoint()
+                checkpoints[-1].sae = stepper.make_checkpoint(layer)
                 checkpoints[-1].finalize()
 
                 if checkpoint_dir:

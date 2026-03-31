@@ -45,7 +45,7 @@ class Stepper(ABC):
             replacement_layers=self.replacement_layers,
         )
 
-    def make_checkpoint(self, offload_to_cpu: bool = True) -> SAE:
+    def make_checkpoint(self, layer: int, offload_to_cpu: bool = True) -> SAE:
         assert hasattr(self, "sae"), (
             f"{self.__class__} needs to override make_checkpoint"
         )
