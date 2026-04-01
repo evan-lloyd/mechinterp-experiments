@@ -107,10 +107,11 @@ def load_saes(checkpoint_dir: str):
 
 
 for training_method in (
-    "next_layer_finetuned_interaction",
-    "next_layer",
-    "next_layer_interaction",
-    "next_layer_finetuned",
+    # "next_layer_finetuned_interaction",
+    # "next_layer",
+    # "next_layer_interaction",
+    #"next_layer_finetuned",
+    "next_layer_full_replacement_interaction",
 ):
     results_path = f"{VALIDATION_BASE_PATH}/{training_method}"
 

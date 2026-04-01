@@ -14,11 +14,15 @@ dependencies = [
     "sae-lens>=6.37.6",
     "safetensors>=0.7.0",
     "scipy>=1.17.0",
-    "torch>=2.10",
+    "torch>=2.11",
+    "torchvision>=0.26",
     "transformers[mistral-common]>=4.57.3",
     "zarr>=3.1.5",
     "sae-bench>=0.5.1",
     "deepeval>=3.9.3",
+    "deepspeed>=0.18.9",
+    "mpi4py>=4.1.1",
+    "mpich>=5.0.0",
 ]
 version = "0.0.0"
 
@@ -42,6 +46,11 @@ explicit = true
 
 [tool.uv.sources]
 torch = [
+    { index = "pytorch-cpu", marker = "platform_system == 'Darwin'" },
+    { index = "pytorch-cu128", marker = "platform_system != 'Darwin'" },
+    # { index = "pytorch-cu130", marker = "platform_system != 'Darwin'" },
+]
+torchvision = [
     { index = "pytorch-cpu", marker = "platform_system == 'Darwin'" },
     { index = "pytorch-cu128", marker = "platform_system != 'Darwin'" },
     # { index = "pytorch-cu130", marker = "platform_system != 'Darwin'" },

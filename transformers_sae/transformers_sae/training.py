@@ -1,4 +1,5 @@
 from __future__ import annotations
+from accelerate.state import AcceleratorState
 
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -7,20 +8,21 @@ from typing import (
     Callable,
     Dict,
     ItemsView,
+    Iterator,
     KeysView,
     List,
     Mapping,
     Optional,
     Tuple,
     ValuesView,
-    Iterator,
+    Any,
 )
 
 import numpy as np
 import torch
 from datasets import IterableDataset
-from tqdm.auto import tqdm
 from transformers import AutoTokenizer
+from accelerate import Accelerator, DeepSpeedPlugin
 
 from .activation_cache import load_cache
 from .activation_data import TrainingBatch, make_activation_batch, make_batch_for_evals
@@ -46,7 +48,7 @@ from .training_step import (
     StandardTrainingStepper,
     Stepper,
 )
-from .validation import run_evals, LayerEval
+from .validation import LayerEval, run_evals
 
 
 class TrainingMethod(Enum):
@@ -261,9 +263,6 @@ def tune_activation_thresholds(
             sae.onload()
             sae.train_encoder()
 
-        # progress = tqdm(
-        #     total=num_tokens, desc="Tuning BatchTopK thresholds for replacement model"
-        # )
         progress = MultilineProgress(
             total=num_tokens,
             desc=["Tuning BatchTopK thresholds for replacement model"],
@@ -326,6 +325,7 @@ def training_loop(
     make_checkpoints_at: List[int] | None = None,
     previous_trained_tokens: int = 0,
     checkpoint_dir: Optional[str] = None,
+    backward_fn: Optional[Callable[[torch.Tensor], Any]] = None,
 ) -> None:
     if make_checkpoints_at is None:
         make_checkpoints_at = []
@@ -368,7 +368,10 @@ def training_loop(
             training_batch = stepper.make_batch(batch, cache)
             loss, step_result = stepper.step(training_batch, config)
 
-        loss.backward()
+        if backward_fn is not None:
+            backward_fn(loss)
+        else:
+            loss.backward()
 
         def _do_step():
             nonlocal loss, num_used_tokens
@@ -609,10 +612,26 @@ def train(
             elif config.method is TrainingMethod.full_replacement:
                 stepper = FullReplacementTrainingStepper(model, training_saes)
 
+            eval_model = make_replacement_model(model, training_saes)
+
             if config.method is TrainingMethod.full_replacement:
                 optimizer = make_optimizer(
                     training_saes, list(training_saes.keys()), config
                 )
+                # deepspeed_plugin = DeepSpeedPlugin(
+                #     zero_stage=2,
+                #     gradient_accumulation_steps=1,
+                #     offload_optimizer_device="cpu",
+                # )
+                # accelerator = Accelerator(
+                #     deepspeed_plugin=deepspeed_plugin,
+                #     device_placement=False,
+                # )
+                # AcceleratorState().deepspeed_plugin.deepspeed_config[
+                #     "train_micro_batch_size_per_gpu"
+                # ] = 1
+                # eval_model, optimizer = accelerator.prepare(eval_model, optimizer)
+                # backward_fn = accelerator.backward
             else:
                 # Keep SAEs used in the replacement model in train mode, so eg for BatchTopK
                 # we automatically retune the threshold based on now having an SAE at the previous layer.
@@ -623,7 +642,7 @@ def train(
                         training_saes[other_layer].requires_grad_(layer == other_layer)
                     elif other_layer in training_saes:
                         training_saes[other_layer].eval()
-
+                # backward_fn = None
                 optimizer = make_optimizer(training_saes, [layer], config)
 
             training_loop(
@@ -636,7 +655,7 @@ def train(
                 # starting from the target layer
                 _train_evals(
                     model,
-                    make_replacement_model(model, training_saes),
+                    eval_model,
                     list(range(model.num_layers))
                     if config.method is TrainingMethod.full_replacement
                     else [layer],
@@ -650,6 +669,7 @@ def train(
                 previous_trained_tokens=token_offset,
                 make_checkpoints_at=make_checkpoints_at,
                 checkpoint_dir=checkpoint_dir,
+                # backward_fn=backward_fn,
             )
             if checkpoint_dir:
                 save_training_result(

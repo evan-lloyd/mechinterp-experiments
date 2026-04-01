@@ -212,15 +212,28 @@ def tokenize_strings(
 
     # These have to be non-negative on CUDA kernels
     position_ids = torch.where(position_ids >= 0, position_ids, 0)
+
+    # We can safely truncate all tensors to the maximum row length, which will save time and memory
+    # in case we don't have a full context window, which we often won't.
+    max_row_len = max(row_lens)
+
+    # TODO: we should refactor to not have to do this; probably store as batch_idx, token_idx until
+    # finally converting to flattened right here, where we already know the final size. This
+    # also probably shouldn't matter too much, as we ought to have ~1 special token per example.
+    for i in range(special_token_indices.shape[0]):
+        token_pos = special_token_indices[i] % context_length
+        batch_pos = special_token_indices[i] // context_length
+        special_token_indices[i] = batch_pos * max_row_len + token_pos
+
     return DataBatch(
-        torch.stack(input_id_stack),
-        position_ids,
-        torch.stack(attention_mask_stack),
+        torch.stack([t[:max_row_len] for t in input_id_stack]),
+        position_ids[:, :max_row_len],
+        torch.stack([t[:, :max_row_len, :max_row_len] for t in attention_mask_stack]),
         num_tokens,
         batch_size,
         num_rows,
         row_lens,
-        token_mask,
+        token_mask[:, :max_row_len],
         special_token_indices,
     ), unused_inputs
 

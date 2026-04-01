@@ -3,19 +3,28 @@ import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
-from transformers_sae.ops import MemoryTrackingMode
+from transformers_sae.ops import (
+    MemoryTrackingMode,
+    find_latest_checkpoint,
+    load_checkpoint,
+)
 from transformers_sae.replacement_model import make_replacement_model
 from transformers_sae.sae import (
     SAE,
     make_sae_config,
 )
-from transformers_sae.training import TrainingConfig, TrainingMethod, train
+from transformers_sae.training import (
+    TrainingConfig,
+    TrainingMethod,
+    train,
+    tune_activation_thresholds,
+)
 from transformers_sae.validation import run_validations
 
 # Tweak TRAINING_BATCH_SIZE for your hardware if necessary
 if torch.cuda.is_available():
     TRAINING_DEVICE = "cuda:0"
-    TRAINING_BATCH_SIZE = 16
+    TRAINING_BATCH_SIZE = 8
 elif torch.mps.is_available():
     TRAINING_DEVICE = "mps:0"
     TRAINING_BATCH_SIZE = 8
@@ -45,11 +54,9 @@ with MemoryTrackingMode() as mtm:
 
 print(model)
 print(mtm.memory_max, mtm.memory_cur)
-TRAINING_CACHE_DIR = None
-VALIDATION_CACHE_DIR = None
-NUM_TRAINING_TOKENS = int(1e4)
-EVAL_INTERVAL = int(1e3)
-NUM_VALIDATION_TOKENS = int(1e4)
+NUM_TRAINING_TOKENS = int(1e7)
+EVAL_INTERVAL = int(1e5)
+NUM_VALIDATION_TOKENS = int(1e6)
 D_SAE = model.d_model * 4
 TOPK = 100
 TOKENIZER_BATCH_SIZE = 128
@@ -100,7 +107,12 @@ training_config = {
         balance_reconstruction_losses=True,
         method=method,
         finetune_fraction=FINETUNE_FRACTION
-        if method in (TrainingMethod.finetuned, TrainingMethod.next_layer_finetuned)
+        if method
+        in (
+            TrainingMethod.finetuned,
+            TrainingMethod.next_layer_finetuned,
+            TrainingMethod.full_replacement,
+        )
         else None,
     )
     for method in SAE_SPECS()
@@ -109,11 +121,60 @@ training_config = {
 training_results = {}
 validation_results = {}
 
+CHECKPOINT_BASE_DIR = "/workspace/tinystories"
+NUM_THRESHOLD_TUNING_TOKENS = int(1e6)
+
+
+def tune_jumprelus(spec):
+    checkpoint_dir = f"{CHECKPOINT_BASE_DIR}/{spec.name}"
+    saes = {}
+    for layer in range(model.num_layers):
+        checkpoint = find_latest_checkpoint(checkpoint_dir, layer)
+        saes[layer] = load_checkpoint(checkpoint).sae
+    tune_activation_thresholds(
+        model,
+        tokenizer,
+        saes,
+        training_dataset,
+        TOKENIZER_BATCH_SIZE,
+        TRAINING_BATCH_SIZE,
+        NUM_THRESHOLD_TUNING_TOKENS,
+    )
+    validations = run_validations(
+        model,
+        tokenizer,
+        saes,
+        validation_dataset,
+        num_tokens=NUM_VALIDATION_TOKENS,
+        tokenizer_batch_size=training_config[spec].tokenizer_batch_size,
+        inference_batch_size=training_config[spec].training_batch_size,
+    )
+    print(
+        f"mean rre={ {k: np.mean(v.rre).item() for k, v in validations.layer_results.items() if v.rre is not None} }"
+    )
+    print(
+        f"mean l0={ {k: np.mean(v.l0).item() for k, v in validations.layer_results.items() if v.l0 is not None} }"
+    )
+    print(
+        f"geom mean kl={ {k: np.exp(np.mean(np.log(np.clip(v.kl, min=1e-9)))).item() for k, v in validations.layer_results.items() if v.kl is not None} }"
+    )
+    print(
+        f"arith mean kl={ {k: np.mean(v.kl).item() for k, v in validations.layer_results.items() if v.kl is not None} }"
+    )
+    print(
+        f"live features={ {k: sum(v.live_features) / D_SAE for k, v in validations.layer_results.items() if v.live_features is not None} }"
+    )
+    exit(0)
+
+
+# tune_jumprelus(TrainingMethod.full_replacement)
+
 for spec in (
     # TrainingMethod.standard,
-    TrainingMethod.next_layer,
+    # TrainingMethod.next_layer,
     # TrainingMethod.e2e,
     # TrainingMethod.e2e_full,
+    TrainingMethod.full_replacement,
 ):
     print(f"Training {spec.value}")
     training_results[spec] = train(
@@ -122,10 +183,14 @@ for spec in (
         empty_saes[spec],
         training_dataset,
         training_config[spec],
-        cache_dir=TRAINING_CACHE_DIR,
-        # checkpoints_at=[int((1.0 - FINETUNE_FRACTION) * NUM_TRAINING_TOKENS)]
-        # if spec in (TrainingMethod.standard, TrainingMethod.next_layer)
-        # else None,
+        checkpoints_at=[int((1.0 - FINETUNE_FRACTION) * NUM_TRAINING_TOKENS)]
+        if spec in (TrainingMethod.standard, TrainingMethod.next_layer)
+        else None,
+        checkpoint_dir=f"{CHECKPOINT_BASE_DIR}/{spec.name}",
+        fine_tune_source_dir=f"{CHECKPOINT_BASE_DIR}/next_layer"
+        if spec is TrainingMethod.full_replacement
+        else None,
+        force_retrain=True,
     )
     validation_results[spec] = run_validations(
         model,
@@ -135,7 +200,6 @@ for spec in (
         num_tokens=NUM_VALIDATION_TOKENS,
         tokenizer_batch_size=training_config[spec].tokenizer_batch_size,
         inference_batch_size=training_config[spec].training_batch_size,
-        cache_dir=VALIDATION_CACHE_DIR,
     )
     validations = validation_results[spec]
     print(

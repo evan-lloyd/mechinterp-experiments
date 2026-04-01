@@ -38,12 +38,20 @@ class FullReplacementTrainingStepper(Stepper):
 
         with torch.no_grad(), self.autocast():
             for layer in range(1, self.base_model.num_layers):
-                baseline_activations[
-                    layer
-                ].sae_features = self.replacement_model.get_layer(layer).sae.encode(
-                    baseline_activations[layer].layer_output,
-                    token_mask=batch.token_mask,
-                )
+                sae = self.replacement_model.get_layer(layer).sae
+                orig_train_state = [a.training for a in sae.encoder.activation]
+                # Turn off train mode for activation functions, so that for eg BatchTopK,
+                # we don't tune the thresholds on the baseline model.
+                for a in sae.encoder.activation:
+                    a.train(False)
+                try:
+                    baseline_activations[layer].sae_features = sae.encode(
+                        baseline_activations[layer].layer_output,
+                        token_mask=batch.token_mask,
+                    )
+                finally:
+                    for t, a in zip(orig_train_state, sae.encoder.activation):
+                        a.train(t)
 
         return baseline_activations
 
@@ -68,21 +76,40 @@ class FullReplacementTrainingStepper(Stepper):
     def step(
         self, training_batch: TrainingBatch, config: "TrainingConfig"
     ) -> Tuple[torch.Tensor, Dict[int, Dict[str, float]]]:
-        # Reconstruction loss for first layer
-        reconstruction_loss = mse_loss(
-            training_batch.replacement_activations[0].sae_output,
-            training_batch.baseline_activations[0].layer_output,
-            training_batch.input_data,
+        # Mean MSE, which will serve as a reference for loss scaling
+        # reconstruction_loss = torch.zeros((1,), device=self.base_model.device)
+        reconstruction_losses = []
+        mean_reconstruction = 0.0
+        for layer in range(0, self.base_model.num_layers):
+            layer_reconstruction = mse_loss(
+                training_batch.replacement_activations[layer].sae_output,
+                training_batch.baseline_activations[layer].layer_output,
+                training_batch.input_data,
+            )
+            reconstruction_losses.append(layer_reconstruction)
+            mean_reconstruction += (
+                layer_reconstruction.item() / self.base_model.num_layers
+            )
+
+        # Rescale each layer's loss to match the mean MSE
+        for layer in range(0, self.base_model.num_layers):
+            reconstruction_losses[layer] *= mean_reconstruction / (
+                reconstruction_losses[layer].item() + 1e-8
+            )
+
+        reconstruction_loss = (
+            torch.stack(reconstruction_losses).sum() / self.base_model.num_layers
         )
 
-        # Feature cosdist loss for other layers
+        # Feature cosdist loss for later layers. Note we don't additionally rescale to their mean
+        # because cosdist is naturally on the same scale across layers.
         feature_loss = torch.zeros((1,), device=self.base_model.device)
         for layer in range(1, self.base_model.num_layers):
             feature_loss += cos_dist_loss(
                 training_batch.replacement_activations[layer].sae_features,
                 training_batch.baseline_activations[layer].sae_features,
                 training_batch.input_data,
-            )
+            ) / (self.base_model.num_layers - 1)
 
         downstream_kl_loss = kl_loss(
             training_batch.replacement_activations[
@@ -97,8 +124,8 @@ class FullReplacementTrainingStepper(Stepper):
         feature_scale = config.downstream_reconstruction_weight[0]
         reconstruction_scale = config.reconstruction_weight[0]
         if config.balance_reconstruction_losses[0]:
-            kl_scale *= reconstruction_loss.item() / (downstream_kl_loss.item() + 1e-8)
-            feature_scale *= reconstruction_loss.item() / (feature_loss.item() + 1e-8)
+            kl_scale *= mean_reconstruction / (downstream_kl_loss.item() + 1e-8)
+            feature_scale *= mean_reconstruction / (feature_loss.item() + 1e-8)
 
         weighted_kl_loss = kl_scale * downstream_kl_loss
         weighted_reconstruction_loss = reconstruction_scale * reconstruction_loss
@@ -106,7 +133,7 @@ class FullReplacementTrainingStepper(Stepper):
 
         loss = (
             weighted_kl_loss + weighted_reconstruction_loss + weighted_feature_loss
-        ) / (self.base_model.num_layers + 1)
+        ) / 3.0
 
         return loss, {
             # TODO: refactor to save information per-layer, without redundancy for stuff like total loss
