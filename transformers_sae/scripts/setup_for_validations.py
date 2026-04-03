@@ -30,12 +30,12 @@ def _normalize_bucket_id(remote: str) -> str:
 def _discover_latest_checkpoints(bucket_id: str):
     """
     List bucket recursively, parse checkpoint paths, and return for each
-    (model_name, training_method, layer) the single checkpoint path with the most tokens.
+    (model_name, training_method, layer) up to two checkpoint paths with the most tokens.
 
     Yields (remote_path, model_name, training_method, layer, tokens).
     """
-    # (model_name, training_method, layer) -> (tokens, remote_path)
-    best: dict[tuple[str, str, int], tuple[int, str]] = {}
+    # (model_name, training_method, layer) -> list of (tokens, remote_path)
+    checkpoints: dict[tuple[str, str, int], list[tuple[int, str]]] = {}
 
     for item in list_bucket_tree(bucket_id, recursive=True):
         if getattr(item, "type", None) == "directory":
@@ -54,11 +54,13 @@ def _discover_latest_checkpoints(bucket_id: str):
             continue
         layer, tokens = parsed
         key = (model_name, training_method, layer)
-        if key not in best or tokens > best[key][0]:
-            best[key] = (tokens, path)
+        checkpoints.setdefault(key, []).append((tokens, path))
 
-    for (model_name, training_method, layer), (tokens, remote_path) in best.items():
-        yield remote_path, model_name, training_method, layer, tokens
+    for (model_name, training_method, layer), token_path_list in checkpoints.items():
+        # Sort by token count descending, pick up to 2
+        top = sorted(token_path_list, key=lambda x: -x[0])[:2]
+        for tokens, remote_path in top:
+            yield remote_path, model_name, training_method, layer, tokens
 
 
 def main() -> int:

@@ -74,14 +74,17 @@ case "$data_type" in
   checkpoint)
     local_dir="${HF_BUCKET_LOCAL}/${model_name}/${method_name}"
     remote_dir="${HF_BUCKET_REMOTE}/${model_name}/${method_name}"
+    cmd="sync"
     ;;
   validation)
     local_dir="${HF_BUCKET_LOCAL}/validations/${model_name}/${method_name}"
     remote_dir="${HF_BUCKET_REMOTE}/validations/${model_name}/${method_name}"
+    cmd="sync"
     ;;
   benchmark)
     local_dir="${HF_BUCKET_LOCAL}/benchmarks/${model_name}/${method_name}"
     remote_dir="${HF_BUCKET_REMOTE}/benchmarks/${model_name}/${method_name}"
+    cmd="cp"
     ;;
   *)
     echo "Error: data_type must be 'checkpoint', 'validation', or 'benchmark'." >&2
@@ -110,4 +113,4 @@ echo "Syncing:"
 echo "  from: $from_dir"
 echo "  to:   $to_dir"
 
-uv run hf buckets sync "$from_dir" "$to_dir"
+uv run hf buckets $cmd "$from_dir" "$to_dir"

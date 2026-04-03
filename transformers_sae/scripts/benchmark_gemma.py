@@ -34,10 +34,10 @@ else:
 model_id = "google/gemma-2-2b"
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-HF_BUCKET_LOCAL = os.environ.get("HF_BUCKET_LOCAL", "/workspace/sae_checkpoints")
+HF_BUCKET_LOCAL = os.environ.get("HF_BUCKET_LOCAL")
 VALIDATION_BASE_PATH = f"{HF_BUCKET_LOCAL}/validations/gemma_2_2b"
 CHECKPOINT_BASE_PATH = f"{HF_BUCKET_LOCAL}/gemma_2_2b"
-BENCHMARK_BASE_PATH = f"{HF_BUCKET_LOCAL}/benchmarks"
+BENCHMARK_BASE_PATH = f"{HF_BUCKET_LOCAL}/gemma_2_2b/benchmarks"
 NUM_TRAINING_TOKENS = int(1e8)
 
 # Somewhat arbitrary list of tasks; these are the first 10 from the DeepEval enum that
@@ -60,6 +60,8 @@ MMLU_BATCH_SIZE = 16
 START_LAYER = 0
 
 CHECKPOINT_TRAINING_METHODS = (
+    "next_layer_full_replacement_interaction_k_200",
+    "next_layer_full_replacement_interaction",
     "next_layer_finetuned_interaction",
     "next_layer",
     "next_layer_interaction",
@@ -231,7 +233,7 @@ def run_sae_benchmark(training_method: str, saes):
     print(f"Wrote {out_path}")
 
 
-run_baseline_benchmark()
+# run_baseline_benchmark()
 
 gemma_scope_saes = None
 for training_method in CHECKPOINT_TRAINING_METHODS:

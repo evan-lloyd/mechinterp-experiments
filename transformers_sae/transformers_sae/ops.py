@@ -214,6 +214,93 @@ def load_checkpoint(in_file: str) -> "SAECheckpoint":
         return checkpoint
 
 
+def load_metrics(in_file: str) -> Dict:
+    """Load only the metrics from a checkpoint zip file.
+
+    Returns a dict with:
+      - "step_tokens_trained": np.ndarray
+      - "step_metrics": Dict[str, np.ndarray]
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with zipfile.ZipFile(in_file, "r") as zf:
+            zf.extract("metrics.safetensors", tmpdir)
+
+        metrics_path = os.path.join(tmpdir, "metrics.safetensors")
+        with safe_open(metrics_path, framework="numpy") as f:
+            step_tokens_trained = f.get_tensor("step_tokens_trained")
+            step_metrics = {}
+            for key in f.keys():
+                if key.startswith("step_metrics."):
+                    metric_name = key[len("step_metrics.") :]
+                    step_metrics[metric_name] = f.get_tensor(key)
+
+    return {"step_tokens_trained": step_tokens_trained, "step_metrics": step_metrics}
+
+
+def _stitch_layer_metrics(entries: List[Tuple[int, str]]) -> Dict:
+    """Stitch metrics from a sorted list of (total_tokens, filepath) pairs into a single dict."""
+    import numpy as np
+
+    all_step_tokens: List = []
+    all_step_metrics: Dict[str, List] = defaultdict(list)
+    checkpoint_token_boundaries: List[int] = []
+
+    for total_tokens, filepath in entries:
+        metrics = load_metrics(filepath)
+        all_step_tokens.append(metrics["step_tokens_trained"])
+        for key, value in metrics["step_metrics"].items():
+            all_step_metrics[key].append(value)
+        checkpoint_token_boundaries.append(total_tokens)
+
+    return {
+        "total_tokens_trained": checkpoint_token_boundaries,
+        "step_tokens_trained": np.concatenate(all_step_tokens),
+        "step_metrics": {
+            key: np.concatenate(arrays) for key, arrays in all_step_metrics.items()
+        },
+    }
+
+
+def load_training_metrics(
+    from_dir: str, layers: Collection[int] | None = None
+) -> Dict[int, Dict]:
+    """Load and stitch metrics from all checkpoints in a directory.
+
+    Checkpoints are sorted by total_tokens_trained within each layer and each
+    layer's step-level arrays are concatenated in order.
+
+    Args:
+        from_dir: Directory containing .checkpoint files.
+        layers: If provided, only load checkpoints for these layers. If None,
+                all layers found in the directory are loaded.
+
+    Returns a dict mapping layer -> dict with:
+      - "total_tokens_trained": list[int] — token count at each checkpoint boundary
+      - "step_tokens_trained": np.ndarray — concatenated across all checkpoints
+      - "step_metrics": Dict[str, np.ndarray] — each metric concatenated across all checkpoints
+    """
+    entries_by_layer: Dict[int, List[Tuple[int, str]]] = defaultdict(list)
+    for filename in os.listdir(from_dir):
+        parsed = _parse_checkpoint_filename(filename)
+        if parsed is None:
+            continue
+        file_layer, tokens = parsed
+        if layers is not None and file_layer not in layers:
+            continue
+        entries_by_layer[file_layer].append((tokens, os.path.join(from_dir, filename)))
+
+    if not entries_by_layer:
+        raise ValueError(
+            f"No checkpoints found in {from_dir!r}"
+            + (f" for layers {sorted(layers)}" if layers is not None else "")
+        )
+
+    return {
+        layer: _stitch_layer_metrics(sorted(entries, key=lambda x: x[0]))
+        for layer, entries in entries_by_layer.items()
+    }
+
+
 def save_training_result(
     result: Union["TrainingResult", Dict[int, List["SAECheckpoint"]]],
     out_dir: str,
@@ -356,7 +443,7 @@ def generate(
     special_ids = torch.tensor(tokenizer.all_special_ids).to(model.device)
     special_token_indices = None
     token_mask = None
-    
+
     def _set_pass_through_positions(module, args, kwargs):
         # Should disable SAE entirely
         # kwargs["pass_through_positions"] = torch.arange(

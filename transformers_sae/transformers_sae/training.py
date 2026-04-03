@@ -573,6 +573,7 @@ def train(
                     layer,
                     int((1.0 - config.finetune_fraction) * config.num_train_tokens),
                 )
+                print(f"Loading {source_checkpoint} for finetuning")
                 sae = training_saes[layer]
                 sae.load_state_dict(
                     get_state_dict_from_checkpoint(source_checkpoint), assign=True

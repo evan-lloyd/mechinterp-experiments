@@ -5,8 +5,10 @@ import cloudpickle
 import numpy as np
 import torch
 from datasets import load_dataset
+from deepeval.benchmarks.mmlu.task import MMLUTask
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from transformers_sae.benchmark import BenchmarkModel, MMLUBenchmark
 from transformers_sae.ops import (
     MemoryTrackingMode,
     find_latest_checkpoint,
@@ -15,7 +17,7 @@ from transformers_sae.ops import (
 )
 from transformers_sae.replacement_model import GemmaReplacement, make_replacement_model
 from transformers_sae.training import tune_activation_thresholds
-from transformers_sae.validation import run_validations
+from transformers_sae.validation import generate_with_replacement, run_validations
 
 # Tweak TRAINING_BATCH_SIZE for your hardware if necessary
 if torch.cuda.is_available():
@@ -85,7 +87,7 @@ def load_saes(checkpoint_dir: str):
             if cp.total_tokens_trained < NUM_TRAINING_TOKENS:
                 print(f"No checkpoint found for layer {layer}")
                 return layer, None
-            sae = load_checkpoint(checkpoint).sae
+            sae = cp.sae
             sae.eval()
             sae.onload()
             print(f"Loaded checkpoint for layer {layer}")
@@ -106,12 +108,27 @@ def load_saes(checkpoint_dir: str):
     return saes
 
 
+MMLU_TASKS = [
+    MMLUTask.BUSINESS_ETHICS,
+    MMLUTask.CLINICAL_KNOWLEDGE,
+    MMLUTask.MEDICAL_GENETICS,
+    MMLUTask.HIGH_SCHOOL_PHYSICS,
+    MMLUTask.VIROLOGY,
+    MMLUTask.HIGH_SCHOOL_MICROECONOMICS,
+    MMLUTask.ECONOMETRICS,
+    MMLUTask.COLLEGE_COMPUTER_SCIENCE,
+    MMLUTask.HIGH_SCHOOL_BIOLOGY,
+    MMLUTask.ABSTRACT_ALGEBRA,
+]
+MMLU_BATCH_SIZE = 16
+
+
 for training_method in (
     # "next_layer_finetuned_interaction",
     # "next_layer",
     # "next_layer_interaction",
-    #"next_layer_finetuned",
-    "next_layer_full_replacement_interaction",
+    # "next_layer_finetuned",
+    "next_layer_full_replacement_interaction_k_200",
 ):
     results_path = f"{VALIDATION_BASE_PATH}/{training_method}"
 
@@ -148,6 +165,7 @@ for training_method in (
             TOKENIZER_BATCH_SIZE,
             TRAINING_BATCH_SIZE,
             NUM_THRESHOLD_TUNING_TOKENS,
+            offload_after_training=False,
         )
         new_thresholds = {
             layer: tuple(a.threshold.item() for a in sae.encoder.activation)
@@ -164,6 +182,7 @@ for training_method in (
             TRAINING_BATCH_SIZE,
             NUM_VALIDATION_TOKENS,
             start_layer=start_layer,
+            offload=False,
         )
         save_validations({start_layer: validations}, results_path)
         with open(f"{results_path}/{start_layer}.activation_thresholds", "wb") as f:
@@ -182,3 +201,24 @@ for training_method in (
                 )
             ).item(),
         )
+        if start_layer == 0:
+            with torch.autocast(
+                device_type="cuda" if model.device.type == "cuda" else "cpu",
+                dtype=torch.bfloat16,
+            ):
+                generate_with_replacement(
+                    model,
+                    tokenizer,
+                    "The capital of France,",
+                    saes,
+                    offload=False,
+                )
+            mmlu = MMLUBenchmark(
+                tokenizer,
+                model.context_length,
+                tasks=MMLU_TASKS,
+            )
+            mmlu.evaluate(
+                model=BenchmarkModel(make_replacement_model(model, saes), tokenizer),
+                batch_size=MMLU_BATCH_SIZE,
+            )

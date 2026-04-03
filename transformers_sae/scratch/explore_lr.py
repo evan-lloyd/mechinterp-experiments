@@ -1,7 +1,3 @@
-import os
-
-os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
-
 from math import sqrt
 
 import numpy as np
@@ -12,7 +8,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers_sae.ops import MemoryTrackingMode
 from transformers_sae.replacement_model import GemmaReplacement, make_replacement_model
 from transformers_sae.sae import SAE, make_sae_config
-from transformers_sae.training import TrainingConfig, TrainingMethod, train
+from transformers_sae.training import (
+    TrainingConfig,
+    TrainingMethod,
+    train,
+    tune_activation_thresholds,
+)
 from transformers_sae.validation import generate_with_replacement, run_validations
 
 # Tweak TRAINING_BATCH_SIZE for your hardware if necessary
@@ -68,7 +69,7 @@ print(mtm.memory_cur)
 
 TRAINING_CACHE_DIR = None
 VALIDATION_CACHE_DIR = None
-NUM_TRAINING_TOKENS = int(1e8)
+NUM_TRAINING_TOKENS = int(6e7)
 EVAL_INTERVAL = int(1e6)
 NUM_VALIDATION_TOKENS = int(1e6)
 # to match Gemma Scope
@@ -85,9 +86,9 @@ D_SAE_INTERACTION = int(
 INTERACTION_SAE_PARAMETERS = (
     D_SAE_INTERACTION**2 + 2 * D_SAE_INTERACTION * D_MODEL + D_SAE_INTERACTION + D_MODEL
 )
-TOPK = 200
+TOPK = 100
 TOKENIZER_BATCH_SIZE = 256
-FINETUNE_FRACTION = 0.1
+FINETUNE_FRACTION = 1.0 / 6.0
 
 empty_saes = {
     layer: SAE(
@@ -117,8 +118,8 @@ training_config = TrainingConfig(
     training_batch_size=TRAINING_BATCH_SIZE,
     num_train_tokens=NUM_TRAINING_TOKENS,
     eval_interval=EVAL_INTERVAL,
+    # train_layers=list(range(10, model.num_layers)),
     train_layers=list(range(0, model.num_layers)),
-    # train_layers=list(range(model.num_layers - 2, model.num_layers)),
     betas=(
         0.0,
         0.999,
@@ -129,7 +130,7 @@ training_config = TrainingConfig(
     downstream_reconstruction_weight=1.0,
     reconstruction_weight=1.0,
     balance_reconstruction_losses=True,
-    method=TrainingMethod.full_replacement,
+    method=TrainingMethod.next_layer,
     finetune_fraction=FINETUNE_FRACTION,
 )
 
@@ -150,9 +151,21 @@ training_results = train(
             int(1e7),
         )
     ),
-    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_full_replacement_interaction/",
-    force_retrain=False,
+    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_interaction_explore_lr/",
     fine_tune_source_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_interaction/",
+    force_retrain=False,
+    offload_after_training=False,
+)
+
+tune_activation_thresholds(
+    model,
+    tokenizer,
+    training_results.final_saes,
+    training_dataset,
+    TOKENIZER_BATCH_SIZE,
+    TRAINING_BATCH_SIZE,
+    int(1e6),
+    offload_after_training=False,
 )
 
 validations = run_validations(
@@ -165,6 +178,7 @@ validations = run_validations(
     NUM_VALIDATION_TOKENS,
     cache_dir=VALIDATION_CACHE_DIR,
     start_layer=training_config.train_layers[0],
+    offload=False,
 )
 
 print(
