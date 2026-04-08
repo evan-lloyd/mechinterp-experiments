@@ -73,8 +73,8 @@ VALIDATION_BASE_PATH = "/workspace/sae_checkpoints/validations/gemma_2_2b"
 CHECKPOINT_BASE_PATH = "/workspace/sae_checkpoints/gemma_2_2b"
 TOKENIZER_BATCH_SIZE = 256
 NUM_VALIDATION_TOKENS = int(1e6)
-NUM_THRESHOLD_TUNING_TOKENS = int(1e6)
-NUM_TRAINING_TOKENS = int(1e8)
+NUM_THRESHOLD_TUNING_TOKENS = int(1e5)
+NUM_TRAINING_TOKENS = int(5e7)
 
 
 def load_saes(checkpoint_dir: str):
@@ -89,6 +89,7 @@ def load_saes(checkpoint_dir: str):
                 return layer, None
             sae = cp.sae
             sae.eval()
+            sae.train_activations()
             sae.onload()
             print(f"Loaded checkpoint for layer {layer}")
             return layer, sae
@@ -128,7 +129,8 @@ for training_method in (
     # "next_layer",
     # "next_layer_interaction",
     # "next_layer_finetuned",
-    "next_layer_full_replacement_interaction_k_200",
+    # "next_layer_lista",
+    "next_layer_finetuned_lista",
 ):
     results_path = f"{VALIDATION_BASE_PATH}/{training_method}"
 
@@ -143,13 +145,14 @@ for training_method in (
         continue
 
     saes = load_saes(f"{CHECKPOINT_BASE_PATH}/{training_method}")
-    assert len(saes) == model.num_layers, (
-        f"Missing SAEs for {training_method}, only had {set(saes.keys())}"
-    )
+    # assert len(saes) == model.num_layers, (
+    #     f"Missing SAEs for {training_method}, only had {set(saes.keys())}"
+    # )
     orig_thresholds = {
         layer: sae.activation_thresholds() for layer, sae in saes.items()
     }
-    for start_layer in set(saes.keys()) - existing_validations:
+    for start_layer in (12,):
+    # for start_layer in sorted(set(saes.keys()) - existing_validations, reverse=False):
         print(
             f"Running validations for {training_method} replacement starting at {start_layer}"
         )
@@ -157,21 +160,21 @@ for training_method in (
             for i, a in enumerate(sae.encoder.activation):
                 a.threshold.fill_(orig_thresholds[layer][i])
 
-        tune_activation_thresholds(
-            model,
-            tokenizer,
-            {layer: sae for layer, sae in saes.items() if layer >= start_layer},
-            training_dataset,
-            TOKENIZER_BATCH_SIZE,
-            TRAINING_BATCH_SIZE,
-            NUM_THRESHOLD_TUNING_TOKENS,
-            offload_after_training=False,
-        )
-        new_thresholds = {
-            layer: tuple(a.threshold.item() for a in sae.encoder.activation)
-            for layer, sae in saes.items()
-            if layer >= start_layer
-        }
+        # tune_activation_thresholds(
+        #     model,
+        #     tokenizer,
+        #     {layer: sae for layer, sae in saes.items() if layer >= start_layer},
+        #     training_dataset,
+        #     TOKENIZER_BATCH_SIZE,
+        #     TRAINING_BATCH_SIZE,
+        #     NUM_THRESHOLD_TUNING_TOKENS,
+        #     offload_after_training=False,
+        # )
+        # new_thresholds = {
+        #     layer: tuple(a.threshold.item() for a in sae.encoder.activation)
+        #     for layer, sae in saes.items()
+        #     if layer >= start_layer
+        # }
 
         validations = run_validations(
             model,
@@ -184,41 +187,46 @@ for training_method in (
             start_layer=start_layer,
             offload=False,
         )
-        save_validations({start_layer: validations}, results_path)
-        with open(f"{results_path}/{start_layer}.activation_thresholds", "wb") as f:
-            cloudpickle.dump(new_thresholds, f)
+        # save_validations({start_layer: validations}, results_path)
+        # with open(f"{results_path}/{start_layer}.activation_thresholds", "wb") as f:
+        #     cloudpickle.dump(new_thresholds, f)
 
         print(
-            f"{training_method} start layer {start_layer} KL: ",
-            np.exp(
-                np.mean(
-                    np.log(
-                        np.clip(
-                            validations.layer_results[model.num_layers].kl,
-                            min=1e-9,
-                        )
-                    )
-                )
-            ).item(),
+            f"{training_method} start layer {start_layer} metrics",
         )
-        if start_layer == 0:
-            with torch.autocast(
-                device_type="cuda" if model.device.type == "cuda" else "cpu",
-                dtype=torch.bfloat16,
-            ):
-                generate_with_replacement(
-                    model,
-                    tokenizer,
-                    "The capital of France,",
-                    saes,
-                    offload=False,
-                )
-            mmlu = MMLUBenchmark(
-                tokenizer,
-                model.context_length,
-                tasks=MMLU_TASKS,
-            )
-            mmlu.evaluate(
-                model=BenchmarkModel(make_replacement_model(model, saes), tokenizer),
-                batch_size=MMLU_BATCH_SIZE,
-            )
+        print(
+            f"mean rre={ {k: np.mean(v.rre).item() for k, v in validations.layer_results.items() if v.rre is not None} }"
+        )
+        print(
+            f"mean l0={ {k: np.mean(v.l0).item() for k, v in validations.layer_results.items() if v.l0 is not None} }"
+        )
+        print(
+            f"geom mean kl={ {k: np.exp(np.mean(np.log(np.clip(v.kl, min=1e-9)))).item() for k, v in validations.layer_results.items() if v.kl is not None} }"
+        )
+        print(
+            f"arith mean kl={ {k: np.mean(v.kl).item() for k, v in validations.layer_results.items() if v.kl is not None} }"
+        )
+        print(
+            f"live features={ {k: sum(v.live_features) / saes[k].config.d_sae for k, v in validations.layer_results.items() if v.live_features is not None} }"
+        )
+# if start_layer == 0:
+#     with torch.autocast(
+#         device_type="cuda" if model.device.type == "cuda" else "cpu",
+#         dtype=torch.bfloat16,
+#     ):
+#         generate_with_replacement(
+#             model,
+#             tokenizer,
+#             "The capital of France,",
+#             saes,
+#             offload=False,
+#         )
+#     mmlu = MMLUBenchmark(
+#         tokenizer,
+#         model.context_length,
+#         tasks=MMLU_TASKS,
+#     )
+#     mmlu.evaluate(
+#         model=BenchmarkModel(make_replacement_model(model, saes), tokenizer),
+#         batch_size=MMLU_BATCH_SIZE,
+#     )

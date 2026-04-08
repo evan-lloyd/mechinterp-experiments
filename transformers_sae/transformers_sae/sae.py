@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Mapping, Any
 
 import torch
 
@@ -9,8 +9,8 @@ from .encoder import (  # noqa: F401
     Encoder,
     EncoderConfig,
     EncoderKind,
-    InteractionEncoder,
-    InteractionEncoderConfig,
+    LISTA,
+    LISTAConfig,
     ReluActivationFunctionConfig,
     TopKActivationFunctionConfig,
 )
@@ -37,6 +37,7 @@ def make_sae_config(
     encoder_kind: EncoderKind,
     top_k: int | None = None,
     with_interaction: bool = False,
+    n_iterations: int | None = None,
 ) -> SAEConfig:
     if encoder_kind == "relu":
         activation_config = ReluActivationFunctionConfig()
@@ -52,12 +53,17 @@ def make_sae_config(
     device = torch.device(device)
 
     if with_interaction:
-        encoder_cfg_cls = InteractionEncoderConfig
+        encoder_cfg_cls = LISTAConfig
     else:
         encoder_cfg_cls = EncoderConfig
     encoder_config = encoder_cfg_cls(
         d_model, d_sae, device, train_dtype, inference_dtype, activation_config
     )
+
+    if with_interaction and n_iterations is not None:
+        assert isinstance(encoder_config, LISTAConfig)
+        encoder_config.n_iterations = n_iterations
+
     decoder_config = DecoderConfig(d_model, d_sae, device, train_dtype, inference_dtype)
     return SAEConfig(
         d_model,
@@ -93,8 +99,8 @@ class SAE(torch.nn.Module):
     ):
         super().__init__()
         self.config = config
-        if isinstance(config.encoder, InteractionEncoderConfig):
-            self.encoder = InteractionEncoder(config.encoder)
+        if isinstance(config.encoder, LISTAConfig):
+            self.encoder = LISTA(config.encoder)
         else:
             self.encoder = Encoder(config.encoder)
         self.decoder = Decoder(config.decoder)
@@ -115,6 +121,8 @@ class SAE(torch.nn.Module):
         else:
             self.decoder.init_weights(init_from.decoder, to_device)
             self.encoder.init_weights(init_from.encoder, to_device)
+            if isinstance(self.encoder, LISTA):
+                object.__setattr__(self.encoder, "decoder", self.decoder)
             self._device_tracker = torch.nn.Buffer(
                 torch.empty((0,), device=to_device or self.config.device)
             )
@@ -150,7 +158,7 @@ class SAE(torch.nn.Module):
         if self._device_tracker.device != torch.device("meta"):
             self.to(self.config.device)
 
-    def train_encoder(self):
+    def train_activations(self):
         for a in self.encoder.activation:
             a.train()
 
@@ -176,6 +184,14 @@ class SAE(torch.nn.Module):
             "token_mask": kwargs.pop("token_mask"),
             "pass_through_positions": kwargs.pop("pass_through_positions"),
         }
+
+    def load_state_dict(
+        self, state_dict: Mapping[str, Any], strict: bool = True, assign: bool = False
+    ):
+        super().load_state_dict(state_dict, strict, assign)
+        # TODO: Refactor. Maybe every encoder should have a reference to the decoder?
+        if isinstance(self.encoder, LISTA):
+            object.__setattr__(self.encoder, "decoder", self.decoder)
 
     @_check_device
     def forward(

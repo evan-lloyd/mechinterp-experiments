@@ -26,7 +26,7 @@ from accelerate import Accelerator, DeepSpeedPlugin
 
 from .activation_cache import load_cache
 from .activation_data import TrainingBatch, make_activation_batch, make_batch_for_evals
-from .encoder import InteractionEncoder
+from .encoder import LISTA
 from .multiline_progress import MultilineProgress
 from .ops import (
     find_checkpoint_after,
@@ -197,7 +197,7 @@ def make_optimizer(saes: Dict[int, SAE], layers: List[int], config: TrainingConf
             "params": [
                 param
                 for layer in layers
-                for param in saes[layer].decoder.linear.parameters()
+                for param in saes[layer].decoder.decoder_params()
                 if param.requires_grad
             ],
             "lr": config.decoder_lr or config.lr,
@@ -206,7 +206,7 @@ def make_optimizer(saes: Dict[int, SAE], layers: List[int], config: TrainingConf
             "params": [
                 param
                 for layer in layers
-                for param in saes[layer].encoder.linear.parameters()
+                for param in saes[layer].encoder.encoder_params()
                 if param.requires_grad
             ],
             "lr": config.encoder_lr or config.lr,
@@ -214,17 +214,15 @@ def make_optimizer(saes: Dict[int, SAE], layers: List[int], config: TrainingConf
     ]
 
     if any(
-        isinstance(s.encoder, InteractionEncoder)
-        for layer, s in saes.items()
-        if layer in layers
+        isinstance(s.encoder, LISTA) for layer, s in saes.items() if layer in layers
     ):
         param_groups.append(
             {
                 "params": [
-                    saes[layer].encoder.interaction
+                    param
                     for layer in layers
-                    if isinstance(saes[layer].encoder, InteractionEncoder)
-                    and saes[layer].encoder.interaction.requires_grad
+                    for param in saes[layer].encoder.interaction_params()
+                    if isinstance(saes[layer].encoder, LISTA) and param.requires_grad
                 ],
                 "lr": config.interaction_lr or config.lr,
             }
@@ -246,7 +244,7 @@ def tune_activation_thresholds(
     inference_batch_size: int,
     num_tokens: int,
     offload_after_training: bool = True,
-    lr_schedule: Optional[Callable[[float], float]] = None,
+    lr_schedule: Optional[Callable[[float, int], float]] = None,
 ) -> None:
     """For BatchTopK SAEs, do a special training run that adjusts only the thresholds used
     in the BatchTopK activation function. This is mandatory for replacement models, since
@@ -261,7 +259,8 @@ def tune_activation_thresholds(
         replacement_model = make_replacement_model(model, saes)
         for sae in saes.values():
             sae.onload()
-            sae.train_encoder()
+            sae.eval()
+            sae.train_activations()
 
         progress = MultilineProgress(
             total=num_tokens,
@@ -286,9 +285,9 @@ def tune_activation_thresholds(
             # Run the model until just prior to outputting logits, since this will be enough
             # to get activations to flow through each SAE.
             if lr_schedule is not None:
-                for sae in saes.values():
+                for layer, sae in saes.items():
                     sae.set_activation_threshold_lr(
-                        lr_schedule(min(num_used_tokens / num_tokens, 1.0))
+                        lr_schedule(min(num_used_tokens / num_tokens, 1.0), layer)
                     )
             make_activation_batch(
                 replacement_model,

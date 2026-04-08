@@ -1,6 +1,6 @@
 import torch
 from dataclasses import dataclass
-from typing import Union
+from typing import Union, Iterator
 
 
 @dataclass
@@ -48,6 +48,9 @@ class Decoder(torch.nn.Module):
 
         else:
             raise ValueError(f"Invalid initialization source: {type(init_from)}")
+
+    def decoder_params(self) -> Iterator[torch.nn.Parameter]:
+        yield from self.linear.parameters()
 
     @property
     def dtype(self) -> torch.dtype:
