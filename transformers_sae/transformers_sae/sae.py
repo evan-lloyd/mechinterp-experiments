@@ -13,6 +13,7 @@ from .encoder import (  # noqa: F401
     LISTAConfig,
     ReluActivationFunctionConfig,
     TopKActivationFunctionConfig,
+    FirmTopKActivationFunctionConfig,
 )
 
 
@@ -38,6 +39,8 @@ def make_sae_config(
     top_k: int | None = None,
     with_interaction: bool = False,
     n_iterations: int | None = None,
+    k_soft: int | None = None,
+    k_hard: int | None = None,
 ) -> SAEConfig:
     if encoder_kind == "relu":
         activation_config = ReluActivationFunctionConfig()
@@ -47,6 +50,11 @@ def make_sae_config(
     elif encoder_kind == "batch_topk":
         assert top_k is not None, "Must specify top_k for BatchTopK SAE"
         activation_config = BatchTopKActivationFunctionConfig(top_k)
+    elif encoder_kind == "firm_topk":
+        assert k_soft is not None and k_hard is not None, (
+            "Must specify k_soft and k_hard for FirmTopK SAE"
+        )
+        activation_config = FirmTopKActivationFunctionConfig(k_soft, k_hard)
     else:
         raise ValueError(f"Unknown encoder_kind {encoder_kind}")
 
@@ -167,7 +175,8 @@ class SAE(torch.nn.Module):
 
     def set_activation_threshold_lr(self, lr: float):
         for a in self.encoder.activation:
-            a.threshold_lr = lr
+            if hasattr(a.config, "threshold_lr"):
+                a.config.threshold_lr = lr
 
     @_check_device
     def decode(self, x: torch.Tensor, should_cast: bool = True):

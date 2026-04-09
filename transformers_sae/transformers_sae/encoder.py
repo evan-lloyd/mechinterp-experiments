@@ -25,6 +25,7 @@ class TopKActivationFunctionConfig(ActivationFunctionConfig):
 @dataclass
 class BatchTopKActivationFunctionConfig(ActivationFunctionConfig):
     k: int
+    # TODO: this should live in TrainingConfig
     # From SAELens
     threshold_lr: float = 0.01
 
@@ -40,8 +41,8 @@ class FirmTopKActivationFunctionConfig(ActivationFunctionConfig):
     threshold_lr: float = 0.01
 
     def __post_init__(self):
-        assert self.k_hard < self.k_soft, (
-            "k for hard threshold must be strictly smaller than k for soft threshold"
+        assert self.k_hard <= self.k_soft, (
+            "k for hard threshold must be smaller than k for soft threshold"
         )
         self.kind = "firm_topk"
 
@@ -186,17 +187,24 @@ class FirmTopKActivationFunction(ActivationFunction):
             # TODO: probably this should happen automatically somewhere upstream?
             with torch.no_grad():
                 x[~token_mask.bool()] = torch.finfo(x.dtype).min
+
             num_tokens = x.shape[0] * x.shape[1]
+            # num_tokens = pos_x.shape[0] * pos_x.shape[1]
+            num_values = (x > 0).to(torch.int32).sum().item()
+            offset_soft = min(num_values, self.config.k_soft * num_tokens)
+            offset_hard = min(num_values, self.config.k_hard * num_tokens)
             topk = torch.topk(
                 x.view(-1),
-                k=self.config.k_soft * num_tokens,
+                k=offset_soft,
                 dim=-1,
                 sorted=True,
             )
             threshold = torch.stack(
                 (
-                    topk.values[self.config.k_soft * num_tokens - 1],
-                    topk.values[self.config.k_hard * num_tokens - 1],
+                    # torch.zeros((1,), device=x.device, dtype=x.dtype)[0],
+                    topk.values[offset_soft - 1],
+                    # topk.values[self.config.k_hard * num_tokens - 1] / 2,
+                    topk.values[offset_hard - 1],
                 )
             )
             lr = self.config.threshold_lr
@@ -215,8 +223,17 @@ class FirmTopKActivationFunction(ActivationFunction):
         # else:
         #   y = 0
         # TODO: performance check different variants, seems like there's a lot of potential ways to vectorize
-        soft_x = (x - threshold[0]) * (x > threshold[0])
-        hard_x = (soft_x + threshold[0]) * (x > threshold[1])
+        soft_x = (x - threshold[0]).relu()
+        hard_x = threshold[0].to(x.dtype) * (x > threshold[1])
+        # abs_x = x.abs()
+        # sign_x = x.sign()
+        # soft_x = (
+        #     (abs_x - threshold[0])
+        #     * (abs_x >= threshold[0])
+        #     * (abs_x < threshold[1])
+        #     * sign_x
+        # )
+        # hard_x = x * (abs_x >= threshold[1])
         return soft_x + hard_x
 
 
@@ -262,10 +279,13 @@ class Encoder(torch.nn.Module):
     ) -> torch.nn.Module:
         if isinstance(activation_config, ReluActivationFunctionConfig):
             return ReluActivationFunction(activation_config, device)
-        if isinstance(activation_config, TopKActivationFunctionConfig):
+        elif isinstance(activation_config, TopKActivationFunctionConfig):
             return TopKActivationFunction(activation_config, device)
-        if isinstance(activation_config, BatchTopKActivationFunctionConfig):
+        elif isinstance(activation_config, BatchTopKActivationFunctionConfig):
             return BatchTopKActivationFunction(activation_config, device)
+        elif isinstance(activation_config, FirmTopKActivationFunctionConfig):
+            return FirmTopKActivationFunction(activation_config, device)
+
         raise NotImplementedError(f'"{activation_config.kind}" not implemented')
 
     def init_weights(
@@ -346,7 +366,7 @@ class Encoder(torch.nn.Module):
 class LISTA(Encoder):
     config: LISTAConfig
     decoder: "Decoder"
-    weight: torch.nn.ParameterList
+    layers: torch.nn.ModuleList
     activation: torch.nn.ModuleList
 
     def __init__(
@@ -356,25 +376,45 @@ class LISTA(Encoder):
         torch.nn.Module.__init__(self)
         self.config = config
 
-        self.weight = torch.nn.ParameterList(
+        self.layers = torch.nn.ModuleList(
             [
-                torch.nn.Parameter(
-                    torch.empty(
-                        (config.d_model, config.d_sae),
-                        device="meta",
-                        dtype=config.train_dtype,
-                    )
+                torch.nn.Linear(
+                    config.d_model,
+                    config.d_sae,
+                    device="meta",
+                    dtype=self.config.train_dtype,
                 )
                 for _ in range(config.n_iterations)
             ]
         )
+        # self.weight = torch.nn.ParameterList(
+        #     [
+        #         torch.nn.Parameter(
+        #             torch.empty(
+        #                 (config.d_model, config.d_sae),
+        #                 device="meta",
+        #                 dtype=config.train_dtype,
+        #             )
+        #         )
+        #         for _ in range(config.n_iterations)
+        #     ]
+        # )
         # TODO: make this configurable, instead of being the same at each step?
         self.activation = torch.nn.ModuleList(
             [
-                self.activation_module_from_config(
+                BatchTopKActivationFunction(
+                    BatchTopKActivationFunctionConfig(
+                        100,
+                        # config.activation_function.k_hard,
+                        config.activation_function.threshold_lr,
+                    ),
+                    config.device,
+                )
+                if i == config.n_iterations - 1
+                else self.activation_module_from_config(
                     config.activation_function, config.device
                 )
-                for _ in range(config.n_iterations)
+                for i in range(config.n_iterations)
             ]
         )
 
@@ -396,36 +436,74 @@ class LISTA(Encoder):
             submodule.init_weights()
 
         if isinstance(init_from, LISTA):
-            self.weight = torch.nn.ParameterList(
-                [
-                    torch.nn.Parameter(
-                        weight.to(to_device or self.config.device, copy=True)
-                        .detach()
-                        .contiguous()
-                    )
-                    for weight in init_from.weight
-                ]
-            )
+            for layer, other in zip(self.layers, init_from.layers):
+                layer.weight = torch.nn.Parameter(
+                    other.weight.to(to_device or self.config.device, copy=True)
+                    .detach()
+                    .contiguous()
+                )
+                layer.bias = torch.nn.Parameter(
+                    other.bias.to(to_device or self.config.device, copy=True)
+                    .detach()
+                    .contiguous()
+                )
+            # self.weight = torch.nn.ParameterList(
+            #     [
+            #         torch.nn.Parameter(
+            #             weight.to(to_device or self.config.device, copy=True)
+            #             .detach()
+            #             .contiguous()
+            #         )
+            #         for weight in init_from.weight
+            #     ]
+            # )
         elif isinstance(init_from, Decoder):
             # Avoid adding to module hierarchy; we want a simple reference to it
             object.__setattr__(self, "decoder", init_from)
-            for i, weight in enumerate(self.weight):
-                if i == 0:
-                    self.weight[i] = torch.nn.Parameter(
-                        init_from.linear.weight.to(
-                            to_device or self.config.device, copy=True
+            self.layers[0].weight = torch.nn.Parameter(
+                init_from.linear.weight.T.to(to_device or self.config.device, copy=True)
+                .detach()
+                .contiguous()
+            )
+            self.layers[0].bias = torch.nn.Parameter(
+                torch.zeros(
+                    self.config.d_sae,
+                    device=to_device or self.config.device,
+                    dtype=self.config.train_dtype,
+                )
+            )
+            for layer in self.layers[1:]:
+                layer.weight = torch.nn.Parameter(
+                    torch.nn.init.kaiming_normal_(
+                        torch.empty_like(
+                            layer.weight, device=to_device or self.config.device
                         )
-                        .detach()
-                        .contiguous()
                     )
-                else:
-                    self.weight[i] = torch.nn.Parameter(
-                        torch.nn.init.kaiming_normal_(
-                            torch.empty_like(
-                                weight, device=to_device or self.config.device
-                            )
-                        )
+                )
+                layer.bias = torch.nn.Parameter(
+                    torch.zeros(
+                        self.config.d_sae,
+                        device=to_device or self.config.device,
+                        dtype=self.config.train_dtype,
                     )
+                )
+            # for i, weight in enumerate(self.weight):
+            #     if i == 0:
+            #         self.weight[i] = torch.nn.Parameter(
+            #             init_from.linear.weight.to(
+            #                 to_device or self.config.device, copy=True
+            #             )
+            #             .detach()
+            #             .contiguous()
+            #         )
+            #     else:
+            #         self.weight[i] = torch.nn.Parameter(
+            #             torch.nn.init.kaiming_normal_(
+            #                 torch.empty_like(
+            #                     weight, device=to_device or self.config.device
+            #                 )
+            #             )
+            #         )
         else:
             raise ValueError(f"Invalid initialization source: {type(init_from)}")
 
@@ -433,16 +511,17 @@ class LISTA(Encoder):
         torch.nn.Module.train(self, mode)
 
         to_dtype = self.config.train_dtype if mode else self.config.inference_dtype
-        self.weight = torch.nn.ParameterList(
-            torch.nn.Parameter(weight.to(to_dtype)) for weight in self.weight
-        )
+        self.layers.to(to_dtype)
+        # self.weight = torch.nn.ParameterList(
+        #     torch.nn.Parameter(weight.to(to_dtype)) for weight in self.weight
+        # )
         self.requires_grad_(mode)
 
     def encoder_params(self) -> Iterator[torch.nn.Parameter]:
         yield from ()
 
     def interaction_params(self) -> Iterator[torch.nn.Parameter]:
-        yield from self.weight.parameters()
+        yield from self.layers.parameters()
 
     def forward(
         self, x: torch.Tensor, token_mask: torch.Tensor, should_cast: bool = True
@@ -451,15 +530,13 @@ class LISTA(Encoder):
         if should_cast:
             x = x.to(self.dtype)
 
-        # Chen et al 2018, though the initialization here is a bit of an ad-lib on my part (paper
-        # uses 0)
-        # features = self.activation[0](x @ self.decoder.linear.weight, token_mask)
+        # Chen et al 2018
         features = torch.zeros(
             (x.shape[0], x.shape[1], self.config.d_sae), device=x.device, dtype=x.dtype
         )
         for i in range(self.config.n_iterations):
             features = self.activation[i](
-                features + (x - self.decoder(features)) @ self.weight[i],
+                features + self.layers[i]((x - self.decoder(features))),
                 token_mask,
             )
 

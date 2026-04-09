@@ -75,6 +75,7 @@ class TrainingConfig:
     decoder_lr: Mapping[int, float | None] = None
     encoder_lr: Mapping[int, float | None] = None
     interaction_lr: Mapping[int, float | None] = None
+    threshold_lr: Mapping[int, float | None] = None
     # Default schedule is constant
     lr_schedule: Callable[[float], float] = lambda frac_trained: 1.0
     balance_reconstruction_losses: bool | Mapping[int, bool] = True
@@ -91,6 +92,7 @@ class TrainingConfig:
             "decoder_lr",
             "encoder_lr",
             "interaction_lr",
+            "threshold_lr",
         ):
             val = getattr(self, attr)
             if not isinstance(val, Mapping):
@@ -245,6 +247,7 @@ def tune_activation_thresholds(
     num_tokens: int,
     offload_after_training: bool = True,
     lr_schedule: Optional[Callable[[float, int], float]] = None,
+    threshold_lr: float = 0.01,
 ) -> None:
     """For BatchTopK SAEs, do a special training run that adjusts only the thresholds used
     in the BatchTopK activation function. This is mandatory for replacement models, since
@@ -261,6 +264,7 @@ def tune_activation_thresholds(
             sae.onload()
             sae.eval()
             sae.train_activations()
+            sae.set_activation_threshold_lr(threshold_lr)
 
         progress = MultilineProgress(
             total=num_tokens,
@@ -584,6 +588,8 @@ def train(
                 sae.init_weights(training_saes.get(layer + 1))
                 token_offset = 0
 
+            sae.set_activation_threshold_lr(config.threshold_lr[layer])
+
             if token_offset >= config.num_train_tokens:
                 continue
 
@@ -618,20 +624,6 @@ def train(
                 optimizer = make_optimizer(
                     training_saes, list(training_saes.keys()), config
                 )
-                # deepspeed_plugin = DeepSpeedPlugin(
-                #     zero_stage=2,
-                #     gradient_accumulation_steps=1,
-                #     offload_optimizer_device="cpu",
-                # )
-                # accelerator = Accelerator(
-                #     deepspeed_plugin=deepspeed_plugin,
-                #     device_placement=False,
-                # )
-                # AcceleratorState().deepspeed_plugin.deepspeed_config[
-                #     "train_micro_batch_size_per_gpu"
-                # ] = 1
-                # eval_model, optimizer = accelerator.prepare(eval_model, optimizer)
-                # backward_fn = accelerator.backward
             else:
                 # Keep SAEs used in the replacement model in train mode, so eg for BatchTopK
                 # we automatically retune the threshold based on now having an SAE at the previous layer.
