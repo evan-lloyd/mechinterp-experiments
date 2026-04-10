@@ -1,19 +1,19 @@
 from dataclasses import dataclass
-from typing import Optional, Mapping, Any
+from typing import Any, List, Mapping, Optional
+from itertools import repeat
 
 import torch
 
 from .decoder import Decoder, DecoderConfig
 from .encoder import (  # noqa: F401
+    LISTA,
     BatchTopKActivationFunctionConfig,
     Encoder,
     EncoderConfig,
     EncoderKind,
-    LISTA,
     LISTAConfig,
     ReluActivationFunctionConfig,
     TopKActivationFunctionConfig,
-    FirmTopKActivationFunctionConfig,
 )
 
 
@@ -35,42 +35,63 @@ def make_sae_config(
     device: str | torch.device,
     train_dtype: torch.dtype,
     inference_dtype: torch.dtype,
-    encoder_kind: EncoderKind,
-    top_k: int | None = None,
+    encoder_kind: EncoderKind | List[EncoderKind],
+    top_k: int | List[int] | None = None,
     with_interaction: bool = False,
     n_iterations: int | None = None,
-    k_soft: int | None = None,
-    k_hard: int | None = None,
 ) -> SAEConfig:
-    if encoder_kind == "relu":
-        activation_config = ReluActivationFunctionConfig()
-    elif encoder_kind == "topk":
-        assert top_k is not None, "Must specify top_k for TopK SAE"
-        activation_config = TopKActivationFunctionConfig(top_k)
-    elif encoder_kind == "batch_topk":
-        assert top_k is not None, "Must specify top_k for BatchTopK SAE"
-        activation_config = BatchTopKActivationFunctionConfig(top_k)
-    elif encoder_kind == "firm_topk":
-        assert k_soft is not None and k_hard is not None, (
-            "Must specify k_soft and k_hard for FirmTopK SAE"
+    if isinstance(encoder_kind, list):
+        assert with_interaction, (
+            "Must use with_interaction if specifying multiple encoder configurations"
         )
-        activation_config = FirmTopKActivationFunctionConfig(k_soft, k_hard)
     else:
-        raise ValueError(f"Unknown encoder_kind {encoder_kind}")
+        if isinstance(top_k, list):
+            encoder_kind = [encoder_kind] * len(top_k)
+        else:
+            encoder_kind = [encoder_kind]
+
+    if isinstance(top_k, list):
+        assert with_interaction and len(encoder_kind) == len(top_k), (
+            "Must use with_interaction if specifying multiple encoder configurations"
+        )
+        top_k_value = top_k.__iter__()
+    else:
+        top_k_value = repeat(top_k).__iter__()
+    activation_config = []
+    for ek in encoder_kind:
+        if ek == "relu":
+            activation_config.append(ReluActivationFunctionConfig())
+        elif ek == "topk":
+            assert top_k is not None, "Must specify top_k for TopK SAE"
+            activation_config.append(TopKActivationFunctionConfig(next(top_k_value)))
+        elif ek == "batch_topk":
+            assert top_k is not None, "Must specify top_k for BatchTopK SAE"
+            activation_config.append(
+                BatchTopKActivationFunctionConfig(next(top_k_value))
+            )
+        else:
+            raise ValueError(f"Unknown encoder_kind {ek}")
 
     device = torch.device(device)
 
-    if with_interaction:
-        encoder_cfg_cls = LISTAConfig
-    else:
-        encoder_cfg_cls = EncoderConfig
-    encoder_config = encoder_cfg_cls(
-        d_model, d_sae, device, train_dtype, inference_dtype, activation_config
+    encoder_class_kwargs = dict(
+        d_model=d_model,
+        d_sae=d_sae,
+        device=device,
+        train_dtype=train_dtype,
+        inference_dtype=inference_dtype,
     )
+    if with_interaction:
+        encoder_cfg_class = LISTAConfig
+        encoder_class_kwargs["activation_function"] = activation_config[0]
+        if len(activation_config) > 1:
+            encoder_class_kwargs["per_layer_activation_functions"] = activation_config
+        encoder_class_kwargs["n_iterations"] = len(top_k) if isinstance(top_k, list) else n_iterations
+    else:
+        encoder_cfg_class = EncoderConfig
+        encoder_class_kwargs["activation_function"] = activation_config[0]
+    encoder_config = encoder_cfg_class(**encoder_class_kwargs)
 
-    if with_interaction and n_iterations is not None:
-        assert isinstance(encoder_config, LISTAConfig)
-        encoder_config.n_iterations = n_iterations
 
     decoder_config = DecoderConfig(d_model, d_sae, device, train_dtype, inference_dtype)
     return SAEConfig(

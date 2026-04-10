@@ -1,10 +1,10 @@
 from __future__ import annotations
-from accelerate.state import AcceleratorState
 
 from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import (
+    Any,
     Callable,
     Dict,
     ItemsView,
@@ -13,16 +13,17 @@ from typing import (
     List,
     Mapping,
     Optional,
+    ParamSpec,
     Tuple,
+    Unpack,
     ValuesView,
-    Any,
+    Protocol,
 )
 
 import numpy as np
 import torch
 from datasets import IterableDataset
 from transformers import AutoTokenizer
-from accelerate import Accelerator, DeepSpeedPlugin
 
 from .activation_cache import load_cache
 from .activation_data import TrainingBatch, make_activation_batch, make_batch_for_evals
@@ -61,6 +62,10 @@ class TrainingMethod(Enum):
     full_replacement = "Full Replacement"
 
 
+class LRSchedule(Protocol):
+    def __call__(self, frac_trained: float, **kwargs) -> float: ...
+
+
 @dataclass(kw_only=True)
 class TrainingConfig:
     num_train_tokens: int
@@ -77,7 +82,7 @@ class TrainingConfig:
     interaction_lr: Mapping[int, float | None] = None
     threshold_lr: Mapping[int, float | None] = None
     # Default schedule is constant
-    lr_schedule: Callable[[float], float] = lambda frac_trained: 1.0
+    lr_schedule: LRSchedule = lambda frac_trained, **kwargs: 1.0
     balance_reconstruction_losses: bool | Mapping[int, bool] = True
     finetune_fraction: Optional[float] = None
     method: TrainingMethod
@@ -203,6 +208,7 @@ def make_optimizer(saes: Dict[int, SAE], layers: List[int], config: TrainingConf
                 if param.requires_grad
             ],
             "lr": config.decoder_lr or config.lr,
+            "name": "decoder",
         },
         {
             "params": [
@@ -212,22 +218,24 @@ def make_optimizer(saes: Dict[int, SAE], layers: List[int], config: TrainingConf
                 if param.requires_grad
             ],
             "lr": config.encoder_lr or config.lr,
+            "name": "encoder",
         },
     ]
 
     if any(
         isinstance(s.encoder, LISTA) for layer, s in saes.items() if layer in layers
     ):
-        param_groups.append(
-            {
-                "params": [
-                    param
-                    for layer in layers
-                    for param in saes[layer].encoder.interaction_params()
-                    if isinstance(saes[layer].encoder, LISTA) and param.requires_grad
-                ],
-                "lr": config.interaction_lr or config.lr,
-            }
+        param_groups.extend(
+            [
+                {
+                    "params": [param],
+                    "lr": config.interaction_lr or config.lr,
+                    "name": pg_name,
+                }
+                for layer in layers
+                for pg_name, param in saes[layer].encoder.interaction_params()
+                if isinstance(saes[layer].encoder, LISTA) and param.requires_grad
+            ]
         )
 
     for pg in param_groups:
@@ -464,7 +472,8 @@ def training_loop(
                         1.0,
                     ),
                     0.0,
-                )
+                ),
+                pg_name=pg["name"],
             )
 
         progress.total = max(max_tokens - previous_trained_tokens, num_used_tokens)
@@ -480,13 +489,17 @@ def training_loop(
 
 
 def _train_evals(
-    base_model: ReplacementModel, eval_model: ReplacementModel, layers: List[int]
+    base_model: ReplacementModel,
+    eval_model: ReplacementModel,
+    layers: List[int],
+    calc_kl: bool,
 ) -> Callable[[TrainingBatch], Tuple[Dict[int, LayerEval], Dict[str, float]]]:
     wanted_layers = list(layers)
     target_layer = max(wanted_layers)
     if target_layer + 1 in eval_model.sae_layers:
         wanted_layers.append(target_layer + 1)
-    wanted_layers.append(base_model.num_layers)
+    if calc_kl:
+        wanted_layers.append(base_model.num_layers)
 
     @torch.autocast(
         device_type="cuda" if base_model.device.type == "cuda" else "cpu",
@@ -516,7 +529,15 @@ def _train_evals(
             )
             | {
                 "L0": result[target_layer].l0,
-                "kl": result[base_model.num_layers].kl,
+            }
+            | (
+                {
+                    "kl": result[base_model.num_layers].kl,
+                }
+                if calc_kl
+                else {}
+            )
+            | {
                 "live_features": result[target_layer].live_features,
             }
         )
@@ -536,6 +557,7 @@ def train(
     checkpoint_dir: Optional[str] = None,
     force_retrain: bool = False,
     fine_tune_source_dir: Optional[str] = None,
+    skip_kl_eval: bool = False,
 ) -> TrainingResult:
     try:
         model.eval()
@@ -651,6 +673,7 @@ def train(
                     list(range(model.num_layers))
                     if config.method is TrainingMethod.full_replacement
                     else [layer],
+                    calc_kl=not skip_kl_eval,
                 ),
                 tokenizer,
                 dataset,

@@ -77,7 +77,7 @@ empty_saes = {
                 train_dtype=torch.float32,
                 inference_dtype=torch.bfloat16,
                 encoder_kind="batch_topk",
-                top_k=TOPK,
+                top_k_values=TOPK,
             )
         )
         for layer in range(model.num_layers)
