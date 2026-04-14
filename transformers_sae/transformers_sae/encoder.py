@@ -319,14 +319,12 @@ class LISTA(Encoder):
         self.layers = torch.nn.ModuleList(
             [
                 torch.nn.Linear(
-                    config.d_model if i % 2 == 0 else config.d_sae,
+                    config.d_model,
                     config.d_sae,
-                    # config.d_sae if i % 2 == 0 else config.d_model,
                     device="meta",
                     dtype=self.config.train_dtype,
-                ) if i != 1 else torch.nn.Identity()
-                # for _ in range(config.n_iterations)
-                for i in range(2 * config.n_iterations)
+                )
+                for _ in range(config.n_iterations)
             ]
         )
         activation_configs = (
@@ -373,27 +371,26 @@ class LISTA(Encoder):
         elif isinstance(init_from, Decoder):
             # Avoid adding to module hierarchy; we want a simple reference to it
             object.__setattr__(self, "decoder", init_from)
-            for i, layer in enumerate(self.layers):
-                # First "interaction" step is no-op since we init features to 0
-                if i == 1:
-                    continue
-
-                if i == 0:
-                    layer.weight = torch.nn.Parameter(
-                        init_from.linear.weight.T.to(
-                            to_device or self.config.device, copy=True
-                        )
-                        .detach()
-                        .contiguous()
-                    )
-                else:
-                    layer.weight = torch.nn.Parameter(
-                        torch.nn.init.kaiming_normal_(
-                            torch.empty_like(
-                                layer.weight, device=to_device or self.config.device
-                            )
+            self.layers[0].weight = torch.nn.Parameter(
+                init_from.linear.weight.T.to(to_device or self.config.device, copy=True)
+                .detach()
+                .contiguous()
+            )
+            self.layers[0].bias = torch.nn.Parameter(
+                torch.zeros(
+                    self.config.d_sae,
+                    device=to_device or self.config.device,
+                    dtype=self.config.train_dtype,
+                )
+            )
+            for layer in self.layers[1:]:
+                layer.weight = torch.nn.Parameter(
+                    torch.nn.init.kaiming_normal_(
+                        torch.empty_like(
+                            layer.weight, device=to_device or self.config.device
                         )
                     )
+                )
                 layer.bias = torch.nn.Parameter(
                     torch.zeros(
                         self.config.d_sae,
@@ -424,21 +421,15 @@ class LISTA(Encoder):
         if should_cast:
             x = x.to(self.dtype)
 
-        # Chen et al (2018)
+        # Chen et al 2018
         features = torch.zeros(
             (x.shape[0], x.shape[1], self.config.d_sae), device=x.device, dtype=x.dtype
         )
         for i in range(self.config.n_iterations):
-            # print(self.layers[i * 2], self.layers[i * 2 + 1])
-            # print(x.shape, features.shape)
             features = self.activation[i](
-                self.layers[i * 2](x) + self.layers[i * 2 + 1](features),
-                token_mask
+                features + self.layers[i]((x - self.decoder(features))),
+                token_mask,
             )
-            # features = self.activation[i](
-            #     features + self.layers[i](x - self.decoder(features)),
-            #     token_mask,
-            # )
 
         if should_cast:
             features = features.to(out_dtype)
