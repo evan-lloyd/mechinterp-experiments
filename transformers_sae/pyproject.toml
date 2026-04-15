@@ -27,7 +27,7 @@ dependencies = [
 version = "0.0.0"
 
 [dependency-groups]
-dev = ["jurigged>=0.6.1", "line-profiler>=5.0.1", "ruff>=0.14.10"]
+dev = ["jurigged>=0.6.1", "line-profiler>=5.0.1", "ruff>=0.14.10", "huggingface_hub>=1.10.2"]
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
