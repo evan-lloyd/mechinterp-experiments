@@ -318,7 +318,6 @@ class Encoder(torch.nn.Module):
 class LISTA(Encoder):
     config: LISTAConfig
     decoder: "Decoder"
-    layers: torch.nn.ModuleList
     scale: torch.nn.Parameter
     activation: torch.nn.ModuleList
 
@@ -326,24 +325,12 @@ class LISTA(Encoder):
         self,
         config: LISTAConfig,
     ):
-        torch.nn.Module.__init__(self)
-        self.config = config
+        super().__init__(config)
 
         self.scale = torch.nn.Parameter(
             torch.empty(
                 (config.n_iterations,), device="meta", dtype=self.config.train_dtype
             )
-        )
-        self.layers = torch.nn.ModuleList(
-            [
-                torch.nn.Linear(
-                    config.d_model,
-                    config.d_sae,
-                    device="meta",
-                    dtype=self.config.train_dtype,
-                )
-                for _ in range(config.n_iterations)
-            ]
         )
         activation_configs = (
             config.per_layer_activation_functions
@@ -365,6 +352,8 @@ class LISTA(Encoder):
     ):
         from .decoder import Decoder
 
+        super().init_weights(init_from, to_device)
+
         if init_from is None:
             raise ValueError(
                 "Encoder weights must be initialized from existing encoder or decoder"
@@ -375,17 +364,6 @@ class LISTA(Encoder):
             submodule.init_weights()
 
         if isinstance(init_from, LISTA):
-            for layer, other in zip(self.layers, init_from.layers):
-                layer.weight = torch.nn.Parameter(
-                    other.weight.to(to_device or self.config.device, copy=True)
-                    .detach()
-                    .contiguous()
-                )
-                layer.bias = torch.nn.Parameter(
-                    other.bias.to(to_device or self.config.device, copy=True)
-                    .detach()
-                    .contiguous()
-                )
             self.scale = torch.nn.Parameter(
                 init_from.scale.to(to_device or self.config.device, copy=True)
             )
@@ -398,48 +376,16 @@ class LISTA(Encoder):
                 * 1.0
                 / self.config.n_iterations
             )
-            self.layers[0].weight = torch.nn.Parameter(
-                init_from.linear.weight.T.to(to_device or self.config.device, copy=True)
-                .detach()
-                .contiguous()
-            )
-            self.layers[0].bias = torch.nn.Parameter(
-                torch.zeros(
-                    self.config.d_sae,
-                    device=to_device or self.config.device,
-                    dtype=self.config.train_dtype,
-                )
-            )
-            for layer in self.layers[1:]:
-                layer.weight = torch.nn.Parameter(
-                    torch.nn.init.kaiming_normal_(
-                        torch.empty_like(
-                            layer.weight, device=to_device or self.config.device
-                        )
-                    )
-                )
-                layer.bias = torch.nn.Parameter(
-                    torch.zeros(
-                        self.config.d_sae,
-                        device=to_device or self.config.device,
-                        dtype=self.config.train_dtype,
-                    )
-                )
         else:
             raise ValueError(f"Invalid initialization source: {type(init_from)}")
 
     def train(self, mode: bool = True):
-        torch.nn.Module.train(self, mode)
+        super().train(mode)
 
-        to_dtype = self.config.train_dtype if mode else self.config.inference_dtype
-        self.layers.to(to_dtype)
-        self.requires_grad_(mode)
-
-    def encoder_params(self) -> Iterator[torch.nn.Parameter]:
-        yield from ()
+        self.scale.to(self.config.train_dtype if mode else self.config.inference_dtype)
 
     def interaction_params(self) -> Iterator[Tuple[str, torch.nn.Parameter]]:
-        yield from chain(self.layers.named_parameters(), [("scale", self.scale)])
+        yield from (("scale", self.scale),)
 
     def forward(
         self, x: torch.Tensor, token_mask: torch.Tensor, should_cast: bool = True
@@ -448,13 +394,13 @@ class LISTA(Encoder):
         if should_cast:
             x = x.to(self.dtype)
 
-        # Chen et al 2018
+        # Liu et al 2019 + Chen et al 2018
         features = torch.zeros(
             (x.shape[0], x.shape[1], self.config.d_sae), device=x.device, dtype=x.dtype
         )
         for i in range(self.config.n_iterations):
             features = self.activation[i](
-                features + self.scale[i] * self.layers[0]((x - self.decoder(features))),
+                features + self.scale[i] * self.linear((x - self.decoder(features))),
                 token_mask,
             )
 
@@ -464,14 +410,14 @@ class LISTA(Encoder):
 
 
 class InteractionLISTA(Encoder):
-    config: LISTAConfig
+    config: InteractionLISTAConfig
     decoder: "Decoder"
     layers: torch.nn.ModuleList
     activation: torch.nn.ModuleList
 
     def __init__(
         self,
-        config: LISTAConfig,
+        config: InteractionLISTAConfig,
     ):
         super().__init__(config)
 
@@ -525,11 +471,6 @@ class InteractionLISTA(Encoder):
                     .detach()
                     .contiguous()
                 )
-                # layer.bias = torch.nn.Parameter(
-                #     other.bias.to(to_device or self.config.device, copy=True)
-                #     .detach()
-                #     .contiguous()
-                # )
         elif isinstance(init_from, Decoder):
             # Avoid adding to module hierarchy; we want a simple reference to it
             object.__setattr__(self, "decoder", init_from)
@@ -541,13 +482,6 @@ class InteractionLISTA(Encoder):
                         dtype=self.config.train_dtype,
                     )
                 )
-                # layer.bias = torch.nn.Parameter(
-                #     torch.zeros(
-                #         self.config.d_sae,
-                #         device=to_device or self.config.device,
-                #         dtype=self.config.train_dtype,
-                #     )
-                # )
         else:
             raise ValueError(f"Invalid initialization source: {type(init_from)}")
 
