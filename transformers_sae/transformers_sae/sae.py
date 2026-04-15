@@ -202,7 +202,7 @@ class SAE(torch.nn.Module):
             a.train()
 
     def activation_thresholds(self):
-        return tuple(a.threshold.item() for a in self.encoder.activation)
+        return tuple(a.threshold.item() for a in self.encoder.activation if hasattr(a, "threshold"))
 
     def set_activation_threshold_lr(self, lr: float):
         for a in self.encoder.activation:

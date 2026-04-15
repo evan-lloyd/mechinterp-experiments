@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from itertools import chain
 from typing import (
     TYPE_CHECKING,
     Iterator,
@@ -318,6 +319,7 @@ class LISTA(Encoder):
     config: LISTAConfig
     decoder: "Decoder"
     layers: torch.nn.ModuleList
+    scale: torch.nn.Parameter
     activation: torch.nn.ModuleList
 
     def __init__(
@@ -327,6 +329,11 @@ class LISTA(Encoder):
         torch.nn.Module.__init__(self)
         self.config = config
 
+        self.scale = torch.nn.Parameter(
+            torch.empty(
+                (config.n_iterations,), device="meta", dtype=self.config.train_dtype
+            )
+        )
         self.layers = torch.nn.ModuleList(
             [
                 torch.nn.Linear(
@@ -379,9 +386,18 @@ class LISTA(Encoder):
                     .detach()
                     .contiguous()
                 )
+            self.scale = torch.nn.Parameter(
+                init_from.scale.to(to_device or self.config.device, copy=True)
+            )
         elif isinstance(init_from, Decoder):
             # Avoid adding to module hierarchy; we want a simple reference to it
             object.__setattr__(self, "decoder", init_from)
+
+            self.scale = torch.nn.Parameter(
+                torch.ones_like(self.scale, device=to_device or self.config.device)
+                * 1.0
+                / self.config.n_iterations
+            )
             self.layers[0].weight = torch.nn.Parameter(
                 init_from.linear.weight.T.to(to_device or self.config.device, copy=True)
                 .detach()
@@ -423,7 +439,7 @@ class LISTA(Encoder):
         yield from ()
 
     def interaction_params(self) -> Iterator[Tuple[str, torch.nn.Parameter]]:
-        yield from self.layers.named_parameters()
+        yield from chain(self.layers.named_parameters(), [("scale", self.scale)])
 
     def forward(
         self, x: torch.Tensor, token_mask: torch.Tensor, should_cast: bool = True
@@ -438,7 +454,7 @@ class LISTA(Encoder):
         )
         for i in range(self.config.n_iterations):
             features = self.activation[i](
-                features + self.layers[i]((x - self.decoder(features))),
+                features + self.scale[i] * self.layers[0]((x - self.decoder(features))),
                 token_mask,
             )
 
