@@ -110,22 +110,22 @@ class BatchTopKActivationFunction(ActivationFunction):
             with torch.no_grad():
                 x[~token_mask.bool()] = torch.finfo(x.dtype).min
             num_tokens = x.shape[0] * x.shape[1]
-            # threshold = x.view(-1).kthvalue(x.numel() - self.config.k * num_tokens).values
             topk = torch.topk(
                 x.view(-1),
                 k=self.config.k * num_tokens,
                 dim=-1,
                 sorted=True,
             )
-            threshold = topk.values[-1]
+            threshold = torch.maximum(
+                topk.values[-1], torch.zeros_like(topk.values[-1])
+            )
             lr = self.config.threshold_lr
 
             # Adapted from https://github.com/decoderesearch/SAELens/blob/69c4c62b0dc24e5ba23fc773a0286149514b4a23/sae_lens/saes/batchtopk_sae.py
             with torch.no_grad(), torch.autocast(x.device.type, enabled=False):
-                if threshold > 0.0:
-                    self.threshold = (1 - lr) * self.threshold + lr * threshold.to(
-                        self.threshold.dtype
-                    )
+                self.threshold = (1 - lr) * self.threshold + lr * threshold.to(
+                    self.threshold.dtype
+                )
         # JumpReLU during inference
         else:
             threshold = self.threshold
