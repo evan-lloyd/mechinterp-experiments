@@ -17,7 +17,7 @@ from sae_lens import (
 from sae_lens import SAEConfig as SAELensConfig
 from sae_lens.saes.sae import SAEMetadata
 
-from transformers_sae.encoder import EncoderKind
+from transformers_sae.encoder import ActivationKind
 
 from .sae import SAE as MySAE
 
@@ -173,14 +173,14 @@ def wrap_sae_lens_pretrained(target_l0: int, **sae_lens_kwargs) -> SAELensSAEWra
     )
 
 
-SAE_KIND_TO_SAE_LENS: MappingProxyType[EncoderKind, Type[SAELens]] = MappingProxyType(
+SAE_KIND_TO_SAE_LENS: MappingProxyType[ActivationKind, Type[SAELens]] = MappingProxyType(
     {
         "relu": StandardSAE,
         "topk": TopKSAE,
         "batch_topk": JumpReLUSAE,
     }
 )
-SAE_KIND_TO_SAE_CONFIG: MappingProxyType[EncoderKind, Type[SAELensConfig]] = (
+SAE_KIND_TO_SAE_CONFIG: MappingProxyType[ActivationKind, Type[SAELensConfig]] = (
     MappingProxyType(
         {
             "relu": StandardSAEConfig,

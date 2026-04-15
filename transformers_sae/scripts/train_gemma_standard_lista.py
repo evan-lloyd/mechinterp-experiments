@@ -90,9 +90,9 @@ empty_saes = {
             device=TRAINING_DEVICE,
             train_dtype=torch.float32,
             inference_dtype=torch.bfloat16,
-            encoder_kind="batch_topk",
+            activation_kind="batch_topk",
             top_k=TOPK,
-            with_interaction=True,
+            activation_kind=True,
             n_iterations=N_LISTA_ITERATIONS,
         )
     )

@@ -1,16 +1,19 @@
 from dataclasses import dataclass
-from typing import Any, List, Mapping, Optional
 from itertools import repeat
+from typing import Any, List, Mapping, Optional
 
 import torch
 
 from .decoder import Decoder, DecoderConfig
 from .encoder import (  # noqa: F401
     LISTA,
+    ActivationKind,
     BatchTopKActivationFunctionConfig,
     Encoder,
     EncoderConfig,
     EncoderKind,
+    InteractionLISTA,
+    InteractionLISTAConfig,
     LISTAConfig,
     ReluActivationFunctionConfig,
     TopKActivationFunctionConfig,
@@ -35,30 +38,30 @@ def make_sae_config(
     device: str | torch.device,
     train_dtype: torch.dtype,
     inference_dtype: torch.dtype,
-    encoder_kind: EncoderKind | List[EncoderKind],
+    activation_kind: ActivationKind | List[ActivationKind],
     top_k: int | List[int] | None = None,
-    with_interaction: bool = False,
+    encoder_kind: EncoderKind = "encoder",
     n_iterations: int | None = None,
 ) -> SAEConfig:
-    if isinstance(encoder_kind, list):
-        assert with_interaction, (
+    if isinstance(activation_kind, list):
+        assert activation_kind, (
             "Must use with_interaction if specifying multiple encoder configurations"
         )
     else:
         if isinstance(top_k, list):
-            encoder_kind = [encoder_kind] * len(top_k)
+            activation_kind = [activation_kind] * len(top_k)
         else:
-            encoder_kind = [encoder_kind]
+            activation_kind = [activation_kind]
 
     if isinstance(top_k, list):
-        assert with_interaction and len(encoder_kind) == len(top_k), (
+        assert activation_kind and len(activation_kind) == len(top_k), (
             "Must use with_interaction if specifying multiple encoder configurations"
         )
         top_k_value = top_k.__iter__()
     else:
         top_k_value = repeat(top_k).__iter__()
     activation_config = []
-    for ek in encoder_kind:
+    for ek in activation_kind:
         if ek == "relu":
             activation_config.append(ReluActivationFunctionConfig())
         elif ek == "topk":
@@ -81,17 +84,22 @@ def make_sae_config(
         train_dtype=train_dtype,
         inference_dtype=inference_dtype,
     )
-    if with_interaction:
-        encoder_cfg_class = LISTAConfig
+    if encoder_kind in ("lista", "interaction"):
+        if encoder_kind == "lista":
+            encoder_cfg_class = LISTAConfig
+            n_iterations = len(top_k) if isinstance(top_k, list) else n_iterations
+        elif encoder_kind == "interaction":
+            encoder_cfg_class = InteractionLISTAConfig
+            n_iterations = len(top_k) - 1 if isinstance(top_k, list) else n_iterations
+
         encoder_class_kwargs["activation_function"] = activation_config[0]
         if len(activation_config) > 1:
             encoder_class_kwargs["per_layer_activation_functions"] = activation_config
-        encoder_class_kwargs["n_iterations"] = len(top_k) if isinstance(top_k, list) else n_iterations
+        encoder_class_kwargs["n_iterations"] = n_iterations
     else:
         encoder_cfg_class = EncoderConfig
         encoder_class_kwargs["activation_function"] = activation_config[0]
     encoder_config = encoder_cfg_class(**encoder_class_kwargs)
-
 
     decoder_config = DecoderConfig(d_model, d_sae, device, train_dtype, inference_dtype)
     return SAEConfig(
@@ -128,7 +136,9 @@ class SAE(torch.nn.Module):
     ):
         super().__init__()
         self.config = config
-        if isinstance(config.encoder, LISTAConfig):
+        if isinstance(config.encoder, InteractionLISTAConfig):
+            self.encoder = InteractionLISTA(config.encoder)
+        elif isinstance(config.encoder, LISTAConfig):
             self.encoder = LISTA(config.encoder)
         else:
             self.encoder = Encoder(config.encoder)

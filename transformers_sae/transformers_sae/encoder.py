@@ -15,12 +15,13 @@ import torch
 if TYPE_CHECKING:
     from .decoder import Decoder
 
-EncoderKind: TypeAlias = Literal["relu", "topk", "batch_topk", "firm_topk"]
+ActivationKind: TypeAlias = Literal["relu", "topk", "batch_topk"]
+EncoderKind: TypeAlias = Literal["encoder", "interaction", "lista"]
 
 
 @dataclass
 class ActivationFunctionConfig:
-    kind: EncoderKind = field(init=False)
+    kind: ActivationKind = field(init=False)
 
 
 @dataclass
@@ -192,6 +193,16 @@ class LISTAConfig(EncoderConfig):
             n_iterations=len(k_values),
             per_layer_activation_functions=per_layer,
         )
+
+
+class InteractionLISTAConfig(LISTAConfig):
+    def __post_init__(self):
+        if self.per_layer_activation_functions is not None:
+            if len(self.per_layer_activation_functions) != self.n_iterations + 1:
+                raise ValueError(
+                    f"per_layer_activation_functions has {len(self.per_layer_activation_functions)} entries "
+                    f"but n_iterations={self.n_iterations}"
+                )
 
 
 class Encoder(torch.nn.Module):
@@ -429,6 +440,123 @@ class LISTA(Encoder):
             features = self.activation[i](
                 features + self.layers[i]((x - self.decoder(features))),
                 token_mask,
+            )
+
+        if should_cast:
+            features = features.to(out_dtype)
+        return features
+
+
+class InteractionLISTA(Encoder):
+    config: LISTAConfig
+    decoder: "Decoder"
+    layers: torch.nn.ModuleList
+    activation: torch.nn.ModuleList
+
+    def __init__(
+        self,
+        config: LISTAConfig,
+    ):
+        super().__init__(config)
+
+        self.layers = torch.nn.ModuleList(
+            [
+                torch.nn.Linear(
+                    config.d_sae,
+                    config.d_sae,
+                    device="meta",
+                    dtype=self.config.train_dtype,
+                    bias=False,
+                )
+                for _ in range(config.n_iterations)
+            ]
+        )
+        activation_configs = (
+            config.per_layer_activation_functions
+            if config.per_layer_activation_functions is not None
+            else [config.activation_function] * (config.n_iterations + 1)
+        )
+        self.activation = torch.nn.ModuleList(
+            [
+                self.activation_module_from_config(act_cfg, config.device)
+                for act_cfg in activation_configs
+            ]
+        )
+
+    @torch.no_grad()
+    def init_weights(
+        self,
+        init_from: Union["Encoder", "Decoder", None] = None,
+        to_device: str | None = None,
+    ):
+        from .decoder import Decoder
+
+        super().init_weights(init_from, to_device)
+
+        if init_from is None:
+            raise ValueError(
+                "Encoder weights must be initialized from existing encoder or decoder"
+            )
+
+        for submodule in self.activation:
+            assert isinstance(submodule, ActivationFunction)
+            submodule.init_weights()
+
+        if isinstance(init_from, InteractionLISTA):
+            for layer, other in zip(self.layers, init_from.layers):
+                layer.weight = torch.nn.Parameter(
+                    other.weight.to(to_device or self.config.device, copy=True)
+                    .detach()
+                    .contiguous()
+                )
+                # layer.bias = torch.nn.Parameter(
+                #     other.bias.to(to_device or self.config.device, copy=True)
+                #     .detach()
+                #     .contiguous()
+                # )
+        elif isinstance(init_from, Decoder):
+            # Avoid adding to module hierarchy; we want a simple reference to it
+            object.__setattr__(self, "decoder", init_from)
+            for layer in self.layers:
+                layer.weight = torch.nn.Parameter(
+                    torch.eye(
+                        self.config.d_sae,
+                        device=to_device or self.config.device,
+                        dtype=self.config.train_dtype,
+                    )
+                )
+                # layer.bias = torch.nn.Parameter(
+                #     torch.zeros(
+                #         self.config.d_sae,
+                #         device=to_device or self.config.device,
+                #         dtype=self.config.train_dtype,
+                #     )
+                # )
+        else:
+            raise ValueError(f"Invalid initialization source: {type(init_from)}")
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+
+        to_dtype = self.config.train_dtype if mode else self.config.inference_dtype
+        self.layers.to(to_dtype)
+
+    def interaction_params(self) -> Iterator[Tuple[str, torch.nn.Parameter]]:
+        yield from self.layers.named_parameters()
+
+    def forward(
+        self, x: torch.Tensor, token_mask: torch.Tensor, should_cast: bool = True
+    ):
+        out_dtype = x.dtype
+        if should_cast:
+            x = x.to(self.dtype)
+
+        # Gregor and LeCun 2010
+        encoder_output = self.linear(x)
+        features = self.activation[0](encoder_output, token_mask)
+        for i in range(self.config.n_iterations):
+            features = self.activation[i + 1](
+                encoder_output + self.layers[i](features), token_mask
             )
 
         if should_cast:
