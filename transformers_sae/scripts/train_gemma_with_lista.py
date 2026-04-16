@@ -76,7 +76,7 @@ D_MODEL = model.d_model
 TOPK = 100
 TOKENIZER_BATCH_SIZE = 256
 FINETUNE_FRACTION = 0.2
-N_LISTA_ITERATIONS = 4
+N_ITERATIONS = 5
 
 empty_saes = {
     layer: SAE(
@@ -87,16 +87,19 @@ empty_saes = {
             train_dtype=torch.float32,
             inference_dtype=torch.bfloat16,
             activation_kind="batch_topk",
-            top_k=TOPK,
-            activation_kind=True,
-            n_iterations=N_LISTA_ITERATIONS,
+            top_k=list(range(TOPK // N_ITERATIONS, TOPK + 1, TOPK // N_ITERATIONS)),
+            encoder_kind="lista",
+            n_iterations=N_ITERATIONS,
         )
     )
     for layer in range(model.num_layers)
 }
 
+print(empty_saes[0])
+print([a.config.k for a in empty_saes[0].encoder.activation if hasattr(a.config, "k")])
 
-def linear_decay_during_finetune(frac_trained: float):
+
+def linear_decay_during_finetune(frac_trained: float, **kwargs):
     if frac_trained < (1 - FINETUNE_FRACTION):
         return 1.0
     return 1.0 - (frac_trained - (1 - FINETUNE_FRACTION)) / FINETUNE_FRACTION
@@ -115,6 +118,7 @@ training_config = TrainingConfig(
     ),  # TODO: is this actually good for our training method? not for tinystories anyway
     lr=1e-4,
     interaction_lr=1e-4,
+    threshold_lr=1e-2,
     lr_schedule=linear_decay_during_finetune,  # per Karvonen (2025)
     downstream_reconstruction_weight=1.0,
     reconstruction_weight=1.0,
