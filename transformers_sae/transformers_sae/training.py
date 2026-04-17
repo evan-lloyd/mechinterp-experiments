@@ -1,4 +1,5 @@
 from __future__ import annotations
+from transformers_sae.metrics import mse_loss
 
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -244,7 +245,6 @@ def make_optimizer(saes: Dict[int, SAE], layers: List[int], config: TrainingConf
     return torch.optim.Adam(param_groups, lr=config.lr, betas=config.betas)
 
 
-@torch.no_grad()
 def tune_activation_thresholds(
     model: ReplacementModel,
     tokenizer: AutoTokenizer,
@@ -256,6 +256,8 @@ def tune_activation_thresholds(
     offload_after_training: bool = True,
     lr_schedule: Optional[Callable[[float, int], float]] = None,
     threshold_lr: float = 0.01,
+    interaction_lr: float = 1e-4,
+    betas: Tuple[float, float] = (0.9, 0.999),
 ) -> None:
     """For BatchTopK SAEs, do a special training run that adjusts only the thresholds used
     in the BatchTopK activation function. This is mandatory for replacement models, since
@@ -268,11 +270,17 @@ def tune_activation_thresholds(
     """
     try:
         replacement_model = make_replacement_model(model, saes)
-        for sae in saes.values():
+        for layer, sae in saes.items():
             sae.onload()
             sae.eval()
-            sae.train_activations()
+            sae.encoder.train_activations()
+            # sae.decoder.linear.weight /= sae.decoder.linear.weight.norm(dim=0, keepdim=True)
             sae.set_activation_threshold_lr(threshold_lr)
+            if hasattr(sae.encoder, "scale"):
+                print(f"scale {layer}", sae.encoder.scale)
+            print(f"thresh {layer}", sae.activation_thresholds())
+
+        first_sae_layer = min(saes.keys())
 
         progress = MultilineProgress(
             total=num_tokens,
@@ -280,6 +288,19 @@ def tune_activation_thresholds(
             num_header_lines=1,
         )
         num_used_tokens = 0
+
+        # Only train scale
+        params = [
+            param
+            for sae in saes.values()
+            for _, param in sae.encoder.interaction_params()
+        ]
+        if params:
+            optimizer = torch.optim.Adam(
+                params,
+                lr=interaction_lr,
+                betas=betas,
+            )
         for step, batch in enumerate(
             make_dataloader(
                 replacement_model,
@@ -290,8 +311,8 @@ def tune_activation_thresholds(
                 inference_batch_size=inference_batch_size,
             )
         ):
-            # NB: the activation functions handle their own exponential average update, so we
-            # don't need any explicit optimizers
+            if params:
+                optimizer.zero_grad()
             batch.to(replacement_model.device)
 
             # Run the model until just prior to outputting logits, since this will be enough
@@ -301,18 +322,63 @@ def tune_activation_thresholds(
                     sae.set_activation_threshold_lr(
                         lr_schedule(min(num_used_tokens / num_tokens, 1.0), layer)
                     )
-            make_activation_batch(
-                replacement_model,
-                [],
-                batch,
-                end_layer=model.num_layers,
-            )
+            # for pg in optimizer.param_groups:
+            #     pg["lr"] =
+            if params:
+                baseline_activations = make_activation_batch(
+                    model,
+                    [(layer, "layer") for layer in saes.keys()],
+                    # [(model.num_layers - 1, "layer"), (first_sae_layer, "layer")],
+                    batch,
+                    end_layer=model.num_layers,
+                )
+                replacement_activations = make_activation_batch(
+                    replacement_model,
+                    [(layer, "sae") for layer in saes.keys()],
+                    # [(model.num_layers - 1, "sae")],
+                    batch,
+                    start_input=baseline_activations[first_sae_layer].layer_output,
+                    start_layer=first_sae_layer,
+                    end_layer=model.num_layers,
+                    start_at_sae=True,
+                )
+                # print("max f", replacement_activations[model.num_layers-1].sae_features.max().item())
+
+                # loss = mse_loss(
+                #     replacement_activations[model.num_layers - 1].sae_output,
+                #     baseline_activations[model.num_layers - 1].layer_output,
+                #     batch,
+                # )
+                loss = torch.zeros((1,), dtype=torch.float32, device=model.device)
+                for layer in saes.keys():
+                    loss += mse_loss(
+                        replacement_activations[layer].sae_output,
+                        baseline_activations[layer].layer_output,
+                        batch,
+                    )
+                loss.backward()
+
+                optimizer.step()
+
+            else:
+                with torch.no_grad():
+                    ab = make_activation_batch(
+                        replacement_model,
+                        [(model.num_layers - 1, "sae")],
+                        batch,
+                        end_layer=model.num_layers,
+                    )
+                    # print("max f", ab[model.num_layers-1].sae_features.max().item())
 
             num_used_tokens += batch.num_tokens
             progress.total = max(num_tokens, num_used_tokens)
             progress.update(batch.num_tokens)
 
         progress.close()
+        for layer, sae in saes.items():
+            if hasattr(sae.encoder, "scale"):
+                print(f"scale {layer}", sae.encoder.scale)
+            print(f"thresh {layer}", sae.activation_thresholds())
     finally:
         if offload_after_training:
             try:

@@ -73,11 +73,11 @@ VALIDATION_BASE_PATH = "/workspace/sae_checkpoints/validations/gemma_2_2b"
 CHECKPOINT_BASE_PATH = "/workspace/sae_checkpoints/gemma_2_2b"
 TOKENIZER_BATCH_SIZE = 256
 NUM_VALIDATION_TOKENS = int(1e6)
-NUM_THRESHOLD_TUNING_TOKENS = int(1e5)
+NUM_THRESHOLD_TUNING_TOKENS = int(1e6)
 NUM_TRAINING_TOKENS = int(5e7)
 
 
-def load_saes(checkpoint_dir: str):
+def load_saes(checkpoint_dir: str, start_layer: int = 0):
     saes = {}
 
     def load_layer_checkpoint(layer):
@@ -88,9 +88,6 @@ def load_saes(checkpoint_dir: str):
                 print(f"No checkpoint found for layer {layer}")
                 return layer, None
             sae = cp.sae
-            sae.eval()
-            sae.train_activations()
-            sae.onload()
             print(f"Loaded checkpoint for layer {layer}")
             return layer, sae
         else:
@@ -100,7 +97,7 @@ def load_saes(checkpoint_dir: str):
     # Load the latest checkpoints for each layer in parallel
     with ThreadPoolExecutor() as executor:
         results = executor.map(
-            load_layer_checkpoint, range(model.num_layers - 1, -1, -1)
+            load_layer_checkpoint, range(model.num_layers - 1, start_layer - 1, -1)
         )
         for layer, sae in results:
             if sae is not None:
@@ -129,8 +126,8 @@ for training_method in (
     # "next_layer",
     # "next_layer_interaction",
     # "next_layer_finetuned",
-    # "next_layer_lista",
-    "next_layer_finetuned_lista",
+    "next_layer_lista",
+    # "next_layer_finetuned_lista",
 ):
     results_path = f"{VALIDATION_BASE_PATH}/{training_method}"
 
@@ -144,15 +141,15 @@ for training_method in (
         print(f"Skipping {training_method}, validations already complete")
         continue
 
-    saes = load_saes(f"{CHECKPOINT_BASE_PATH}/{training_method}")
+    saes = load_saes(f"{CHECKPOINT_BASE_PATH}/{training_method}", 18)
     # assert len(saes) == model.num_layers, (
     #     f"Missing SAEs for {training_method}, only had {set(saes.keys())}"
     # )
     orig_thresholds = {
         layer: sae.activation_thresholds() for layer, sae in saes.items()
     }
-    for start_layer in (12,):
-    # for start_layer in sorted(set(saes.keys()) - existing_validations, reverse=False):
+    for start_layer in (18,):
+        # for start_layer in sorted(set(saes.keys()) - existing_validations, reverse=False):
         print(
             f"Running validations for {training_method} replacement starting at {start_layer}"
         )
@@ -160,16 +157,16 @@ for training_method in (
             for i, a in enumerate(sae.encoder.activation):
                 a.threshold.fill_(orig_thresholds[layer][i])
 
-        # tune_activation_thresholds(
-        #     model,
-        #     tokenizer,
-        #     {layer: sae for layer, sae in saes.items() if layer >= start_layer},
-        #     training_dataset,
-        #     TOKENIZER_BATCH_SIZE,
-        #     TRAINING_BATCH_SIZE,
-        #     NUM_THRESHOLD_TUNING_TOKENS,
-        #     offload_after_training=False,
-        # )
+        tune_activation_thresholds(
+            model,
+            tokenizer,
+            {layer: sae for layer, sae in saes.items() if layer >= start_layer},
+            training_dataset,
+            TOKENIZER_BATCH_SIZE,
+            TRAINING_BATCH_SIZE,
+            NUM_THRESHOLD_TUNING_TOKENS,
+            offload_after_training=False,
+        )
         # new_thresholds = {
         #     layer: tuple(a.threshold.item() for a in sae.encoder.activation)
         #     for layer, sae in saes.items()
@@ -197,6 +194,10 @@ for training_method in (
         print(
             f"mean rre={ {k: np.mean(v.rre).item() for k, v in validations.layer_results.items() if v.rre is not None} }"
         )
+        print(
+            f"geom mean rre={ {k: np.exp(np.mean(np.log(np.clip(v.rre, a_min=1e-9, a_max=None)))).item() for k, v in validations.layer_results.items() if v.rre is not None} }"
+        )
+
         print(
             f"mean l0={ {k: np.mean(v.l0).item() for k, v in validations.layer_results.items() if v.l0 is not None} }"
         )

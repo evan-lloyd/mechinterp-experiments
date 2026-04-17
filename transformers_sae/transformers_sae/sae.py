@@ -197,12 +197,12 @@ class SAE(torch.nn.Module):
         if self._device_tracker.device != torch.device("meta"):
             self.to(self.config.device)
 
-    def train_activations(self):
-        for a in self.encoder.activation:
-            a.train()
-
     def activation_thresholds(self):
-        return tuple(a.threshold.item() for a in self.encoder.activation if hasattr(a, "threshold"))
+        return tuple(
+            a.threshold.item()
+            for a in self.encoder.activation
+            if hasattr(a, "threshold")
+        )
 
     def set_activation_threshold_lr(self, lr: float):
         for a in self.encoder.activation:

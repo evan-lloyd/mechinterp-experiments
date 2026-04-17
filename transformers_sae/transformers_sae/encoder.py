@@ -131,7 +131,6 @@ class BatchTopKActivationFunction(ActivationFunction):
         # JumpReLU during inference
         else:
             threshold = self.threshold
-
         return x * (x >= threshold)
 
 
@@ -224,6 +223,13 @@ class Encoder(torch.nn.Module):
                 )
             ]
         )
+
+    def train_activations(self):
+        for a in self.activation:
+            a.train()
+
+    def interaction_params(self) -> Iterator[Tuple[str, torch.nn.Parameter]]:
+        yield from ()
 
     @classmethod
     def activation_module_from_config(
@@ -382,7 +388,12 @@ class LISTA(Encoder):
     def train(self, mode: bool = True):
         super().train(mode)
 
-        self.scale.to(self.config.train_dtype if mode else self.config.inference_dtype)
+        # NB: deliberately *not* casting dtype of scale or activation thresholds
+        self.scale.requires_grad_(mode)
+
+    def train_activations(self):
+        super().train_activations()
+        self.scale.requires_grad_(True)
 
     def interaction_params(self) -> Iterator[Tuple[str, torch.nn.Parameter]]:
         yield from (("scale", self.scale),)
@@ -400,9 +411,11 @@ class LISTA(Encoder):
         )
         for i in range(self.config.n_iterations):
             features = self.activation[i](
-                features + self.scale[i] * self.linear((x - self.decoder(features))),
+                features
+                + self.scale[i].to(x.dtype) * self.linear(x - self.decoder(features)),
                 token_mask,
             )
+            # features = 1000.0 * torch.tanh(features / 1000.0)
 
         if should_cast:
             features = features.to(out_dtype)
