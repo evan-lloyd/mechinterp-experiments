@@ -48,6 +48,17 @@ class SAELensSAEWrapper(torch.nn.Module):
             ),
             persistent=True,
         )
+        self.encoder.scale = torch.nn.Parameter(torch.ones((1,), device=device))
+
+        def interaction_params():
+            yield ("scale", self.encoder.scale)
+
+        def train_activations():
+            self.training_activations = True
+            self.encoder.scale.requires_grad_(True)
+        
+        self.encoder.interaction_params = interaction_params
+        self.encoder.train_activations = train_activations
 
     @property
     def encoder(self):
@@ -75,6 +86,7 @@ class SAELensSAEWrapper(torch.nn.Module):
         decoder_result.view(x.shape[0] * x.shape[1], x.shape[2])[
             pass_through_positions, :
         ] = x.view(x.shape[0] * x.shape[1], x.shape[2])[pass_through_positions, :]
+        self.training_activations = True
         return decoder_result
 
     def offload(self):
@@ -85,10 +97,9 @@ class SAELensSAEWrapper(torch.nn.Module):
 
     def train(self, mode: bool = True):
         super().train(mode)
+        self.training_activtions = mode
+        self.encoder.scale.requires_grad_(mode)
         self.requires_grad_(mode)
-
-    def train_encoder(self):
-        self.train()
 
     def activation_thresholds(self):
         return (self.threshold_offset.item(),)
@@ -119,7 +130,8 @@ class SAELensSAEWrapper(torch.nn.Module):
 
         def _capture_pre_act(_module, _args, out):
             nonlocal linear_out
-            linear_out = out
+            linear_out = out * self.encoder.scale.to(out.dtype)
+            return linear_out
 
         orig_threshold = self.sae_lens_sae.threshold
         try:
@@ -134,7 +146,7 @@ class SAELensSAEWrapper(torch.nn.Module):
             self.sae_lens_sae.threshold = orig_threshold
 
         # Update threshold_multiplier?
-        if self.training:
+        if self.training_activations:
             with torch.no_grad():
                 linear_out[~token_mask.bool()] = torch.finfo(linear_out.dtype).min
 
@@ -155,6 +167,9 @@ class SAELensSAEWrapper(torch.nn.Module):
                     torch.double
                 )
 
+        # Apply softcap to features to avoid exploding reconstructions
+        result = 1000.0 * torch.tanh(result / 1000.0)
+
         if should_cast:
             result = result.to(out_dtype)
         return result
@@ -173,12 +188,14 @@ def wrap_sae_lens_pretrained(target_l0: int, **sae_lens_kwargs) -> SAELensSAEWra
     )
 
 
-SAE_KIND_TO_SAE_LENS: MappingProxyType[ActivationKind, Type[SAELens]] = MappingProxyType(
-    {
-        "relu": StandardSAE,
-        "topk": TopKSAE,
-        "batch_topk": JumpReLUSAE,
-    }
+SAE_KIND_TO_SAE_LENS: MappingProxyType[ActivationKind, Type[SAELens]] = (
+    MappingProxyType(
+        {
+            "relu": StandardSAE,
+            "topk": TopKSAE,
+            "batch_topk": JumpReLUSAE,
+        }
+    )
 )
 SAE_KIND_TO_SAE_CONFIG: MappingProxyType[ActivationKind, Type[SAELensConfig]] = (
     MappingProxyType(

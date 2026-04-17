@@ -120,14 +120,15 @@ MMLU_TASKS = [
 ]
 MMLU_BATCH_SIZE = 16
 
+START_LAYER = 18
 
 for training_method in (
     # "next_layer_finetuned_interaction",
     # "next_layer",
     # "next_layer_interaction",
     # "next_layer_finetuned",
-    "next_layer_lista",
-    # "next_layer_finetuned_lista",
+    # "next_layer_lista",
+    "next_layer_finetuned_lista",
 ):
     results_path = f"{VALIDATION_BASE_PATH}/{training_method}"
 
@@ -141,14 +142,14 @@ for training_method in (
         print(f"Skipping {training_method}, validations already complete")
         continue
 
-    saes = load_saes(f"{CHECKPOINT_BASE_PATH}/{training_method}", 18)
+    saes = load_saes(f"{CHECKPOINT_BASE_PATH}/{training_method}", START_LAYER)
     # assert len(saes) == model.num_layers, (
     #     f"Missing SAEs for {training_method}, only had {set(saes.keys())}"
     # )
     orig_thresholds = {
         layer: sae.activation_thresholds() for layer, sae in saes.items()
     }
-    for start_layer in (18,):
+    for start_layer in (START_LAYER,):
         # for start_layer in sorted(set(saes.keys()) - existing_validations, reverse=False):
         print(
             f"Running validations for {training_method} replacement starting at {start_layer}"

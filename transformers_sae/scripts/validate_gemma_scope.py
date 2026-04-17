@@ -91,7 +91,7 @@ gemma_scope_sae_target_l0 = {
 }
 
 
-def load_saes(checkpoint_dir: str):
+def load_saes(checkpoint_dir: str, start_layer: int):
     saes = {}
 
     def load_gemma_scope(layer):
@@ -105,7 +105,9 @@ def load_saes(checkpoint_dir: str):
 
     # Load the latest checkpoints for each layer in parallel
     with ThreadPoolExecutor() as executor:
-        results = executor.map(load_gemma_scope, range(model.num_layers - 1, -1, -1))
+        results = executor.map(
+            load_gemma_scope, range(model.num_layers - 1, start_layer - 1, -1)
+        )
         for layer, sae in results:
             if sae is not None:
                 saes[layer] = sae
@@ -113,18 +115,19 @@ def load_saes(checkpoint_dir: str):
     return saes
 
 
-MAX_THRESHOLD_LR = 1e-2
-MIN_THRESHOLD_LR = 1e-5
+# MAX_THRESHOLD_LR = 1e-2
+# MIN_THRESHOLD_LR = 1e-5
 
 
-def linear_decay(frac_trained: float):
-    return (1.0 - frac_trained) * MAX_THRESHOLD_LR + frac_trained * MIN_THRESHOLD_LR
+# def linear_decay(frac_trained: float):
+#     return (1.0 - frac_trained) * MAX_THRESHOLD_LR + frac_trained * MIN_THRESHOLD_LR
 
 
+START_LAYER = 18
 saes = {}
 for training_method in (
     "gemma_scope_canonical_l0",
-    "gemma_scope_100_l0",
+    # "gemma_scope_100_l0",
 ):
     if "canonical" in training_method:
         target_l0 = gemma_scope_sae_target_l0
@@ -144,11 +147,12 @@ for training_method in (
         continue
 
     if not saes:
-        saes = load_saes(f"{CHECKPOINT_BASE_PATH}/{training_method}")
-    assert len(saes) == model.num_layers, (
-        f"Missing SAEs for {training_method}, only had {set(saes.keys())}"
-    )
-    for start_layer in set(saes.keys()) - existing_validations:
+        saes = load_saes(f"{CHECKPOINT_BASE_PATH}/{training_method}", START_LAYER)
+    # assert len(saes) == model.num_layers, (
+    #     f"Missing SAEs for {training_method}, only had {set(saes.keys())}"
+    # )
+    for start_layer in (START_LAYER,):
+        # for start_layer in set(saes.keys()) - existing_validations:
         print(
             f"Running validations for {training_method} replacement starting at {start_layer}"
         )
@@ -164,13 +168,14 @@ for training_method in (
             TOKENIZER_BATCH_SIZE,
             TRAINING_BATCH_SIZE,
             NUM_THRESHOLD_TUNING_TOKENS,
-            lr_schedule=linear_decay,
+            offload_after_training=False,
+            # lr_schedule=linear_decay,
         )
-        new_thresholds = {
-            layer: sae.threshold_offset.item()
-            for layer, sae in saes.items()
-            if layer >= start_layer
-        }
+        # new_thresholds = {
+        #     layer: sae.threshold_offset.item()
+        #     for layer, sae in saes.items()
+        #     if layer >= start_layer
+        # }
 
         validations = run_validations(
             model,
@@ -181,10 +186,11 @@ for training_method in (
             TRAINING_BATCH_SIZE,
             NUM_VALIDATION_TOKENS,
             start_layer=start_layer,
+            offload=False,
         )
-        save_validations({start_layer: validations}, results_path)
-        with open(f"{results_path}/{start_layer}.activation_thresholds", "wb") as f:
-            cloudpickle.dump(new_thresholds, f)
+        # save_validations({start_layer: validations}, results_path)
+        # with open(f"{results_path}/{start_layer}.activation_thresholds", "wb") as f:
+        #     cloudpickle.dump(new_thresholds, f)
 
         print(
             f"{training_method} start layer {start_layer} KL: ",
@@ -198,6 +204,15 @@ for training_method in (
                     )
                 )
             ).item(),
+        )
+        print(
+            f"arith mean kl={ {k: np.mean(v.kl).item() for k, v in validations.layer_results.items() if v.kl is not None} }"
+        )
+        print(
+            f"mean rre={ {k: np.mean(v.rre).item() for k, v in validations.layer_results.items() if v.rre is not None} }"
+        )
+        print(
+            f"geom mean rre={ {k: np.exp(np.mean(np.log(np.clip(v.rre, a_min=1e-9, a_max=None)))).item() for k, v in validations.layer_results.items() if v.rre is not None} }"
         )
         mean_l0 = {
             k: np.mean(v.l0).item()
