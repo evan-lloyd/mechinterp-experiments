@@ -159,41 +159,6 @@ class LISTAConfig(EncoderConfig):
                     f"but n_iterations={self.n_iterations}"
                 )
 
-    @classmethod
-    def with_batch_topk_schedule(
-        cls,
-        k_values: List[int],
-        *,
-        d_model: int,
-        d_sae: int,
-        device: torch.device,
-        train_dtype: torch.dtype,
-        inference_dtype: torch.dtype,
-        threshold_lr: float = 0.01,
-    ) -> "LISTAConfig":
-        """Convenience constructor for LISTA with a different BatchTopK k at each iteration.
-
-        Args:
-            k_values: k for each LISTA iteration, e.g. [128, 64, 32].
-                      The length determines n_iterations.
-        """
-        per_layer = [
-            BatchTopKActivationFunctionConfig(k=k, threshold_lr=threshold_lr)
-            for k in k_values
-        ]
-        # Use the first layer's config as the nominal activation_function so that
-        # code that inspects config.activation_function still gets a sensible value.
-        return cls(
-            d_model=d_model,
-            d_sae=d_sae,
-            device=device,
-            train_dtype=train_dtype,
-            inference_dtype=inference_dtype,
-            activation_function=per_layer[0],
-            n_iterations=len(k_values),
-            per_layer_activation_functions=per_layer,
-        )
-
 
 class InteractionLISTAConfig(LISTAConfig):
     def __post_init__(self):

@@ -1,6 +1,16 @@
+from functools import wraps
 from dataclasses import dataclass
 from itertools import repeat
-from typing import Any, List, Mapping, Optional
+from typing import (
+    Any,
+    List,
+    Mapping,
+    Optional,
+    ParamSpec,
+    TypeVar,
+    Callable,
+    Concatenate,
+)
 
 import torch
 
@@ -113,8 +123,17 @@ def make_sae_config(
     )
 
 
-def _check_device(method):
-    def wrapper(self, *args, **kwargs):
+P = ParamSpec("P")
+R = TypeVar("R")
+T = TypeVar("T", bound="SAE")
+
+
+def _check_device(
+    method: Callable[Concatenate[T, P], R],
+) -> Callable[Concatenate[T, P], R]:
+
+    @wraps(method)
+    def wrapper(self: T, *args: P.args, **kwargs: P.kwargs) -> R:
         if self._device_tracker.device != self.config.device:
             raise RuntimeError(
                 f"SAE weights are on {self._device_tracker.device} but expected to be on {self.config.device}"

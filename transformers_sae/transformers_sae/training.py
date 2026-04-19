@@ -1,5 +1,5 @@
 from __future__ import annotations
-from transformers_sae.metrics import mse_loss
+from transformers_sae.metrics import mse_loss, cos_dist_loss
 
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -243,6 +243,144 @@ def make_optimizer(saes: Dict[int, SAE], layers: List[int], config: TrainingConf
         pg["base_lr"] = pg["lr"]
 
     return torch.optim.Adam(param_groups, lr=config.lr, betas=config.betas)
+
+
+def tune_encoder(
+    model: ReplacementModel,
+    tokenizer: AutoTokenizer,
+    baseline_saes: Dict[int, SAE],
+    dataset: IterableDataset,
+    config: TrainingConfig,
+    num_tokens: int,
+    offload_after_training: bool = True,
+    lr_schedule: Optional[Callable[[float, int], float]] = None,
+) -> TrainingResult:
+    """Do an encoder-only training run of the given SAEs, with their dictionaries fixed. This adapts the
+    encoders to work within the full replacement model, without changing the semantics of the SAE features.
+    """
+    try:
+        training_saes = {layer: SAE(sae.config) for layer, sae in baseline_saes.items()}
+        train_result = TrainingResult(training_saes)
+        for layer, sae in training_saes.items():
+            # sae.init_weights(baseline_saes[layer])
+            sae.init_weights(None)
+            sae.decoder.init_weights(baseline_saes[layer].decoder)
+            sae.onload()
+            sae.decoder.requires_grad_(False)
+
+        for sae in baseline_saes.values():
+            sae.onload()
+
+        first_sae_layer = min(baseline_saes.keys())
+        last_sae_layer = max(baseline_saes.keys())
+        layers_to_tune = range(first_sae_layer, last_sae_layer + 1)
+
+        for layer in layers_to_tune:
+            baseline_sae = baseline_saes[layer]
+            training_sae = training_saes[layer]
+
+            # We don't need to train the first SAE, because there are no SAEs before it in the replacement
+            # model that could distort its inputs.
+            if layer == first_sae_layer:
+                training_sae.eval()
+                continue
+
+            progress = MultilineProgress(
+                total=num_tokens,
+                desc=[f"Tuning encoder {layer}"],
+                num_header_lines=1,
+            )
+            num_used_tokens = 0
+            optimizer = make_optimizer(baseline_saes, [layer], config)
+
+            # NB: *not* including the current SAE, because we're training it. This is used
+            # to collect the expected features, which must be done with the baseline SAE.
+            replacement_model = make_replacement_model(
+                model, {i: baseline_saes[i] for i in range(0, layer)}
+            )
+            for batch in make_dataloader(
+                model,
+                tokenizer,
+                dataset,
+                max_tokens=num_tokens,
+                tokenizer_batch_size=config.tokenizer_batch_size,
+                inference_batch_size=config.training_batch_size,
+            ):
+                optimizer.zero_grad()
+                batch.to(model.device)
+
+                with (
+                    # torch.no_grad(),
+                    torch.autocast(
+                        device_type="cuda" if model.device.type == "cuda" else "cpu",
+                        dtype=torch.bfloat16,
+                    ),
+                ):
+                    # Get the features that our SAE would have output in the base model
+                    baseline_activations = make_activation_batch(
+                        model,
+                        [(layer, "layer"), (first_sae_layer, "layer")],
+                        batch,
+                        end_layer=layer + 1,
+                    )
+                    expected_features = baseline_sae.encode(
+                        baseline_activations[layer].layer_output, batch.token_mask
+                    )
+
+                    # Get the actual input our SAE will receive in the replacement model
+                    replacement_activations = make_activation_batch(
+                        replacement_model,
+                        [(layer, "layer")],
+                        batch,
+                        start_input=baseline_activations[first_sae_layer].layer_output,
+                        start_layer=first_sae_layer,
+                        end_layer=layer + 1,
+                        start_at_sae=True,
+                    )
+
+                with torch.autocast(
+                    device_type="cuda" if model.device.type == "cuda" else "cpu",
+                    dtype=torch.bfloat16,
+                ):
+                    actual_features = training_sae.encode(
+                        replacement_activations[layer].layer_output,
+                        batch.token_mask,
+                    )
+                    # Using MSE loss on features here (rather than cosdist as we do elsewhere) because ideally
+                    # our tuned SAE matches the original features *exactly* on the distorted input.
+                    loss = mse_loss(
+                    # loss = cos_dist_loss(
+                        # TODO: should we enforce that baseline saes stay in training dtype?
+                        actual_features,
+                        expected_features,
+                        batch,
+                    )
+                loss.backward()
+
+                progress.set_postfix({"loss": loss.item()})
+
+                optimizer.step()
+                num_used_tokens += batch.num_tokens
+                progress.total = max(num_tokens, num_used_tokens)
+                progress.update(batch.num_tokens)
+                # end for each batch
+
+            training_sae.eval()
+            progress.close()
+            # end for each layer
+
+        # end training loop
+
+        return train_result
+    finally:
+        if offload_after_training:
+            try:
+                for sae in baseline_saes.values():
+                    sae.offload()
+                for sae in training_saes.values():
+                    sae.offload()
+            except Exception:
+                pass
 
 
 def tune_activation_thresholds(

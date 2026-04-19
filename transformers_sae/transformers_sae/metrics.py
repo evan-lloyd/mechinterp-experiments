@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Literal
+from typing import Callable, Literal, overload
 
 import numpy as np
 import torch
@@ -17,7 +17,48 @@ learning rate.
 _ReturnType = Literal["float", "tensor", "np"]
 
 
-def _handle_batch(fn):
+@overload
+def _handle_batch(
+    fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+) -> Callable[
+    [torch.Tensor, torch.Tensor, DataBatch],
+    torch.Tensor,
+]: ...
+
+
+@overload
+def _handle_batch(
+    fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+) -> Callable[
+    [torch.Tensor, torch.Tensor, DataBatch, Literal["tensor"]],
+    torch.Tensor,
+]: ...
+
+
+@overload
+def _handle_batch(
+    fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+) -> Callable[
+    [torch.Tensor, torch.Tensor, DataBatch, Literal["float"]],
+    float,
+]: ...
+
+
+@overload
+def _handle_batch(
+    fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+) -> Callable[
+    [torch.Tensor, torch.Tensor, DataBatch, Literal["np"]],
+    np.ndarray,
+]: ...
+
+
+def _handle_batch(
+    fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+) -> Callable[
+    [torch.Tensor, torch.Tensor, DataBatch, _ReturnType],
+    torch.Tensor | np.ndarray | float,
+]:
     def _inner(
         actual: torch.Tensor,
         target: torch.Tensor,

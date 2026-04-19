@@ -22,7 +22,7 @@ from transformers_sae.validation import generate_with_replacement, run_validatio
 # Tweak TRAINING_BATCH_SIZE for your hardware if necessary
 if torch.cuda.is_available():
     TRAINING_DEVICE = "cuda:0"
-    TRAINING_BATCH_SIZE = 2
+    TRAINING_BATCH_SIZE = 1
 elif torch.mps.is_available():
     TRAINING_DEVICE = "mps:0"
     TRAINING_BATCH_SIZE = 2
@@ -120,15 +120,15 @@ MMLU_TASKS = [
 ]
 MMLU_BATCH_SIZE = 16
 
-START_LAYER = 18
+START_LAYER = 0
 
 for training_method in (
     # "next_layer_finetuned_interaction",
     # "next_layer",
     # "next_layer_interaction",
     # "next_layer_finetuned",
-    # "next_layer_lista",
-    "next_layer_finetuned_lista",
+    "next_layer_lista",
+    # "next_layer_finetuned_lista",
 ):
     results_path = f"{VALIDATION_BASE_PATH}/{training_method}"
 
@@ -168,11 +168,11 @@ for training_method in (
             NUM_THRESHOLD_TUNING_TOKENS,
             offload_after_training=False,
         )
-        # new_thresholds = {
-        #     layer: tuple(a.threshold.item() for a in sae.encoder.activation)
-        #     for layer, sae in saes.items()
-        #     if layer >= start_layer
-        # }
+        new_thresholds = {
+            layer: tuple(a.threshold.item() for a in sae.encoder.activation)
+            for layer, sae in saes.items()
+            if layer >= start_layer
+        }
 
         validations = run_validations(
             model,
@@ -185,9 +185,9 @@ for training_method in (
             start_layer=start_layer,
             offload=False,
         )
-        # save_validations({start_layer: validations}, results_path)
-        # with open(f"{results_path}/{start_layer}.activation_thresholds", "wb") as f:
-        #     cloudpickle.dump(new_thresholds, f)
+        save_validations({start_layer: validations}, results_path)
+        with open(f"{results_path}/{start_layer}.activation_thresholds", "wb") as f:
+            cloudpickle.dump(new_thresholds, f)
 
         print(
             f"{training_method} start layer {start_layer} metrics",
@@ -211,24 +211,24 @@ for training_method in (
         print(
             f"live features={ {k: sum(v.live_features) / saes[k].config.d_sae for k, v in validations.layer_results.items() if v.live_features is not None} }"
         )
-# if start_layer == 0:
-#     with torch.autocast(
-#         device_type="cuda" if model.device.type == "cuda" else "cpu",
-#         dtype=torch.bfloat16,
-#     ):
-#         generate_with_replacement(
-#             model,
-#             tokenizer,
-#             "The capital of France,",
-#             saes,
-#             offload=False,
-#         )
-#     mmlu = MMLUBenchmark(
-#         tokenizer,
-#         model.context_length,
-#         tasks=MMLU_TASKS,
-#     )
-#     mmlu.evaluate(
-#         model=BenchmarkModel(make_replacement_model(model, saes), tokenizer),
-#         batch_size=MMLU_BATCH_SIZE,
-#     )
+        if start_layer == 0:
+            with torch.autocast(
+                device_type="cuda" if model.device.type == "cuda" else "cpu",
+                dtype=torch.bfloat16,
+            ):
+                generate_with_replacement(
+                    model,
+                    tokenizer,
+                    "The capital of France,",
+                    saes,
+                    offload=False,
+                )
+            # mmlu = MMLUBenchmark(
+            #     tokenizer,
+            #     model.context_length,
+            #     tasks=MMLU_TASKS,
+            # )
+            # mmlu.evaluate(
+            #     model=BenchmarkModel(make_replacement_model(model, saes), tokenizer),
+            #     batch_size=MMLU_BATCH_SIZE,
+            # )
