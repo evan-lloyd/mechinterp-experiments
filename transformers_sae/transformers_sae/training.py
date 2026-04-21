@@ -1,4 +1,5 @@
 from __future__ import annotations
+from contextlib import ExitStack
 from copy import deepcopy
 from transformers_sae.metrics import mse_loss, cos_dist_loss, l1_loss
 
@@ -328,6 +329,14 @@ def tune_encoder(
                 optimizer.zero_grad()
                 batch.to(model.device)
 
+                def _make_probe():
+                    probe_output = []
+
+                    def hook(_module, _args, out):
+                        probe_output.append(out)
+
+                    return probe_output, hook
+
                 with (
                     torch.no_grad(),
                     torch.autocast(
@@ -354,27 +363,45 @@ def tune_encoder(
                         start_at_sae=True,
                     )
 
-                    expected_features = baseline_sae.encode(
-                        baseline_activations[layer].layer_output,
-                        batch.token_mask,
-                    )
+                    expected_features, probe = _make_probe()
+                    with ExitStack() as probe_stack:
+                        for a in baseline_sae.encoder.activation:
+                            probe_stack.enter_context(a.register_forward_hook(probe))
+                        baseline_sae.encode(
+                            baseline_activations[layer].layer_output,
+                            batch.token_mask,
+                        )
+
+                    # print("expected", torch.cat(expected_features, dim=-1).sum() / batch.num_tokens)
 
                 with torch.autocast(
                     device_type="cuda" if model.device.type == "cuda" else "cpu",
                     dtype=torch.bfloat16,
                 ):
-                    actual_features = training_sae.encode(
-                        # baseline_activations[layer].layer_output,
-                        replacement_activations[layer].layer_output,
-                        batch.token_mask,
-                    )
+                    actual_features, probe = _make_probe()
+                    with ExitStack() as probe_stack:
+                        for a in training_sae.encoder.activation:
+                            probe_stack.enter_context(a.register_forward_hook(probe))
+                        training_sae.encode(
+                            # baseline_activations[layer].layer_output,
+                            replacement_activations[layer].layer_output,
+                            batch.token_mask,
+                        )
                     # Using MSE loss on features here (rather than cosdist as we do elsewhere) because ideally
                     # our tuned SAE matches the original features *exactly* on the distorted input.
                     # loss = mse_loss(
-                    loss = l1_loss(
-                        actual_features,
-                        expected_features,
-                        batch,
+                    loss = (
+                        l1_loss(
+                            actual_features[-1],
+                            expected_features[-1],
+                            # torch.cat(actual_features, dim=-1),
+                            # torch.cat(expected_features, dim=-1),
+                            batch,
+                        )
+                        # Rescale loss to be "per active feature"
+                        * training_sae.config.d_sae
+                        * len(actual_features)
+                        / sum(a.config.k for a in training_sae.encoder.activation)
                     )
                 loss.backward()
 
@@ -447,9 +474,9 @@ def tune_activation_thresholds(
             sae.encoder.train_activations()
             # sae.decoder.linear.weight /= sae.decoder.linear.weight.norm(dim=0, keepdim=True)
             sae.set_activation_threshold_lr(threshold_lr)
-            if hasattr(sae.encoder, "scale"):
-                print(f"scale {layer}", sae.encoder.scale)
-            print(f"thresh {layer}", sae.activation_thresholds())
+            # if hasattr(sae.encoder, "scale"):
+            #     print(f"scale {layer}", sae.encoder.scale)
+            # print(f"thresh {layer}", sae.activation_thresholds())
 
         first_sae_layer = min(saes.keys())
 
@@ -546,10 +573,10 @@ def tune_activation_thresholds(
             progress.update(batch.num_tokens)
 
         progress.close()
-        for layer, sae in saes.items():
-            if hasattr(sae.encoder, "scale"):
-                print(f"scale {layer}", sae.encoder.scale)
-            print(f"thresh {layer}", sae.activation_thresholds())
+        # for layer, sae in saes.items():
+        #     if hasattr(sae.encoder, "scale"):
+        #         print(f"scale {layer}", sae.encoder.scale)
+        #     print(f"thresh {layer}", sae.activation_thresholds())
     finally:
         if offload_after_training:
             try:

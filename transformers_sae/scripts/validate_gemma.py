@@ -156,7 +156,7 @@ training_config = TrainingConfig(
     method=TrainingMethod.next_layer,
 )
 
-START_LAYER = 24
+START_LAYER = 20
 
 for training_method in (
     # "next_layer_finetuned_interaction",
@@ -194,7 +194,7 @@ for training_method in (
             for i, a in enumerate(sae.encoder.activation):
                 a.threshold.fill_(orig_thresholds[layer][i])
 
-        # tune_encoder(
+        # tr = tune_encoder(
         #     model,
         #     tokenizer,
         #     {layer: sae for layer, sae in saes.items() if layer >= start_layer},
@@ -203,6 +203,7 @@ for training_method in (
         #     NUM_THRESHOLD_TUNING_TOKENS,
         #     offload_after_training=False,
         # )
+        # saes = tr.final_saes
         tune_activation_thresholds(
             model,
             tokenizer,
