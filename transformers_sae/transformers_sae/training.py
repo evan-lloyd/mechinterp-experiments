@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tqdm.auto import tqdm
 from contextlib import ExitStack
 from copy import deepcopy
 from transformers_sae.metrics import mse_loss, cos_dist_loss, l1_loss
@@ -247,6 +248,72 @@ def make_optimizer(saes: Dict[int, SAE], layers: List[int], config: TrainingConf
     return torch.optim.Adam(param_groups, lr=config.lr, betas=config.betas)
 
 
+def alista_encoder(
+    model: ReplacementModel,
+    tokenizer: AutoTokenizer,
+    baseline_saes: Dict[int, SAE],
+    dataset: IterableDataset,
+    config: TrainingConfig,
+    num_tokens: int,
+    offload_after_training: bool = True,
+) -> TrainingResult:
+    training_saes = {
+        layer: SAE(deepcopy(sae.config)) for layer, sae in baseline_saes.items()
+    }
+    train_result = TrainingResult(training_saes)
+    for layer, sae in training_saes.items():
+        sae.init_weights(baseline_saes[layer])
+
+    for layer, sae in training_saes.items():
+        # Appendix E, Algorithm 1 of Liu et al. 2019
+        with torch.no_grad():
+            sae.decoder.linear.weight /= sae.decoder.linear.weight.norm(
+                dim=1, keepdim=True
+            )
+        sae.encoder.linear.weight = torch.nn.Parameter(
+            sae.decoder.linear.weight.T.detach().clone()
+        )
+        sae.encoder.linear.bias = torch.nn.Parameter(
+            torch.zeros_like(sae.encoder.linear.bias)
+        )
+        step_size = 1e-5
+        square_dict = sae.decoder.linear.weight.T @ sae.decoder.linear.weight
+        with torch.no_grad():
+            progress = tqdm(range(100000), desc=f"Compute ALISTA weights {layer}")
+            for _ in progress:
+                updated_weight = (
+                    sae.encoder.linear.weight
+                    - step_size * square_dict @ sae.encoder.linear.weight
+                )
+
+                t_diff = 1 - (
+                    torch.einsum("ji,ij->i", sae.decoder.linear.weight, updated_weight)
+                )
+                proj_weight = t_diff.unsqueeze(-1) * updated_weight
+                new_weight = updated_weight + proj_weight
+                progress.set_postfix(
+                    # {}, refresh=False
+                    {
+                        "delta": (new_weight - sae.encoder.linear.weight).norm().item(),
+                    },
+                    refresh=False,
+                )
+                sae.encoder.linear.weight = torch.nn.Parameter(new_weight)
+
+    tune_activation_thresholds(
+        model,
+        tokenizer,
+        training_saes,
+        dataset,
+        config.tokenizer_batch_size,
+        4,  # TODO
+        num_tokens,
+        offload_after_training,
+    )
+
+    return train_result
+
+
 def tune_encoder(
     model: ReplacementModel,
     tokenizer: AutoTokenizer,
@@ -329,14 +396,6 @@ def tune_encoder(
                 optimizer.zero_grad()
                 batch.to(model.device)
 
-                def _make_probe():
-                    probe_output = []
-
-                    def hook(_module, _args, out):
-                        probe_output.append(out)
-
-                    return probe_output, hook
-
                 with (
                     torch.no_grad(),
                     torch.autocast(
@@ -363,45 +422,30 @@ def tune_encoder(
                         start_at_sae=True,
                     )
 
-                    expected_features, probe = _make_probe()
-                    with ExitStack() as probe_stack:
-                        for a in baseline_sae.encoder.activation:
-                            probe_stack.enter_context(a.register_forward_hook(probe))
-                        baseline_sae.encode(
-                            baseline_activations[layer].layer_output,
-                            batch.token_mask,
-                        )
-
-                    # print("expected", torch.cat(expected_features, dim=-1).sum() / batch.num_tokens)
+                    expected_features = baseline_sae.encode(
+                        baseline_activations[layer].layer_output,
+                        batch.token_mask,
+                    )
 
                 with torch.autocast(
                     device_type="cuda" if model.device.type == "cuda" else "cpu",
                     dtype=torch.bfloat16,
                 ):
-                    actual_features, probe = _make_probe()
-                    with ExitStack() as probe_stack:
-                        for a in training_sae.encoder.activation:
-                            probe_stack.enter_context(a.register_forward_hook(probe))
-                        training_sae.encode(
-                            # baseline_activations[layer].layer_output,
-                            replacement_activations[layer].layer_output,
-                            batch.token_mask,
-                        )
+                    actual_features = training_sae.encode(
+                        replacement_activations[layer].layer_output,
+                        batch.token_mask,
+                    )
                     # Using MSE loss on features here (rather than cosdist as we do elsewhere) because ideally
                     # our tuned SAE matches the original features *exactly* on the distorted input.
-                    # loss = mse_loss(
                     loss = (
-                        l1_loss(
-                            actual_features[-1],
-                            expected_features[-1],
-                            # torch.cat(actual_features, dim=-1),
-                            # torch.cat(expected_features, dim=-1),
+                        mse_loss(
+                            actual_features,
+                            expected_features,
                             batch,
                         )
                         # Rescale loss to be "per active feature"
                         * training_sae.config.d_sae
-                        * len(actual_features)
-                        / sum(a.config.k for a in training_sae.encoder.activation)
+                        / training_sae.encoder.activation[-1].config.k
                     )
                 loss.backward()
 
