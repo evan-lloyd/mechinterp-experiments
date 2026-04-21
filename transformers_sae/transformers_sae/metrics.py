@@ -91,6 +91,11 @@ def mse_loss(actual: torch.Tensor, target: torch.Tensor):
     return ((actual - target) ** 2).mean(dim=-1)
 
 
+@_handle_batch
+def l1_loss(actual: torch.Tensor, target: torch.Tensor):
+    return (actual - target).abs().mean(dim=-1)
+
+
 # Not using decorator, since we want the geometric mean.
 def kl_loss(
     actual: torch.Tensor,

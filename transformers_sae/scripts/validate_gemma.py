@@ -16,7 +16,12 @@ from transformers_sae.ops import (
     save_validations,
 )
 from transformers_sae.replacement_model import GemmaReplacement, make_replacement_model
-from transformers_sae.training import tune_activation_thresholds
+from transformers_sae.training import (
+    tune_activation_thresholds,
+    tune_encoder,
+    TrainingConfig,
+    TrainingMethod,
+)
 from transformers_sae.validation import generate_with_replacement, run_validations
 
 # Tweak TRAINING_BATCH_SIZE for your hardware if necessary
@@ -120,7 +125,38 @@ MMLU_TASKS = [
 ]
 MMLU_BATCH_SIZE = 16
 
-START_LAYER = 0
+
+FINETUNE_FRACTION = 0.2
+
+
+def linear_decay_during_finetune(frac_trained: float, **kwargs):
+    if frac_trained < (1 - FINETUNE_FRACTION):
+        return 1.0
+    return 1.0 - (frac_trained - (1 - FINETUNE_FRACTION)) / FINETUNE_FRACTION
+
+
+training_config = TrainingConfig(
+    tokenizer_batch_size=TOKENIZER_BATCH_SIZE,
+    training_batch_size=TRAINING_BATCH_SIZE,
+    num_train_tokens=NUM_TRAINING_TOKENS,
+    eval_interval=int(1e5),
+    # train_layers=list(range(10, model.num_layers)),
+    train_layers=list(range(0, model.num_layers)),
+    betas=(
+        0.0,
+        0.999,
+    ),  # TODO: is this actually good for our training method? not for tinystories anyway
+    lr=1e-4,
+    interaction_lr=1e-4,
+    threshold_lr=1e-2,
+    lr_schedule=linear_decay_during_finetune,  # per Karvonen (2025)
+    downstream_reconstruction_weight=1.0,
+    reconstruction_weight=1.0,
+    balance_reconstruction_losses=True,
+    method=TrainingMethod.next_layer,
+)
+
+START_LAYER = 24
 
 for training_method in (
     # "next_layer_finetuned_interaction",
@@ -158,6 +194,15 @@ for training_method in (
             for i, a in enumerate(sae.encoder.activation):
                 a.threshold.fill_(orig_thresholds[layer][i])
 
+        # tune_encoder(
+        #     model,
+        #     tokenizer,
+        #     {layer: sae for layer, sae in saes.items() if layer >= start_layer},
+        #     training_dataset,
+        #     training_config,
+        #     NUM_THRESHOLD_TUNING_TOKENS,
+        #     offload_after_training=False,
+        # )
         tune_activation_thresholds(
             model,
             tokenizer,
@@ -185,9 +230,9 @@ for training_method in (
             start_layer=start_layer,
             offload=False,
         )
-        save_validations({start_layer: validations}, results_path)
-        with open(f"{results_path}/{start_layer}.activation_thresholds", "wb") as f:
-            cloudpickle.dump(new_thresholds, f)
+        # save_validations({start_layer: validations}, results_path)
+        # with open(f"{results_path}/{start_layer}.activation_thresholds", "wb") as f:
+        #     cloudpickle.dump(new_thresholds, f)
 
         print(
             f"{training_method} start layer {start_layer} metrics",
@@ -211,18 +256,18 @@ for training_method in (
         print(
             f"live features={ {k: sum(v.live_features) / saes[k].config.d_sae for k, v in validations.layer_results.items() if v.live_features is not None} }"
         )
-        if start_layer == 0:
-            with torch.autocast(
-                device_type="cuda" if model.device.type == "cuda" else "cpu",
-                dtype=torch.bfloat16,
-            ):
-                generate_with_replacement(
-                    model,
-                    tokenizer,
-                    "The capital of France,",
-                    saes,
-                    offload=False,
-                )
+        # if start_layer == 0:
+        with torch.autocast(
+            device_type="cuda" if model.device.type == "cuda" else "cpu",
+            dtype=torch.bfloat16,
+        ):
+            generate_with_replacement(
+                model,
+                tokenizer,
+                "The capital of France,",
+                saes,
+                offload=False,
+            )
             # mmlu = MMLUBenchmark(
             #     tokenizer,
             #     model.context_length,
