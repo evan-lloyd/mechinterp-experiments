@@ -5,27 +5,21 @@ import torch
 from ..activation_data import ActivationBatch, TrainingBatch, make_activation_batch
 from ..data_batch import DataBatch
 from ..metrics import cos_dist_loss, kl_loss, mse_loss
-from ..ops import clone_sae
 from ..replacement_model import ReplacementModel, make_replacement_model
 from ..sae import SAE
-from .training_step import Stepper
+from .training_step import MultiSAEStepper
 
 if TYPE_CHECKING:
     from ..training import TrainingConfig
 
 
-class FullReplacementTrainingStepper(Stepper):
-    saes: Dict[int, SAE]
-
+class FullReplacementTrainingStepper(MultiSAEStepper):
     def __init__(self, base_model: ReplacementModel, saes: Dict[int, SAE]):
         super().__init__(
             base_model,
             make_replacement_model(base_model, saes),
+            saes,
         )
-        self.saes = {**saes}
-
-    def make_checkpoint(self, layer: int, offload_to_cpu: bool = True) -> SAE:
-        return clone_sae(self.saes[layer], to_device="cpu" if offload_to_cpu else None)
 
     def run_baseline(
         self, batch: DataBatch, cache: torch.Tensor | None

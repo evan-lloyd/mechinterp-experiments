@@ -99,7 +99,7 @@ empty_saes = {
 }
 
 
-def linear_decay_during_finetune(frac_trained: float):
+def linear_decay_during_finetune(frac_trained: float, **kwargs):
     if frac_trained < (1 - FINETUNE_FRACTION):
         return 1.0
     return 1.0 - (frac_trained - (1 - FINETUNE_FRACTION)) / FINETUNE_FRACTION
@@ -122,6 +122,7 @@ training_config = {
         lr_schedule=linear_decay_during_finetune,  # per Karvonen (2025)
         downstream_reconstruction_weight=1.0,
         reconstruction_weight=1.0,
+        threshold_lr=1e-2,
         balance_reconstruction_losses=True,
         method=method,
         finetune_fraction=FINETUNE_FRACTION
@@ -148,7 +149,7 @@ training_results = train(
             int(1e7),
         )
     ),
-    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer/",
+    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_normalized_decoder/",
     force_retrain=False,
 )
 

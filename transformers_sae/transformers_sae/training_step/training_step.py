@@ -45,16 +45,13 @@ class Stepper(ABC):
             replacement_layers=self.replacement_layers,
         )
 
-    def make_checkpoint(self, layer: int, offload_to_cpu: bool = True) -> SAE:
-        assert hasattr(self, "sae"), (
-            f"{self.__class__} needs to override make_checkpoint"
-        )
-        return clone_sae(self.sae, to_device="cpu" if offload_to_cpu else None)
-
     @abstractmethod
     def step(
         self, training_batch: TrainingBatch, config: "TrainingConfig"
     ) -> Tuple[torch.Tensor, Dict[int, Dict[str, float]]]: ...
+
+    @abstractmethod
+    def post_step(self, config: "TrainingConfig") -> None: ...
 
     @abstractmethod
     def run_replacement(
@@ -103,3 +100,52 @@ class Stepper(ABC):
                 )[self.base_model.num_layers]
 
         return {k: v for k, v in base_run.items() if k in self.run_layers}
+
+    @classmethod
+    @torch.no_grad()
+    def normalize_decoder(cls, sae: SAE) -> None:
+        sae.decoder.linear.weight /= sae.decoder.linear.weight.norm(dim=0, keepdim=True)
+
+
+class SingleSAEStepper(Stepper):
+    sae: SAE
+    target_layer: int
+
+    def __init__(
+        self,
+        base_model: ReplacementModel,
+        replacement_model: ReplacementModel,
+        target_layer: int,
+        sae: SAE,
+    ):
+        super().__init__(base_model, replacement_model)
+        self.target_layer = target_layer
+        self.sae = sae
+
+    def make_checkpoint(self, layer: int, offload_to_cpu: bool = True) -> SAE:
+        return clone_sae(self.sae, to_device="cpu" if offload_to_cpu else None)
+
+    def post_step(self, config: "TrainingConfig"):
+        if config.normalize_decoder[self.target_layer]:
+            self.normalize_decoder(self.sae)
+
+
+class MultiSAEStepper(Stepper):
+    saes: Dict[int, SAE]
+
+    def __init__(
+        self,
+        base_model: ReplacementModel,
+        replacement_model: ReplacementModel,
+        saes: Dict[int, SAE],
+    ):
+        super().__init__(base_model, replacement_model)
+        self.saes = {**saes}
+
+    def make_checkpoint(self, layer: int, offload_to_cpu: bool = True) -> SAE:
+        return clone_sae(self.saes[layer], to_device="cpu" if offload_to_cpu else None)
+
+    def post_step(self, config: "TrainingConfig"):
+        for layer, sae in self.saes.items():
+            if config.normalize_decoder[layer]:
+                self.normalize_decoder(sae)

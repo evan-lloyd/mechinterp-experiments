@@ -2,7 +2,7 @@ from __future__ import annotations
 from tqdm.auto import tqdm
 from contextlib import ExitStack
 from copy import deepcopy
-from transformers_sae.metrics import mse_loss, cos_dist_loss, l1_loss
+from transformers_sae.metrics import mse_loss, cos_dist_loss, l1_loss, kl_loss
 
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -89,6 +89,7 @@ class TrainingConfig:
     lr_schedule: LRSchedule = lambda frac_trained, **kwargs: 1.0
     balance_reconstruction_losses: bool | Mapping[int, bool] = True
     finetune_fraction: Optional[float] = None
+    normalize_decoder: bool | Mapping[int, bool] = True
     method: TrainingMethod
 
     def __post_init__(self):
@@ -102,6 +103,7 @@ class TrainingConfig:
             "encoder_lr",
             "interaction_lr",
             "threshold_lr",
+            "normalize_decoder",
         ):
             val = getattr(self, attr)
             if not isinstance(val, Mapping):
@@ -264,23 +266,22 @@ def alista_encoder(
     for layer, sae in training_saes.items():
         sae.init_weights(baseline_saes[layer])
 
+    MAX_STEPS = 500_000
+
     for layer, sae in training_saes.items():
         # Appendix E, Algorithm 1 of Liu et al. 2019
-        with torch.no_grad():
-            sae.decoder.linear.weight /= sae.decoder.linear.weight.norm(
-                dim=1, keepdim=True
-            )
         sae.encoder.linear.weight = torch.nn.Parameter(
             sae.decoder.linear.weight.T.detach().clone()
         )
         sae.encoder.linear.bias = torch.nn.Parameter(
             torch.zeros_like(sae.encoder.linear.bias)
         )
-        step_size = 1e-5
+        step_size = 1e-6
         square_dict = sae.decoder.linear.weight.T @ sae.decoder.linear.weight
+        prev_loss = torch.finfo(torch.float32).max
         with torch.no_grad():
-            progress = tqdm(range(100000), desc=f"Compute ALISTA weights {layer}")
-            for _ in progress:
+            progress = tqdm(range(MAX_STEPS), desc=f"Compute ALISTA weights {layer}")
+            for step in progress:
                 updated_weight = (
                     sae.encoder.linear.weight
                     - step_size * square_dict @ sae.encoder.linear.weight
@@ -291,14 +292,20 @@ def alista_encoder(
                 )
                 proj_weight = t_diff.unsqueeze(-1) * updated_weight
                 new_weight = updated_weight + proj_weight
+                cur_loss = (sae.decoder.linear.weight @ new_weight).norm().item()
                 progress.set_postfix(
-                    # {}, refresh=False
                     {
-                        "delta": (new_weight - sae.encoder.linear.weight).norm().item(),
+                        "loss": cur_loss,
                     },
                     refresh=False,
                 )
+                if cur_loss > prev_loss:
+                    progress.total = step
+                    break
+                prev_loss = cur_loss
+
                 sae.encoder.linear.weight = torch.nn.Parameter(new_weight)
+            progress.close()
 
     tune_activation_thresholds(
         model,
@@ -337,26 +344,26 @@ def tune_encoder(
 
         for layer, sae in training_saes.items():
             # Finetune
-            # sae.init_weights(baseline_saes[layer])
-            # sae.decoder.requires_grad_(False)
-            # for i, a in enumerate(sae.encoder.activation):
-            #     a.threshold.fill_(
-            #         baseline_saes[layer].encoder.activation[i].threshold.item()
-            #     )
+            sae.init_weights(baseline_saes[layer])
+            sae.decoder.requires_grad_(False)
+            for i, a in enumerate(sae.encoder.activation):
+                a.threshold.fill_(
+                    baseline_saes[layer].encoder.activation[i].threshold.item()
+                )
 
             # From scratch
-            if layer == first_sae_layer:
-                sae.init_weights(baseline_saes[layer])
-                for i, a in enumerate(sae.encoder.activation):
-                    a.threshold.fill_(
-                        baseline_saes[layer].encoder.activation[i].threshold.item()
-                    )
-                continue
-            sae.init_weights(None)
-            sae.decoder.init_weights(baseline_saes[layer].decoder)
-            sae.encoder.init_weights(sae.decoder)
-            sae.onload()
-            sae.decoder.requires_grad_(False)
+            # if layer == first_sae_layer:
+            #     sae.init_weights(baseline_saes[layer])
+            #     for i, a in enumerate(sae.encoder.activation):
+            #         a.threshold.fill_(
+            #             baseline_saes[layer].encoder.activation[i].threshold.item()
+            #         )
+            #     continue
+            # sae.init_weights(None)
+            # sae.decoder.init_weights(baseline_saes[layer].decoder)
+            # sae.encoder.init_weights(sae.decoder)
+            # sae.onload()
+            # sae.decoder.requires_grad_(False)
 
         for sae in baseline_saes.values():
             sae.onload()
@@ -367,9 +374,9 @@ def tune_encoder(
 
             # We don't need to train the first SAE, because there are no SAEs before it in the replacement
             # model that could distort its inputs.
-            if layer == first_sae_layer:
-                training_sae.eval()
-                continue
+            # if layer == first_sae_layer:
+            #     training_sae.eval()
+            #     continue
 
             progress = MultilineProgress(
                 total=num_tokens,
@@ -377,13 +384,20 @@ def tune_encoder(
                 num_header_lines=1,
             )
             num_used_tokens = 0
-            optimizer = make_optimizer(training_saes, [layer], config)
+            optimizer = make_optimizer(
+                training_saes,
+                [layer] + ([layer + 1] if layer + 1 in baseline_saes else []),
+                config,
+            )
 
             # NB: *not* including the current SAE, because we're training it. This is used
             # to collect the expected features, which must be done with the baseline SAE.
             replacement_model = make_replacement_model(
                 model,
-                {i: training_saes[i] for i in range(first_sae_layer, layer)},
+                # {i: training_saes[i] for i in range(first_sae_layer, layer)}, # one layer only
+                {
+                    i: training_saes[i] for i in range(first_sae_layer, layer + 1)
+                },  # next layer version
             )
             for batch in make_dataloader(
                 model,
@@ -406,23 +420,21 @@ def tune_encoder(
                     # Get the features that our SAE would have output in the base model
                     baseline_activations = make_activation_batch(
                         model,
-                        [(layer, "layer"), (first_sae_layer, "layer")],
+                        # [(layer, "layer"), (first_sae_layer, "layer")],
+                        [(layer + 1, "layer"), (first_sae_layer, "layer"), (layer, "layer")],
                         batch,
-                        end_layer=layer + 1,
+                        # end_layer=layer + 1,
+                        end_layer=layer + 2,
                     )
 
-                    # Get the actual input our SAE will receive in the replacement model
-                    replacement_activations = make_activation_batch(
-                        replacement_model,
-                        [(layer, "layer")],
-                        batch,
-                        start_input=baseline_activations[first_sae_layer].layer_output,
-                        start_layer=first_sae_layer,
-                        end_layer=layer + 1,
-                        start_at_sae=True,
-                    )
-
-                    expected_features = baseline_sae.encode(
+                    if layer + 1 in baseline_saes:
+                        expected_features = baseline_saes[layer + 1].encode(
+                            baseline_activations[layer + 1].layer_output,
+                            batch.token_mask,
+                        )
+                    else:
+                        expected_log_probs = baseline_activations[layer + 1].log_probs
+                    cur_layer_expected_features = baseline_sae.encode(
                         baseline_activations[layer].layer_output,
                         batch.token_mask,
                     )
@@ -431,23 +443,62 @@ def tune_encoder(
                     device_type="cuda" if model.device.type == "cuda" else "cpu",
                     dtype=torch.bfloat16,
                 ):
-                    actual_features = training_sae.encode(
-                        replacement_activations[layer].layer_output,
-                        batch.token_mask,
+                    # Get the actual input our SAE will receive in the replacement model
+                    replacement_activations = make_activation_batch(
+                        replacement_model,
+                        # [(layer, "layer")],
+                        [(layer + 1, "layer"), (layer, "sae")],  # next layer version
+                        batch,
+                        start_input=baseline_activations[first_sae_layer].layer_output,
+                        start_layer=first_sae_layer,
+                        # end_layer=layer + 1,
+                        end_layer=layer + 2,
+                        start_at_sae=True,
                     )
-                    # Using MSE loss on features here (rather than cosdist as we do elsewhere) because ideally
-                    # our tuned SAE matches the original features *exactly* on the distorted input.
+
+                    cur_layer_actual_features = replacement_activations[
+                        layer
+                    ].sae_features
+
                     loss = (
                         mse_loss(
-                            actual_features,
-                            expected_features,
+                            cur_layer_actual_features,
+                            cur_layer_expected_features,
                             batch,
                         )
-                        # Rescale loss to be "per active feature"
                         * training_sae.config.d_sae
                         / training_sae.encoder.activation[-1].config.k
                     )
-                loss.backward()
+
+                    # actual_features = training_sae.encode(
+                    #     replacement_activations[layer].layer_output,
+                    #     batch.token_mask,
+                    # )
+
+                    if layer + 1 in training_saes:
+                        actual_features = training_saes[layer + 1].encode(
+                            replacement_activations[layer + 1].layer_output,
+                            batch.token_mask,
+                        )
+
+                        # Using MSE loss on features here (rather than cosdist as we do elsewhere) because ideally
+                        # our tuned SAE matches the original features *exactly* on the distorted input.
+                        loss += (
+                            mse_loss(
+                                actual_features,
+                                expected_features,
+                                batch,
+                            )
+                            # Rescale loss to be "per active feature"
+                            * training_sae.config.d_sae
+                            / training_sae.encoder.activation[-1].config.k
+                        )
+                    else:
+                        actual_log_probs = replacement_activations[layer + 1].log_probs
+                        kl = kl_loss(actual_log_probs, expected_log_probs, batch)
+                        kl_scale = loss.item() / (kl.item() + 1e-8)
+                        loss += kl_scale * kl
+                (loss / 2).backward()
 
                 progress.set_postfix({"loss": loss.item()})
 
@@ -696,6 +747,7 @@ def training_loop(
             nonlocal loss, num_used_tokens
             optimizer.step()
             optimizer.zero_grad()
+            stepper.post_step(config)
             loss = None
             num_used_tokens += batch.num_tokens
 

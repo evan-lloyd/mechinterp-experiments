@@ -13,7 +13,7 @@ from transformers_sae.ops import (
     MemoryTrackingMode,
     find_latest_checkpoint,
     load_checkpoint,
-    save_validations,
+    save_validations, save_training_result,
 )
 from transformers_sae.replacement_model import GemmaReplacement, make_replacement_model
 from transformers_sae.training import (
@@ -156,14 +156,15 @@ training_config = TrainingConfig(
     method=TrainingMethod.next_layer,
 )
 
-START_LAYER = 20
+START_LAYER = 0
 
 for training_method in (
     # "next_layer_finetuned_interaction",
     # "next_layer",
     # "next_layer_interaction",
-    # "next_layer_finetuned",
-    "next_layer_lista",
+    "next_layer_finetuned",
+    # "next_layer_lista",
+    # "next_layer_lista_normalized_decoder",
     # "next_layer_finetuned_lista",
 ):
     results_path = f"{VALIDATION_BASE_PATH}/{training_method}"
@@ -194,31 +195,33 @@ for training_method in (
             for i, a in enumerate(sae.encoder.activation):
                 a.threshold.fill_(orig_thresholds[layer][i])
 
-        # tr = tune_encoder(
-        #     model,
-        #     tokenizer,
-        #     {layer: sae for layer, sae in saes.items() if layer >= start_layer},
-        #     training_dataset,
-        #     training_config,
-        #     NUM_THRESHOLD_TUNING_TOKENS,
-        #     offload_after_training=False,
-        # )
-        # saes = tr.final_saes
-        tune_activation_thresholds(
+        tr = tune_encoder(
             model,
             tokenizer,
             {layer: sae for layer, sae in saes.items() if layer >= start_layer},
             training_dataset,
-            TOKENIZER_BATCH_SIZE,
-            TRAINING_BATCH_SIZE,
+            training_config,
             NUM_THRESHOLD_TUNING_TOKENS,
             offload_after_training=False,
         )
-        new_thresholds = {
-            layer: tuple(a.threshold.item() for a in sae.encoder.activation)
-            for layer, sae in saes.items()
-            if layer >= start_layer
-        }
+        saes = tr.final_saes
+        save_training_result(tr, f"{os.getenv('HF_BUCKET_LOCAL')}/{training_method}_tuned_encoder_{start_layer}")
+
+        # tune_activation_thresholds(
+        #     model,
+        #     tokenizer,
+        #     {layer: sae for layer, sae in saes.items() if layer >= start_layer},
+        #     training_dataset,
+        #     TOKENIZER_BATCH_SIZE,
+        #     TRAINING_BATCH_SIZE,
+        #     NUM_THRESHOLD_TUNING_TOKENS,
+        #     offload_after_training=False,
+        # )
+        # new_thresholds = {
+        #     layer: tuple(a.threshold.item() for a in sae.encoder.activation)
+        #     for layer, sae in saes.items()
+        #     if layer >= start_layer
+        # }
 
         validations = run_validations(
             model,

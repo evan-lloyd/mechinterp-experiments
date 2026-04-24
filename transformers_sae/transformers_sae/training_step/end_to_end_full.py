@@ -7,16 +7,13 @@ from ..data_batch import DataBatch
 from ..metrics import kl_loss, mse_loss
 from ..replacement_model import make_replacement_model, ReplacementModel
 from ..sae import SAE
-from .training_step import Stepper
+from .training_step import SingleSAEStepper
 
 if TYPE_CHECKING:
     from ..training import TrainingConfig
 
 
-class EndToEndFullTrainingStepper(Stepper):
-    sae: SAE
-    target_layer: int
-
+class EndToEndFullTrainingStepper(SingleSAEStepper):
     def __init__(
         self, base_model: ReplacementModel, target_layer: int, saes: Dict[int, SAE]
     ):
@@ -29,9 +26,9 @@ class EndToEndFullTrainingStepper(Stepper):
                     for layer in range(target_layer, base_model.num_layers)
                 },
             ),
+            target_layer,
+            saes[target_layer],
         )
-        self.target_layer = target_layer
-        self.sae = saes[target_layer]
 
     def run_replacement(
         self, batch: DataBatch, baseline_activations: ActivationBatch
