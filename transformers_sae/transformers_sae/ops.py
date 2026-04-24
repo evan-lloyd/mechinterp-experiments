@@ -161,7 +161,7 @@ def get_state_dict_from_checkpoint(in_file: str):
 
 
 def load_checkpoint(in_file: str) -> "SAECheckpoint":
-    from .sae import SAE
+    from .sae import SAE, SAEConfig
     from .training import SAECheckpoint
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -190,10 +190,24 @@ def load_checkpoint(in_file: str) -> "SAECheckpoint":
         config_path = os.path.join(tmpdir, "sae_config.cloudpickle")
         if os.path.exists(sae_path) and os.path.exists(config_path):
             with open(config_path, "rb") as f:
-                sae_config = cloudpickle.load(f)
+                sae_config: SAEConfig = cloudpickle.load(f)
+            moved_to_mps = False
+            if sae_config.device.type == "cuda" and not torch.cuda.is_available():
+                if torch.mps.is_available():
+                    sae_config.change_configured_device("mps:0")
+                    moved_to_mps = True
+                else:
+                    sae_config.change_configured_device("cpu")
+                
             sae = SAE(sae_config)
             with safe_open(sae_path, framework="pt") as f:
                 state_dict = {key: f.get_tensor(key) for key in f.keys()}
+
+            # MPS needs float64 downcasted to float32
+            if moved_to_mps:
+                for k, v in state_dict.items():
+                    if v.dtype == torch.float64:
+                        state_dict[k] = v.to(torch.float32)
 
             # Hack to load some checkpoints from an older code revision
             old_batch_topk_threshold = state_dict.pop(

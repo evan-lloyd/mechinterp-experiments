@@ -421,13 +421,18 @@ def tune_encoder(
                     baseline_activations = make_activation_batch(
                         model,
                         # [(layer, "layer"), (first_sae_layer, "layer")],
-                        [(layer + 1, "layer"), (first_sae_layer, "layer"), (layer, "layer")],
+                        [
+                            (layer + 1, "layer"),
+                            (first_sae_layer, "layer"),
+                            (layer, "layer"),
+                        ],
                         batch,
                         # end_layer=layer + 1,
                         end_layer=layer + 2,
                     )
 
                     if layer + 1 in baseline_saes:
+                        # pass
                         expected_features = baseline_saes[layer + 1].encode(
                             baseline_activations[layer + 1].layer_output,
                             batch.token_mask,
@@ -459,9 +464,14 @@ def tune_encoder(
                     cur_layer_actual_features = replacement_activations[
                         layer
                     ].sae_features
+                    # cur_layer_actual_reconstruction = replacement_activations[
+                    #     layer
+                    # ].sae_output
 
                     loss = (
                         mse_loss(
+                            # cur_layer_actual_reconstruction,
+                            # baseline_activations[layer].layer_output,
                             cur_layer_actual_features,
                             cur_layer_expected_features,
                             batch,
@@ -470,21 +480,24 @@ def tune_encoder(
                         / training_sae.encoder.activation[-1].config.k
                     )
 
-                    # actual_features = training_sae.encode(
-                    #     replacement_activations[layer].layer_output,
-                    #     batch.token_mask,
-                    # )
 
                     if layer + 1 in training_saes:
                         actual_features = training_saes[layer + 1].encode(
                             replacement_activations[layer + 1].layer_output,
                             batch.token_mask,
                         )
+                        # actual_reconstruction = training_saes[layer + 1](
+                        #     replacement_activations[layer + 1].layer_output,
+                        #     token_mask=batch.token_mask,
+                        #     pass_through_positions=batch.special_token_indices,
+                        # )
 
                         # Using MSE loss on features here (rather than cosdist as we do elsewhere) because ideally
                         # our tuned SAE matches the original features *exactly* on the distorted input.
                         loss += (
                             mse_loss(
+                                # actual_reconstruction,
+                                # baseline_activations[layer + 1].layer_output,
                                 actual_features,
                                 expected_features,
                                 batch,

@@ -145,6 +145,11 @@ class EncoderConfig:
 
 
 @dataclass
+class InteractionEncoderConfig(EncoderConfig):
+    n_interaction_iterations: int = 1
+
+
+@dataclass
 class LISTAConfig(EncoderConfig):
     n_iterations: int = 1
     # Per-layer activation configs. When set, must have length == n_iterations.
@@ -154,16 +159,6 @@ class LISTAConfig(EncoderConfig):
     def __post_init__(self):
         if self.per_layer_activation_functions is not None:
             if len(self.per_layer_activation_functions) != self.n_iterations:
-                raise ValueError(
-                    f"per_layer_activation_functions has {len(self.per_layer_activation_functions)} entries "
-                    f"but n_iterations={self.n_iterations}"
-                )
-
-
-class InteractionLISTAConfig(LISTAConfig):
-    def __post_init__(self):
-        if self.per_layer_activation_functions is not None:
-            if len(self.per_layer_activation_functions) != self.n_iterations + 1:
                 raise ValueError(
                     f"per_layer_activation_functions has {len(self.per_layer_activation_functions)} entries "
                     f"but n_iterations={self.n_iterations}"
@@ -387,41 +382,32 @@ class LISTA(Encoder):
         return features
 
 
-class InteractionLISTA(Encoder):
-    config: InteractionLISTAConfig
-    decoder: "Decoder"
-    layers: torch.nn.ModuleList
-    activation: torch.nn.ModuleList
+class InteractionEncoder(Encoder):
+    config: InteractionEncoderConfig
+    interaction: torch.nn.Parameter
 
     def __init__(
         self,
-        config: InteractionLISTAConfig,
+        config: InteractionEncoderConfig,
     ):
         super().__init__(config)
+        self.interaction = torch.nn.Parameter(
+            torch.empty(
+                (config.d_sae, config.d_sae),
+                device="meta",
+                dtype=self.config.train_dtype,
+            )
+        )
+        # TODO: make this configurable, instead of being the same at each step?
+        self.activation += [
+            self.activation_module_from_config(
+                config.activation_function, device=config.device
+            )
+            for _ in range(self.config.n_interaction_iterations)
+        ]
 
-        self.layers = torch.nn.ModuleList(
-            [
-                torch.nn.Linear(
-                    config.d_sae,
-                    config.d_sae,
-                    device="meta",
-                    dtype=self.config.train_dtype,
-                    bias=False,
-                )
-                for _ in range(config.n_iterations)
-            ]
-        )
-        activation_configs = (
-            config.per_layer_activation_functions
-            if config.per_layer_activation_functions is not None
-            else [config.activation_function] * (config.n_iterations + 1)
-        )
-        self.activation = torch.nn.ModuleList(
-            [
-                self.activation_module_from_config(act_cfg, config.device)
-                for act_cfg in activation_configs
-            ]
-        )
+    def interaction_params(self) -> Iterator[Tuple[str, torch.nn.Parameter]]:
+        yield from (("interaction", self.interaction),)
 
     @torch.no_grad()
     def init_weights(
@@ -433,44 +419,31 @@ class InteractionLISTA(Encoder):
 
         super().init_weights(init_from, to_device)
 
-        if init_from is None:
-            raise ValueError(
-                "Encoder weights must be initialized from existing encoder or decoder"
+        if isinstance(init_from, InteractionEncoder):
+            self.interaction = torch.nn.Parameter(
+                init_from.interaction.to(to_device or self.config.device, copy=True)
+                .detach()
+                .contiguous()
             )
-
-        for submodule in self.activation:
-            assert isinstance(submodule, ActivationFunction)
-            submodule.init_weights()
-
-        if isinstance(init_from, InteractionLISTA):
-            for layer, other in zip(self.layers, init_from.layers):
-                layer.weight = torch.nn.Parameter(
-                    other.weight.to(to_device or self.config.device, copy=True)
-                    .detach()
-                    .contiguous()
-                )
         elif isinstance(init_from, Decoder):
-            # Avoid adding to module hierarchy; we want a simple reference to it
-            object.__setattr__(self, "decoder", init_from)
-            for layer in self.layers:
-                layer.weight = torch.nn.Parameter(
-                    torch.eye(
-                        self.config.d_sae,
-                        device=to_device or self.config.device,
-                        dtype=self.config.train_dtype,
-                    )
+            self.interaction = torch.nn.Parameter(
+                torch.eye(
+                    self.config.d_sae,
+                    device=to_device or self.config.device,
+                    dtype=self.config.train_dtype,
                 )
+            )
         else:
             raise ValueError(f"Invalid initialization source: {type(init_from)}")
 
     def train(self, mode: bool = True):
         super().train(mode)
-
-        to_dtype = self.config.train_dtype if mode else self.config.inference_dtype
-        self.layers.to(to_dtype)
-
-    def interaction_params(self) -> Iterator[Tuple[str, torch.nn.Parameter]]:
-        yield from self.layers.named_parameters()
+        self.interaction = torch.nn.Parameter(
+            self.interaction.to(
+                dtype=self.config.train_dtype if mode else self.config.inference_dtype
+            ),
+            requires_grad=mode,
+        )
 
     def forward(
         self, x: torch.Tensor, token_mask: torch.Tensor, should_cast: bool = True
@@ -478,13 +451,11 @@ class InteractionLISTA(Encoder):
         out_dtype = x.dtype
         if should_cast:
             x = x.to(self.dtype)
-
-        # Gregor and LeCun 2010
         encoder_output = self.linear(x)
         features = self.activation[0](encoder_output, token_mask)
-        for i in range(self.config.n_iterations):
+        for i in range(self.config.n_interaction_iterations):
             features = self.activation[i + 1](
-                encoder_output + self.layers[i](features), token_mask
+                encoder_output + features @ self.interaction, token_mask
             )
 
         if should_cast:

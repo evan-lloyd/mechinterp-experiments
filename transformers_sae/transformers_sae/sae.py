@@ -22,8 +22,8 @@ from .encoder import (  # noqa: F401
     Encoder,
     EncoderConfig,
     EncoderKind,
-    InteractionLISTA,
-    InteractionLISTAConfig,
+    InteractionEncoder,
+    InteractionEncoderConfig,
     LISTAConfig,
     ReluActivationFunctionConfig,
     TopKActivationFunctionConfig,
@@ -39,6 +39,14 @@ class SAEConfig:
     inference_dtype: torch.dtype
     encoder: EncoderConfig
     decoder: DecoderConfig
+
+    def change_configured_device(self, device: torch.device | str):
+        """Change our configured device."""
+        if isinstance(device, str):
+            device = torch.device(device)
+        self.device = device
+        self.encoder.device = device
+        self.decoder.device = device
 
 
 def make_sae_config(
@@ -98,14 +106,14 @@ def make_sae_config(
         if encoder_kind == "lista":
             encoder_cfg_class = LISTAConfig
             n_iterations = len(top_k) if isinstance(top_k, list) else n_iterations
+            encoder_class_kwargs["n_iterations"] = n_iterations
         elif encoder_kind == "interaction":
-            encoder_cfg_class = InteractionLISTAConfig
-            n_iterations = len(top_k) - 1 if isinstance(top_k, list) else n_iterations
+            encoder_cfg_class = InteractionEncoderConfig
+            encoder_class_kwargs["n_interaction_iterations"] = n_iterations
 
         encoder_class_kwargs["activation_function"] = activation_config[0]
         if len(activation_config) > 1:
             encoder_class_kwargs["per_layer_activation_functions"] = activation_config
-        encoder_class_kwargs["n_iterations"] = n_iterations
     else:
         encoder_cfg_class = EncoderConfig
         encoder_class_kwargs["activation_function"] = activation_config[0]
@@ -155,8 +163,9 @@ class SAE(torch.nn.Module):
     ):
         super().__init__()
         self.config = config
-        if isinstance(config.encoder, InteractionLISTAConfig):
-            self.encoder = InteractionLISTA(config.encoder)
+        if isinstance(config.encoder, InteractionEncoderConfig):
+            # Adapter for a legacy format, which will likely be removed
+            self.encoder = InteractionEncoder(config.encoder)
         elif isinstance(config.encoder, LISTAConfig):
             self.encoder = LISTA(config.encoder)
         else:
@@ -194,18 +203,6 @@ class SAE(torch.nn.Module):
         self.config.decoder.inference_dtype = dtype
         self.encoder.config.inference_dtype = dtype
         self.decoder.config.inference_dtype = dtype
-        return self
-
-    def change_configured_device(self, device: torch.device | str):
-        """Change our configured device, and move to it."""
-        if isinstance(device, str):
-            device = torch.device(device)
-        self.config.device = device
-        self.config.encoder.device = device
-        self.config.decoder.device = device
-        self.encoder.config.device = device
-        self.decoder.config.device = device
-        self.to(device)
         return self
 
     def offload(self):

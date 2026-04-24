@@ -162,9 +162,9 @@ for training_method in (
     # "next_layer_finetuned_interaction",
     # "next_layer",
     # "next_layer_interaction",
-    "next_layer_finetuned",
+    # "next_layer_finetuned",
     # "next_layer_lista",
-    # "next_layer_lista_normalized_decoder",
+    "next_layer_lista_normalized_decoder",
     # "next_layer_finetuned_lista",
 ):
     results_path = f"{VALIDATION_BASE_PATH}/{training_method}"
