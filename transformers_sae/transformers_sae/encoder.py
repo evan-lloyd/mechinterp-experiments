@@ -16,13 +16,21 @@ import torch
 if TYPE_CHECKING:
     from .decoder import Decoder
 
-ActivationKind: TypeAlias = Literal["relu", "topk", "batch_topk"]
+ActivationKind: TypeAlias = Literal["relu", "topk", "batch_topk", "jump_relu"]
 EncoderKind: TypeAlias = Literal["encoder", "interaction", "lista"]
 
 
 @dataclass
 class ActivationFunctionConfig:
     kind: ActivationKind = field(init=False)
+
+
+@dataclass
+class JumpReluActivationFunctionConfig(ActivationFunctionConfig):
+    d_sae: int
+
+    def __post_init__(self):
+        self.kind = "jump_relu"
 
 
 @dataclass
@@ -66,6 +74,48 @@ class ReluActivationFunction(ActivationFunction):
 
     def forward(self, x: torch.Tensor, token_mask: torch.Tensor) -> torch.Tensor:
         return x.relu()
+
+
+class JumpReluActivationFunction(ActivationFunction):
+    """Stub for a JumpReLU activation function. Note that training is not implemented; this class is currently
+    only used to load existing JumpReLU SAEs from SAELens."""
+
+    config: ReluActivationFunctionConfig
+    threshold: torch.Tensor
+    threshold_offset: torch.Tensor
+    device: torch.device
+
+    def __init__(self, config: JumpReluActivationFunctionConfig, device: torch.device):
+        super().__init__(config, device)
+        self.register_buffer(
+            "threshold",
+            torch.empty((config.d_sae,), device="meta", requires_grad=False),
+            persistent=True,
+        )
+        # For encoder tuning
+        self.register_buffer(
+            "threshold_offset",
+            torch.tensor(
+                0.0,
+                dtype=torch.float64 if device.type != "mps" else torch.float32,
+                device=device,
+                requires_grad=False,
+            ),
+            persistent=True,
+        )
+        self.device = device
+
+    def forward(self, x: torch.Tensor, token_mask: torch.Tensor) -> torch.Tensor:
+        return x * (x > self.threshold)
+
+    def init_weights(self):
+        self.threshold = torch.zeros((self.config.d_sae,), device=self.device)
+        self.threshold_offset = torch.tensor(
+            0.0,
+            dtype=torch.float64 if self.device.type != "mps" else torch.float32,
+            device=self.device,
+            requires_grad=False,
+        )
 
 
 class TopKActivationFunction(ActivationFunction):
@@ -203,6 +253,8 @@ class Encoder(torch.nn.Module):
             return TopKActivationFunction(activation_config, device)
         elif isinstance(activation_config, BatchTopKActivationFunctionConfig):
             return BatchTopKActivationFunction(activation_config, device)
+        elif isinstance(activation_config, JumpReluActivationFunctionConfig):
+            return JumpReluActivationFunction(activation_config, device)
 
         raise NotImplementedError(f'"{activation_config.kind}" not implemented')
 

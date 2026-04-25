@@ -1,7 +1,8 @@
+from transformers_sae.decoder import DecoderConfig
 import re
 from importlib.resources import files
 from types import MappingProxyType
-from typing import Type
+from typing import Type, Any, Dict
 
 import torch
 import yaml
@@ -17,9 +18,13 @@ from sae_lens import (
 from sae_lens import SAEConfig as SAELensConfig
 from sae_lens.saes.sae import SAEMetadata
 
-from transformers_sae.encoder import ActivationKind
+from transformers_sae.encoder import (
+    ActivationKind,
+    EncoderConfig,
+    JumpReluActivationFunctionConfig,
+)
 
-from .sae import SAE as MySAE
+from .sae import SAE as MySAE, SAEConfig
 
 
 class SAELensSAEWrapper(torch.nn.Module):
@@ -42,13 +47,14 @@ class SAELensSAEWrapper(torch.nn.Module):
             "threshold_offset",
             torch.tensor(
                 0.0,
-                dtype=torch.double,
+                dtype=torch.float64 if device.type != "mps" else torch.float32,
                 device=device,
                 requires_grad=False,
             ),
             persistent=True,
         )
         self.encoder.scale = torch.nn.Parameter(torch.ones((1,), device=device))
+        self.training_activations = True
 
         def interaction_params():
             yield ("scale", self.encoder.scale)
@@ -56,7 +62,7 @@ class SAELensSAEWrapper(torch.nn.Module):
         def train_activations():
             self.training_activations = True
             self.encoder.scale.requires_grad_(True)
-        
+
         self.encoder.interaction_params = interaction_params
         self.encoder.train_activations = train_activations
 
@@ -164,7 +170,7 @@ class SAELensSAEWrapper(torch.nn.Module):
                 self.threshold_offset = (
                     1 - self.threshold_lr
                 ) * self.threshold_offset + self.threshold_lr * topk.values.min().to(
-                    torch.double
+                    self.threshold_offset.dtype
                 )
 
         # Apply softcap to features to avoid exploding reconstructions
@@ -182,10 +188,83 @@ def wrap_sae_lens_pretrained(target_l0: int, **sae_lens_kwargs) -> SAELensSAEWra
     return SAELensSAEWrapper(
         saelens_config,
         saelens,
-        sae_lens_kwargs.get("device"),
+        torch.device(sae_lens_kwargs.get("device")),
         sae_lens_kwargs.get("dtype"),
         target_l0,
     )
+
+
+@torch.no_grad()
+def convert_sae_lens(saelens: SAELens, saelens_config: Dict[str, Any], device=None):
+    device = torch.device(device or saelens_config["device"])
+
+    if saelens_config["architecture"] == "jumprelu":
+        assert saelens_config["apply_b_dec_to_input"] == False, (
+            "Not handled: apply_b_dec_to_input"
+        )
+        assert saelens_config["normalize_activations"] == "none", (
+            "Not handled: normalize_activations"
+        )
+
+        encoder_config = EncoderConfig(
+            d_model=saelens_config["d_in"],
+            d_sae=saelens_config["d_sae"],
+            device=device,
+            train_dtype=getattr(torch, saelens_config["dtype"]),
+            inference_dtype=torch.bfloat16,
+            activation_function=JumpReluActivationFunctionConfig(
+                saelens_config["d_sae"]
+            ),
+        )
+    else:
+        raise NotImplementedError(
+            f"Conversion from sae_lens architecture {saelens_config['architecture']} not implemented"
+        )
+
+    decoder_config = DecoderConfig(
+        d_model=saelens_config["d_in"],
+        d_sae=saelens_config["d_sae"],
+        device=device,
+        train_dtype=getattr(torch, saelens_config["dtype"]),
+        inference_dtype=torch.bfloat16,
+    )
+
+    config = SAEConfig(
+        d_model=saelens_config["d_in"],
+        d_sae=saelens_config["d_sae"],
+        device=device,
+        train_dtype=getattr(torch, saelens_config["dtype"]),
+        inference_dtype=torch.bfloat16,
+        encoder=encoder_config,
+        decoder=decoder_config,
+    )
+    sae = MySAE(config)
+    sae._device_tracker = torch.nn.Buffer(torch.empty((0,), device=config.device))
+    sae.encoder.linear.weight = torch.nn.Parameter(
+        saelens.W_enc.T.to(device, copy=True).detach().contiguous()
+    )
+    sae.encoder.linear.bias = torch.nn.Parameter(
+        saelens.b_enc.to(device, copy=True).detach().contiguous()
+    )
+    sae.decoder.linear.weight = torch.nn.Parameter(
+        saelens.W_dec.T.to(device, copy=True).detach().contiguous()
+    )
+    sae.decoder.linear.bias = torch.nn.Parameter(
+        saelens.b_dec.to(device, copy=True).detach().contiguous()
+    )
+    sae.encoder.activation[0].init_weights()
+    sae.encoder.activation[0].threshold = (
+        saelens.threshold.to(device, copy=True).detach().contiguous()
+    )
+
+    return sae
+
+
+def convert_sae_lens_pretrained(**sae_lens_kwargs) -> MySAE:
+    saelens, saelens_config, _ = SAELens.from_pretrained_with_cfg_and_sparsity(
+        **sae_lens_kwargs
+    )
+    return convert_sae_lens(saelens, saelens_config)
 
 
 SAE_KIND_TO_SAE_LENS: MappingProxyType[ActivationKind, Type[SAELens]] = (
