@@ -143,22 +143,22 @@ training_results = train(
             int(1e7),
         )
     ),
-    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_finetuned_lista/",
+    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_finetuned_lista_normalized_decoder/",
     force_retrain=False,
-    fine_tune_source_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_lista/",
+    fine_tune_source_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_lista_normalized_decoder/",
     offload_after_training=False,
 )
 
-tune_activation_thresholds(
-    model,
-    tokenizer,
-    training_results.final_saes,
-    training_dataset,
-    TOKENIZER_BATCH_SIZE,
-    TRAINING_BATCH_SIZE,
-    int(1e6),
-    offload_after_training=False,
-)
+# tune_activation_thresholds(
+#     model,
+#     tokenizer,
+#     training_results.final_saes,
+#     training_dataset,
+#     TOKENIZER_BATCH_SIZE,
+#     TRAINING_BATCH_SIZE,
+#     int(1e6),
+#     offload_after_training=False,
+# )
 
 validations = run_validations(
     model,

@@ -18,7 +18,7 @@ _ReturnType = Literal["float", "tensor", "np"]
 
 
 @overload
-def _handle_batch(
+def _batch_mean(
     fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
 ) -> Callable[
     [torch.Tensor, torch.Tensor, DataBatch],
@@ -27,7 +27,7 @@ def _handle_batch(
 
 
 @overload
-def _handle_batch(
+def _batch_mean(
     fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
 ) -> Callable[
     [torch.Tensor, torch.Tensor, DataBatch, Literal["tensor"]],
@@ -36,7 +36,7 @@ def _handle_batch(
 
 
 @overload
-def _handle_batch(
+def _batch_mean(
     fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
 ) -> Callable[
     [torch.Tensor, torch.Tensor, DataBatch, Literal["float"]],
@@ -45,7 +45,7 @@ def _handle_batch(
 
 
 @overload
-def _handle_batch(
+def _batch_mean(
     fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
 ) -> Callable[
     [torch.Tensor, torch.Tensor, DataBatch, Literal["np"]],
@@ -53,7 +53,7 @@ def _handle_batch(
 ]: ...
 
 
-def _handle_batch(
+def _batch_mean(
     fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
 ) -> Callable[
     [torch.Tensor, torch.Tensor, DataBatch, _ReturnType],
@@ -81,17 +81,78 @@ def _handle_batch(
     return _inner
 
 
-@_handle_batch
+@overload
+def _batch_gmean(
+    fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+) -> Callable[
+    [torch.Tensor, torch.Tensor, DataBatch],
+    torch.Tensor,
+]: ...
+
+
+@overload
+def _batch_gmean(
+    fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+) -> Callable[
+    [torch.Tensor, torch.Tensor, DataBatch, Literal["tensor"]],
+    torch.Tensor,
+]: ...
+
+
+@overload
+def _batch_gmean(
+    fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+) -> Callable[
+    [torch.Tensor, torch.Tensor, DataBatch, Literal["float"]],
+    float,
+]: ...
+
+
+def _batch_gmean(
+    fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+) -> Callable[
+    [torch.Tensor, torch.Tensor, DataBatch, _ReturnType],
+    torch.Tensor | np.ndarray | float,
+]:
+    def _inner(
+        actual: torch.Tensor,
+        target: torch.Tensor,
+        batch: DataBatch,
+        return_type: _ReturnType = "tensor",
+    ) -> torch.Tensor | np.ndarray | float:
+        """If aggregating, return a tensor or float which is the geometric mean over non-masked tokens. Otherwise, convert to
+        a numpy array of the raw values returned by the wrapped function, for only the non-masked tokens.
+        """
+        if return_type == "np":
+            return tensor_to_numpy(
+                fn(actual, target)[batch.token_mask.bool()].flatten().cpu()
+            )
+        else:
+            result = fn(actual, target)[batch.token_mask.bool()]
+            result = result.clip(min=1e-9).log().mean().exp()
+            if return_type == "tensor":
+                return result
+            return result.item()
+
+    return _inner
+
+
+@_batch_mean
 def cos_dist_loss(actual: torch.Tensor, target: torch.Tensor):
     return 1 - torch.nn.functional.cosine_similarity(actual, target, dim=-1)
 
 
-@_handle_batch
+@_batch_mean
 def mse_loss(actual: torch.Tensor, target: torch.Tensor):
     return ((actual - target) ** 2).mean(dim=-1)
 
 
-@_handle_batch
+@_batch_gmean
+def gmse_loss(actual: torch.Tensor, target: torch.Tensor):
+    return ((actual - target) ** 2).sum(dim=-1)
+
+
+@_batch_mean
 def l1_loss(actual: torch.Tensor, target: torch.Tensor):
     return (actual - target).abs().mean(dim=-1)
 
@@ -135,14 +196,14 @@ def kl_loss(
 kl_eval = partial(kl_loss, overwrite_inputs=True)
 
 
-@_handle_batch
+@_batch_mean
 def rre_eval(actual: torch.Tensor, target: torch.Tensor):
     return torch.linalg.vector_norm(actual - target, dim=-1, dtype=torch.float32) / (
         torch.linalg.vector_norm(target, dim=-1, dtype=torch.float32) + 1e-8
     )
 
 
-@_handle_batch
+@_batch_mean
 def l0_eval(features: torch.Tensor, _):
     return (features > 0).to(torch.float32).sum(dim=-1)
 

@@ -2,7 +2,13 @@ from __future__ import annotations
 from tqdm.auto import tqdm
 from contextlib import ExitStack
 from copy import deepcopy
-from transformers_sae.metrics import mse_loss, cos_dist_loss, l1_loss, kl_loss
+from transformers_sae.metrics import (
+    mse_loss,
+    cos_dist_loss,
+    l1_loss,
+    kl_loss,
+    gmse_loss,
+)
 
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -204,7 +210,9 @@ class TrainingResult:
         return result
 
 
-def make_optimizer(saes: Dict[int, SAE], layers: List[int], config: TrainingConfig):
+def make_optimizer(
+    saes: Dict[int, SAE], layers: List[int], config: TrainingConfig
+) -> torch.optim.Adam:
     param_groups = [
         {
             "params": [
@@ -367,6 +375,7 @@ def tune_encoder(
 
         for sae in baseline_saes.values():
             sae.onload()
+            sae.eval()
 
         for layer in layers_to_tune:
             baseline_sae = baseline_saes[layer]
@@ -468,9 +477,9 @@ def tune_encoder(
                     #     layer
                     # ].sae_output
 
-                    loss = (
+                    cur_layer_loss = (
                         mse_loss(
-                            # cur_layer_actual_reconstruction,
+                            # cur_la1yer_actual_reconstruction,
                             # baseline_activations[layer].layer_output,
                             cur_layer_actual_features,
                             cur_layer_expected_features,
@@ -479,7 +488,6 @@ def tune_encoder(
                         * training_sae.config.d_sae
                         / training_sae.encoder.activation[-1].config.k
                     )
-
 
                     if layer + 1 in training_saes:
                         actual_features = training_saes[layer + 1].encode(
@@ -494,7 +502,7 @@ def tune_encoder(
 
                         # Using MSE loss on features here (rather than cosdist as we do elsewhere) because ideally
                         # our tuned SAE matches the original features *exactly* on the distorted input.
-                        loss += (
+                        next_layer_loss = (
                             mse_loss(
                                 # actual_reconstruction,
                                 # baseline_activations[layer + 1].layer_output,
@@ -508,12 +516,36 @@ def tune_encoder(
                         )
                     else:
                         actual_log_probs = replacement_activations[layer + 1].log_probs
-                        kl = kl_loss(actual_log_probs, expected_log_probs, batch)
-                        kl_scale = loss.item() / (kl.item() + 1e-8)
-                        loss += kl_scale * kl
-                (loss / 2).backward()
+                        next_layer_loss = kl_loss(
+                            actual_log_probs, expected_log_probs, batch
+                        )
+                        kl_scale = cur_layer_loss.item() / (
+                            next_layer_loss.item() + 1e-8
+                        )
+                        next_layer_loss = kl_scale * next_layer_loss
+                loss = (cur_layer_loss + next_layer_loss) / 2
+                loss.backward()
+                if loss.item() > 1e9:
+                    breakpoint()
 
-                progress.set_postfix({"loss": loss.item()})
+                progress.set_postfix(
+                    {
+                        "loss": loss.item(),
+                        "cur_layer_loss": cur_layer_loss.item(),
+                        "next_layer_loss": next_layer_loss.item(),
+                        "fs": training_sae.encoder.feature_scale.item(),
+                    }
+                )
+
+                torch.nn.utils.clip_grad_norm_(
+                    [
+                        p
+                        for pg in optimizer.param_groups
+                        for p in pg["params"]
+                        if p.requires_grad
+                    ],
+                    max_norm=1.0,
+                )
 
                 optimizer.step()
                 num_used_tokens += batch.num_tokens
@@ -758,6 +790,15 @@ def training_loop(
 
         def _do_step():
             nonlocal loss, num_used_tokens
+            torch.nn.utils.clip_grad_norm_(
+                [
+                    p
+                    for pg in optimizer.param_groups
+                    for p in pg["params"]
+                    if p.requires_grad
+                ],
+                max_norm=1.0,
+            )
             optimizer.step()
             optimizer.zero_grad()
             stepper.post_step(config)
@@ -1033,6 +1074,7 @@ def train(
                 # backward_fn = None
                 optimizer = make_optimizer(training_saes, [layer], config)
 
+            print(training_saes[layer].encoder)
             training_loop(
                 stepper,
                 train_result,

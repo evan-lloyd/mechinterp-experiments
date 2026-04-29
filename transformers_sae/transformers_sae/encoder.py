@@ -307,8 +307,10 @@ class Encoder(torch.nn.Module):
         to_dtype = self.config.train_dtype if mode else self.config.inference_dtype
         # Unsure why, but have to do it this way for compatibility with FakeTensorMode, which
         # is useful to support for memory profiling purposes.
-        self.linear.weight = torch.nn.Parameter(self.linear.weight.to(to_dtype))
-        self.linear.bias = torch.nn.Parameter(self.linear.bias.to(to_dtype))
+        if isinstance(self.linear.weight, torch.nn.Parameter):
+            self.linear.weight = torch.nn.Parameter(self.linear.weight.to(to_dtype))
+        if getattr(self.linear, "bias", None) is not None:
+            self.linear.bias = torch.nn.Parameter(self.linear.bias.to(to_dtype))
         self.requires_grad_(mode)
 
     @property
@@ -337,6 +339,7 @@ class LISTA(Encoder):
     config: LISTAConfig
     decoder: "Decoder"
     scale: torch.nn.Parameter
+    feature_scale: torch.nn.Parameter
     activation: torch.nn.ModuleList
 
     def __init__(
@@ -361,6 +364,18 @@ class LISTA(Encoder):
                 for act_cfg in activation_configs
             ]
         )
+        self.feature_scale = torch.nn.Parameter(
+            torch.tensor(1.0, dtype=self.config.train_dtype, device="meta"),
+            requires_grad=True,
+        )
+
+    def _set_parametrization(self):
+        if self.training and not hasattr(self.linear, "parametrizations"):
+            self.linear = torch.nn.utils.parametrizations.spectral_norm(self.linear)
+        elif not self.training and hasattr(self.linear, "parametrizations"):
+            self.linear = torch.nn.utils.parametrize.remove_parametrizations(
+                self.linear, "weight"
+            )
 
     @torch.no_grad()
     def init_weights(
@@ -371,6 +386,8 @@ class LISTA(Encoder):
         from .decoder import Decoder
 
         super().init_weights(init_from, to_device)
+        self.linear.bias = None
+        self._set_parametrization()
 
         if init_from is None:
             raise ValueError(
@@ -385,30 +402,46 @@ class LISTA(Encoder):
             self.scale = torch.nn.Parameter(
                 init_from.scale.to(to_device or self.config.device, copy=True)
             )
+            self.feature_scale = torch.nn.Parameter(
+                init_from.feature_scale.to(to_device or self.config.device, copy=True)
+            )
         elif isinstance(init_from, Decoder):
             # Avoid adding to module hierarchy; we want a simple reference to it
             object.__setattr__(self, "decoder", init_from)
 
             self.scale = torch.nn.Parameter(
-                torch.ones_like(self.scale, device=to_device or self.config.device)
-                * 1.0
-                / self.config.n_iterations
+                torch.full_like(
+                    self.scale,
+                    1.0 / self.config.n_iterations,
+                    device=to_device or self.config.device,
+                )
+            )
+            self.feature_scale = torch.nn.Parameter(
+                torch.ones_like(
+                    self.feature_scale,
+                    device=to_device or self.config.device,
+                ),
+                requires_grad=True,
             )
         else:
             raise ValueError(f"Invalid initialization source: {type(init_from)}")
 
     def train(self, mode: bool = True):
+        self.training = mode
+        self._set_parametrization()
         super().train(mode)
 
         # NB: deliberately *not* casting dtype of scale or activation thresholds
         self.scale.requires_grad_(mode)
+        self.feature_scale.requires_grad_(mode)
 
     def train_activations(self):
         super().train_activations()
         self.scale.requires_grad_(True)
+        self.feature_scale.requires_grad_(True)
 
     def interaction_params(self) -> Iterator[Tuple[str, torch.nn.Parameter]]:
-        yield from (("scale", self.scale),)
+        yield from (("scale", self.scale), ("feature_scale", self.feature_scale))
 
     def forward(
         self, x: torch.Tensor, token_mask: torch.Tensor, should_cast: bool = True
@@ -421,7 +454,25 @@ class LISTA(Encoder):
         features = torch.zeros(
             (x.shape[0], x.shape[1], self.config.d_sae), device=x.device, dtype=x.dtype
         )
+
+        # decoder_weight = self.decoder.linear.weight.T
+        # if self.training:
+        #     with torch.no_grad():
+        #         decoder_std = decoder_weight.std()
+        if self.training:
+            with torch.no_grad():
+                x_norm = x.norm(dim=-1, keepdim=True)
+                x_std = x.std(-1, keepdim=True)
+                x += torch.randn_like(x) * x_std
+                x = x / x.norm(dim=-1, keepdim=True) * x_norm
+
         for i in range(self.config.n_iterations):
+            # if self.training:
+            #     decoder_weight = (
+            #         self.decoder.linear.weight.T
+            #         + torch.randn_like(decoder_weight) * decoder_std
+            #     )
+            #     decoder_weight /= decoder_weight.norm(dim=1, keepdim=True)
             features = self.activation[i](
                 features
                 + self.scale[i].to(x.dtype) * self.linear(x - self.decoder(features)),
@@ -429,6 +480,7 @@ class LISTA(Encoder):
             )
             # features = 1000.0 * torch.tanh(features / 1000.0)
 
+        features *= self.feature_scale
         if should_cast:
             features = features.to(out_dtype)
         return features

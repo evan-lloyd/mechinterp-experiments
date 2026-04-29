@@ -162,6 +162,7 @@ def get_state_dict_from_checkpoint(in_file: str):
 
 def load_checkpoint(in_file: str) -> "SAECheckpoint":
     from .sae import SAE, SAEConfig
+    from .encoder import LISTA
     from .training import SAECheckpoint
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -198,7 +199,7 @@ def load_checkpoint(in_file: str) -> "SAECheckpoint":
                     moved_to_mps = True
                 else:
                     sae_config.change_configured_device("cpu")
-                
+
             sae = SAE(sae_config)
             with safe_open(sae_path, framework="pt") as f:
                 state_dict = {key: f.get_tensor(key) for key in f.keys()}
@@ -213,6 +214,15 @@ def load_checkpoint(in_file: str) -> "SAECheckpoint":
             old_batch_topk_threshold = state_dict.pop(
                 "encoder.batch_topk_threshold", None
             )
+            if isinstance(sae.encoder, LISTA):
+                sae.encoder._set_parametrization()
+                if "encoder.feature_scale" not in state_dict:
+                    state_dict["encoder.feature_scale"] = torch.tensor(
+                        1.0,
+                        dtype=sae.encoder.config.train_dtype,
+                        device=sae.encoder.config.device,
+                    )
+
             if old_batch_topk_threshold is not None:
                 state_dict["encoder.activation.0.threshold"] = old_batch_topk_threshold
 
