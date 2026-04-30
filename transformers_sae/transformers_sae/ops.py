@@ -223,6 +223,9 @@ def load_checkpoint(in_file: str) -> "SAECheckpoint":
                         device=sae.encoder.config.device,
                     )
 
+            if "encoder.linear.bias" not in state_dict:
+                sae.encoder.linear.bias = None
+
             if old_batch_topk_threshold is not None:
                 state_dict["encoder.activation.0.threshold"] = old_batch_topk_threshold
 

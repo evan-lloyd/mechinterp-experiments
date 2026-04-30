@@ -143,7 +143,7 @@ training_results = train(
             int(1e7),
         )
     ),
-    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_lista_spectral_norm/",
+    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_lista_feature_rescaling/",
     force_retrain=False,
     offload_after_training=False,
 )

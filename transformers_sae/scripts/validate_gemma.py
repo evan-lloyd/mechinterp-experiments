@@ -166,7 +166,8 @@ for training_method in (
     # "next_layer_lista",
     # "next_layer_lista_normalized_decoder",
     # "next_layer_finetuned_lista_normalized_decoder",
-    "next_layer_lista_spectral_norm",
+    "next_layer_lista_feature_rescaling",
+    # "next_layer_lista_spectral_norm",
     # "next_layer_finetuned_lista",
 ):
     results_path = f"{VALIDATION_BASE_PATH}/{training_method}"
@@ -207,7 +208,7 @@ for training_method in (
             offload_after_training=False,
         )
         saes = tr.final_saes
-        # save_training_result(tr, f"{os.getenv('HF_BUCKET_LOCAL')}/{training_method}_tuned_encoder_{start_layer}")
+        save_training_result(tr, f"{os.getenv('HF_BUCKET_LOCAL')}/{training_method}_tuned_encoder_{start_layer}")
 
         # tune_activation_thresholds(
         #     model,

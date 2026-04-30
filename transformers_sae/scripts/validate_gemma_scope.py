@@ -15,8 +15,12 @@ from transformers_sae.ops import (
     save_validations,
 )
 from transformers_sae.replacement_model import GemmaReplacement, make_replacement_model
-from transformers_sae.sae_lens_wrapper import wrap_sae_lens_pretrained
-from transformers_sae.training import tune_activation_thresholds
+from transformers_sae.sae_lens_wrapper import wrap_sae_lens_pretrained, convert_sae_lens_pretrained
+from transformers_sae.training import (
+    tune_encoder,
+    TrainingConfig,
+    TrainingMethod,
+)
 from transformers_sae.validation import run_validations
 
 # Tweak TRAINING_BATCH_SIZE for your hardware if necessary
@@ -73,8 +77,37 @@ VALIDATION_BASE_PATH = "/workspace/sae_checkpoints/validations/gemma_2_2b"
 CHECKPOINT_BASE_PATH = "/workspace/sae_checkpoints/gemma_2_2b"
 TOKENIZER_BATCH_SIZE = 256
 NUM_VALIDATION_TOKENS = int(1e6)
+NUM_TRAINING_TOKENS = int(5e7)
 NUM_THRESHOLD_TUNING_TOKENS = int(1e6)
-NUM_TRAINING_TOKENS = int(1e8)
+FINETUNE_FRACTION = 0.2
+
+
+def linear_decay_during_finetune(frac_trained: float, **kwargs):
+    if frac_trained < (1 - FINETUNE_FRACTION):
+        return 1.0
+    return 1.0 - (frac_trained - (1 - FINETUNE_FRACTION)) / FINETUNE_FRACTION
+
+
+training_config = TrainingConfig(
+    tokenizer_batch_size=TOKENIZER_BATCH_SIZE,
+    training_batch_size=TRAINING_BATCH_SIZE,
+    num_train_tokens=NUM_TRAINING_TOKENS,
+    eval_interval=int(1e5),
+    # train_layers=list(range(10, model.num_layers)),
+    train_layers=list(range(0, model.num_layers)),
+    betas=(
+        0.0,
+        0.999,
+    ),  # TODO: is this actually good for our training method? not for tinystories anyway
+    lr=1e-4,
+    interaction_lr=1e-4,
+    threshold_lr=1e-2,
+    lr_schedule=linear_decay_during_finetune,  # per Karvonen (2025)
+    downstream_reconstruction_weight=1.0,
+    reconstruction_weight=1.0,
+    balance_reconstruction_losses=True,
+    method=TrainingMethod.standard,
+)
 
 gemma_release = "gemma-scope-2b-pt-res-canonical"
 
@@ -95,7 +128,7 @@ def load_saes(checkpoint_dir: str, start_layer: int):
     saes = {}
 
     def load_gemma_scope(layer):
-        sae = wrap_sae_lens_pretrained(
+        sae = convert_sae_lens_pretrained(
             gemma_scope_sae_target_l0[layer],
             release=gemma_release,
             sae_id=f"layer_{layer}/width_16k/canonical",
@@ -123,7 +156,7 @@ def load_saes(checkpoint_dir: str, start_layer: int):
 #     return (1.0 - frac_trained) * MAX_THRESHOLD_LR + frac_trained * MIN_THRESHOLD_LR
 
 
-START_LAYER = 18
+START_LAYER = 23
 saes = {}
 for training_method in (
     "gemma_scope_canonical_l0",
@@ -160,17 +193,27 @@ for training_method in (
             sae.threshold_offset.fill_(0.0)
             sae.target_l0 = target_l0[layer]
 
-        tune_activation_thresholds(
+        tr = tune_encoder(
             model,
             tokenizer,
             {layer: sae for layer, sae in saes.items() if layer >= start_layer},
             training_dataset,
-            TOKENIZER_BATCH_SIZE,
-            TRAINING_BATCH_SIZE,
+            training_config,
             NUM_THRESHOLD_TUNING_TOKENS,
             offload_after_training=False,
-            # lr_schedule=linear_decay,
         )
+        saes = tr.final_saes
+        # tune_activation_thresholds(
+        #     model,
+        #     tokenizer,
+        #     {layer: sae for layer, sae in saes.items() if layer >= start_layer},
+        #     training_dataset,
+        #     TOKENIZER_BATCH_SIZE,
+        #     TRAINING_BATCH_SIZE,
+        #     NUM_THRESHOLD_TUNING_TOKENS,
+        #     offload_after_training=False,
+        #     # lr_schedule=linear_decay,
+        # )
         # new_thresholds = {
         #     layer: sae.threshold_offset.item()
         #     for layer, sae in saes.items()

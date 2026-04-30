@@ -566,6 +566,7 @@ def tune_encoder(
                 # end for each batch
 
             training_sae.eval()
+            training_sae.encoder.train_activations()
             progress.close()
             # end for each layer
 

@@ -280,11 +280,12 @@ class Encoder(torch.nn.Module):
                 .detach()
                 .contiguous()
             )
-            self.linear.bias = torch.nn.Parameter(
-                init_from.linear.bias.to(to_device or self.config.device, copy=True)
-                .detach()
-                .contiguous()
-            )
+            if getattr(init_from.linear, "bias", None) is not None:
+                self.linear.bias = torch.nn.Parameter(
+                    init_from.linear.bias.to(to_device or self.config.device, copy=True)
+                    .detach()
+                    .contiguous()
+                )
         elif isinstance(init_from, Decoder):
             self.linear.weight = torch.nn.Parameter(
                 init_from.linear.weight.T.to(to_device or self.config.device, copy=True)
@@ -455,32 +456,20 @@ class LISTA(Encoder):
             (x.shape[0], x.shape[1], self.config.d_sae), device=x.device, dtype=x.dtype
         )
 
-        # decoder_weight = self.decoder.linear.weight.T
-        # if self.training:
-        #     with torch.no_grad():
-        #         decoder_std = decoder_weight.std()
-        if self.training:
-            with torch.no_grad():
-                x_norm = x.norm(dim=-1, keepdim=True)
-                x_std = x.std(-1, keepdim=True)
-                x += torch.randn_like(x) * x_std
-                x = x / x.norm(dim=-1, keepdim=True) * x_norm
-
         for i in range(self.config.n_iterations):
-            # if self.training:
-            #     decoder_weight = (
-            #         self.decoder.linear.weight.T
-            #         + torch.randn_like(decoder_weight) * decoder_std
-            #     )
-            #     decoder_weight /= decoder_weight.norm(dim=1, keepdim=True)
+            residual = x - self.decoder(features)
+
+            # Rescale features to current iteration. This helps to prevent their magnitude
+            # from sometimes blowing up.
+            if i >= 1:
+                features *= self.scale[i] / self.scale[i - 1]
             features = self.activation[i](
-                features
-                + self.scale[i].to(x.dtype) * self.linear(x - self.decoder(features)),
+                features + self.scale[i] * self.linear(residual),
                 token_mask,
             )
             # features = 1000.0 * torch.tanh(features / 1000.0)
 
-        features *= self.feature_scale
+        # features *= self.feature_scale
         if should_cast:
             features = features.to(out_dtype)
         return features
