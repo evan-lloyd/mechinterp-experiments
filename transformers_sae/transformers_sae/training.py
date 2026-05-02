@@ -525,15 +525,14 @@ def tune_encoder(
                         next_layer_loss = kl_scale * next_layer_loss
                 loss = (cur_layer_loss + next_layer_loss) / 2
                 loss.backward()
-                if loss.item() > 1e9:
-                    breakpoint()
+                # if loss.item() > 1e9:
+                #     breakpoint()
 
                 progress.set_postfix(
                     {
                         "loss": loss.item(),
                         "cur_layer_loss": cur_layer_loss.item(),
                         "next_layer_loss": next_layer_loss.item(),
-                        "fs": training_sae.encoder.feature_scale.item(),
                     }
                 )
 
@@ -629,11 +628,12 @@ def tune_activation_thresholds(
         num_used_tokens = 0
 
         # Only train scale
-        params = [
-            param
-            for sae in saes.values()
-            for _, param in sae.encoder.interaction_params()
-        ]
+        # params = [
+        #     param
+        #     for sae in saes.values()
+        #     for _, param in sae.encoder.interaction_params()
+        # ]
+        params = []
         if params:
             optimizer = torch.optim.Adam(
                 params,
@@ -1016,6 +1016,17 @@ def train(
                 )
                 print(f"Loading {source_checkpoint} for finetuning")
                 sae = training_saes[layer]
+                loaded_sae = load_checkpoint(source_checkpoint).sae
+                sae.init_weights(loaded_sae)
+
+                # TODO: we really need to refactor so that init_weights handles this
+                for i, a in enumerate(sae.encoder.activation):
+                    if hasattr(a, "threshold"):
+                        a.threshold.fill_(
+                            loaded_sae.encoder.activation[i].threshold.item()
+                        )
+                del loaded_sae
+
                 sae.load_state_dict(
                     get_state_dict_from_checkpoint(source_checkpoint), assign=True
                 )

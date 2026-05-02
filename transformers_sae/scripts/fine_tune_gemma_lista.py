@@ -143,9 +143,9 @@ training_results = train(
             int(1e7),
         )
     ),
-    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_finetuned_lista_normalized_decoder/",
+    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_finetuned_lista_feature_rescaling/",
     force_retrain=False,
-    fine_tune_source_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_lista_normalized_decoder/",
+    fine_tune_source_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_lista_feature_rescaling/",
     offload_after_training=False,
 )
 

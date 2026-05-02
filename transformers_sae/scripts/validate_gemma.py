@@ -13,7 +13,8 @@ from transformers_sae.ops import (
     MemoryTrackingMode,
     find_latest_checkpoint,
     load_checkpoint,
-    save_validations, save_training_result,
+    save_validations,
+    save_training_result,
 )
 from transformers_sae.replacement_model import GemmaReplacement, make_replacement_model
 from transformers_sae.training import (
@@ -79,7 +80,8 @@ CHECKPOINT_BASE_PATH = "/workspace/sae_checkpoints/gemma_2_2b"
 TOKENIZER_BATCH_SIZE = 256
 NUM_VALIDATION_TOKENS = int(1e6)
 NUM_THRESHOLD_TUNING_TOKENS = int(1e6)
-NUM_TRAINING_TOKENS = int(5e7)
+# NUM_TRAINING_TOKENS = int(5e7)
+NUM_TRAINING_TOKENS = 0
 
 
 def load_saes(checkpoint_dir: str, start_layer: int = 0):
@@ -166,7 +168,8 @@ for training_method in (
     # "next_layer_lista",
     # "next_layer_lista_normalized_decoder",
     # "next_layer_finetuned_lista_normalized_decoder",
-    "next_layer_lista_feature_rescaling",
+    # "next_layer_lista_feature_rescaling",
+    "next_layer_finetuned_lista_feature_rescaling",
     # "next_layer_lista_spectral_norm",
     # "next_layer_finetuned_lista",
 ):
@@ -182,7 +185,8 @@ for training_method in (
         print(f"Skipping {training_method}, validations already complete")
         continue
 
-    saes = load_saes(f"{CHECKPOINT_BASE_PATH}/{training_method}", START_LAYER)
+    # saes = load_saes(f"{CHECKPOINT_BASE_PATH}/{training_method}", START_LAYER)
+    saes = load_saes(f"{os.getenv('HF_BUCKET_LOCAL')}/{training_method}_tuned_encoder_{START_LAYER}", START_LAYER)
     # assert len(saes) == model.num_layers, (
     #     f"Missing SAEs for {training_method}, only had {set(saes.keys())}"
     # )
@@ -198,17 +202,20 @@ for training_method in (
             for i, a in enumerate(sae.encoder.activation):
                 a.threshold.fill_(orig_thresholds[layer][i])
 
-        tr = tune_encoder(
-            model,
-            tokenizer,
-            {layer: sae for layer, sae in saes.items() if layer >= start_layer},
-            training_dataset,
-            training_config,
-            NUM_THRESHOLD_TUNING_TOKENS,
-            offload_after_training=False,
-        )
-        saes = tr.final_saes
-        save_training_result(tr, f"{os.getenv('HF_BUCKET_LOCAL')}/{training_method}_tuned_encoder_{start_layer}")
+        # tr = tune_encoder(
+        #     model,
+        #     tokenizer,
+        #     {layer: sae for layer, sae in saes.items() if layer >= start_layer},
+        #     training_dataset,
+        #     training_config,
+        #     NUM_THRESHOLD_TUNING_TOKENS,
+        #     offload_after_training=False,
+        # )
+        # saes = tr.final_saes
+        # save_training_result(
+        #     tr,
+        #     f"{os.getenv('HF_BUCKET_LOCAL')}/{training_method}_tuned_encoder_{start_layer}",
+        # )
 
         # tune_activation_thresholds(
         #     model,

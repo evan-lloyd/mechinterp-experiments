@@ -1,3 +1,4 @@
+import copy
 import math
 import os
 import tempfile
@@ -37,6 +38,22 @@ if TYPE_CHECKING:
     from .sae import SAE
     from .training import SAECheckpoint, TrainingResult
     from .validation import ValidationResult
+
+
+def _shallow_copy_model(source: torch.nn.Module):
+    copied = copy.copy(source)
+    copied._modules = {}
+    copied._buffers = dict(**source._buffers)
+    copied._parameters = dict(**source._parameters)
+    copied._non_persistent_buffers_set = copy.copy(source._non_persistent_buffers_set)
+    copied.training = source.training
+
+    # Recursively copy all submodules
+    for name, module in source._modules.items():
+        if module is not None:
+            copied._modules[name] = _shallow_copy_model(module)
+
+    return copied
 
 
 def _checkpoint_filename(layer: int, total_tokens_trained: int) -> str:
@@ -161,8 +178,8 @@ def get_state_dict_from_checkpoint(in_file: str):
 
 
 def load_checkpoint(in_file: str) -> "SAECheckpoint":
-    from .sae import SAE, SAEConfig
     from .encoder import LISTA
+    from .sae import SAE, SAEConfig
     from .training import SAECheckpoint
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -214,6 +231,12 @@ def load_checkpoint(in_file: str) -> "SAECheckpoint":
             old_batch_topk_threshold = state_dict.pop(
                 "encoder.batch_topk_threshold", None
             )
+            if old_batch_topk_threshold is not None:
+                state_dict["encoder.activation.0.threshold"] = old_batch_topk_threshold
+
+            # TODO: need to finalize format and clean this up
+            if "encoder.linear.bias" not in state_dict:
+                sae.encoder.linear.bias = None
             if isinstance(sae.encoder, LISTA):
                 sae.encoder._set_parametrization()
                 if "encoder.feature_scale" not in state_dict:
@@ -223,11 +246,16 @@ def load_checkpoint(in_file: str) -> "SAECheckpoint":
                         device=sae.encoder.config.device,
                     )
 
-            if "encoder.linear.bias" not in state_dict:
-                sae.encoder.linear.bias = None
-
-            if old_batch_topk_threshold is not None:
-                state_dict["encoder.activation.0.threshold"] = old_batch_topk_threshold
+                if "encoder.linear.parametrizations.weight.original" not in state_dict:
+                    linear = _shallow_copy_model(sae.encoder.linear)
+                    linear.load_state_dict(
+                        {"weight": state_dict.pop("encoder.linear.weight")}, assign=True
+                    )
+                    linear = torch.nn.utils.parametrizations.spectral_norm(linear)
+                    linear.state_dict(
+                        destination=state_dict,
+                        prefix="encoder.linear.",
+                    )
 
             sae.load_state_dict(state_dict, assign=True)
 

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import copy
 from typing import Dict, Optional, Type, overload
 
 import torch
 
 from .data_batch import DataBatch
+from .ops import _shallow_copy_model
 from .sae import SAE
 
 
@@ -140,22 +140,6 @@ class GemmaReplacement(ReplacementModel):
         layer_kwargs["position_embeddings"] = kwargs["position_embeddings"]
         layer_kwargs["attention_mask"] = kwargs["attention_mask"][layer.attention_type]
         return layer_args, layer_kwargs
-
-
-def _shallow_copy_model(source: torch.nn.Module):
-    copied = copy.copy(source)
-    copied._modules = {}
-    copied._buffers = dict(**source._buffers)
-    copied._parameters = dict(**source._parameters)
-    copied._non_persistent_buffers_set = copy.copy(source._non_persistent_buffers_set)
-    copied.training = source.training
-
-    # Recursively copy all submodules
-    for name, module in source._modules.items():
-        if module is not None:
-            copied._modules[name] = _shallow_copy_model(module)
-
-    return copied
 
 
 @overload
