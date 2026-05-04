@@ -1,4 +1,5 @@
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 
 import cloudpickle
@@ -14,14 +15,13 @@ from transformers_sae.ops import (
     find_latest_checkpoint,
     load_checkpoint,
     save_validations,
-    save_training_result,
 )
 from transformers_sae.replacement_model import GemmaReplacement, make_replacement_model
 from transformers_sae.training import (
-    tune_activation_thresholds,
-    tune_encoder,
     TrainingConfig,
     TrainingMethod,
+    tune_activation_thresholds,
+    tune_encoder,
 )
 from transformers_sae.validation import generate_with_replacement, run_validations
 
@@ -80,22 +80,40 @@ CHECKPOINT_BASE_PATH = "/workspace/sae_checkpoints/gemma_2_2b"
 TOKENIZER_BATCH_SIZE = 256
 NUM_VALIDATION_TOKENS = int(1e6)
 NUM_THRESHOLD_TUNING_TOKENS = int(1e6)
-# NUM_TRAINING_TOKENS = int(5e7)
-NUM_TRAINING_TOKENS = 0
+NUM_TRAINING_TOKENS = int(5e7)
+# NUM_TRAINING_TOKENS = 0
 
 
 def load_saes(checkpoint_dir: str, start_layer: int = 0):
     saes = {}
+    if checkpoint_dir and os.path.isdir(checkpoint_dir):
+        max_idx = None
+        thresholds_file = None
+        for fname in os.listdir(checkpoint_dir):
+            m = re.match(r"tuned_thresholds_(\d+)$", fname)
+            if m:
+                idx = int(m.group(1))
+                if max_idx is None or idx > max_idx:
+                    max_idx = idx
+                    thresholds_file = fname
+        loaded_thresholds = {}
+        if thresholds_file:
+            with open(os.path.join(checkpoint_dir, thresholds_file), "rb") as f:
+                loaded_thresholds = cloudpickle.load(f)
 
     def load_layer_checkpoint(layer):
         checkpoint = find_latest_checkpoint(checkpoint_dir, layer)
         if checkpoint is not None:
             cp = load_checkpoint(checkpoint)
-            if cp.total_tokens_trained < NUM_TRAINING_TOKENS:
-                print(f"No checkpoint found for layer {layer}")
-                return layer, None
+            assert cp.sae is not None
+            # if cp.total_tokens_trained < NUM_TRAINING_TOKENS:
+            #     print(f"No checkpoint found for layer {layer}")
+            #     return layer, None
             sae = cp.sae
             print(f"Loaded checkpoint for layer {layer}")
+            if layer in loaded_thresholds:
+                print(f"Updated thresholds for layer {layer}")
+                sae.set_activation_thresholds(loaded_thresholds[layer])
             return layer, sae
         else:
             print(f"No checkpoint found for layer {layer}")
@@ -158,7 +176,7 @@ training_config = TrainingConfig(
     method=TrainingMethod.next_layer,
 )
 
-START_LAYER = 17
+START_LAYER = 24
 
 for training_method in (
     # "next_layer_finetuned_interaction",
@@ -169,7 +187,8 @@ for training_method in (
     # "next_layer_lista_normalized_decoder",
     # "next_layer_finetuned_lista_normalized_decoder",
     # "next_layer_lista_feature_rescaling",
-    "next_layer_finetuned_lista_feature_rescaling",
+    "next_layer_lista_sparse_btk",
+    # "next_layer_finetuned_lista_feature_rescaling",
     # "next_layer_lista_spectral_norm",
     # "next_layer_finetuned_lista",
 ):
@@ -185,37 +204,31 @@ for training_method in (
         print(f"Skipping {training_method}, validations already complete")
         continue
 
-    # saes = load_saes(f"{CHECKPOINT_BASE_PATH}/{training_method}", START_LAYER)
-    saes = load_saes(f"{os.getenv('HF_BUCKET_LOCAL')}/{training_method}_tuned_encoder_{START_LAYER}", START_LAYER)
+    saes = load_saes(f"{CHECKPOINT_BASE_PATH}/{training_method}", START_LAYER)
+    # saes = load_saes(
+    #     f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}_densebtk",
+    #     START_LAYER,
+    # )
     # assert len(saes) == model.num_layers, (
     #     f"Missing SAEs for {training_method}, only had {set(saes.keys())}"
     # )
-    orig_thresholds = {
-        layer: sae.activation_thresholds() for layer, sae in saes.items()
-    }
     for start_layer in (START_LAYER,):
         # for start_layer in sorted(set(saes.keys()) - existing_validations, reverse=False):
         print(
             f"Running validations for {training_method} replacement starting at {start_layer}"
         )
-        for layer, sae in saes.items():
-            for i, a in enumerate(sae.encoder.activation):
-                a.threshold.fill_(orig_thresholds[layer][i])
 
-        # tr = tune_encoder(
-        #     model,
-        #     tokenizer,
-        #     {layer: sae for layer, sae in saes.items() if layer >= start_layer},
-        #     training_dataset,
-        #     training_config,
-        #     NUM_THRESHOLD_TUNING_TOKENS,
-        #     offload_after_training=False,
-        # )
-        # saes = tr.final_saes
-        # save_training_result(
-        #     tr,
-        #     f"{os.getenv('HF_BUCKET_LOCAL')}/{training_method}_tuned_encoder_{start_layer}",
-        # )
+        tr = tune_encoder(
+            model,
+            tokenizer,
+            {layer: sae for layer, sae in saes.items() if layer >= start_layer},
+            training_dataset,
+            training_config,
+            NUM_THRESHOLD_TUNING_TOKENS,
+            offload_after_training=False,
+            checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}_densebtk",
+        )
+        saes = tr.final_saes
 
         # tune_activation_thresholds(
         #     model,

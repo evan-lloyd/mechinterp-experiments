@@ -47,9 +47,20 @@ fi
 SCRIPT_NAME="$1"
 shift
 
+USE_PDB=0
+
+if [[ "$1" == "--pdb" ]]; then
+    USE_PDB=1
+    shift
+fi
+
 # Check for Python script
 if [[ -f "$SCRIPTS_DIR/$SCRIPT_NAME.py" ]]; then
-    exec uv run -m "scripts.$SCRIPT_NAME" "$@"
+    if [[ $USE_PDB -eq 1 ]]; then
+        exec uv run -m pdb -c continue -m "scripts.$SCRIPT_NAME" "$@"
+    else
+        exec uv run -m "scripts.$SCRIPT_NAME" "$@"
+    fi
 # Check for shell script
 elif [[ -f "$SCRIPTS_DIR/$SCRIPT_NAME.sh" ]]; then
     exec bash "$SCRIPTS_DIR/$SCRIPT_NAME.sh" "$@"

@@ -126,7 +126,11 @@ class GemmaReplacement(ReplacementModel):
         return input_args, input_kwargs
 
     def get_logits(self, residual, **kwargs):
-        logits = self.lm_head(self.model.norm(residual))
+        residual = self.model.norm(residual)
+        logits = self.lm_head(residual)
+        # logits = torch.utils.checkpoint.checkpoint(
+        #     self.lm_head, residual, use_reentrant=False
+        # )
         if self.config.final_logit_softcapping is not None:
             logits = logits / self.config.final_logit_softcapping
             logits = torch.tanh(logits)

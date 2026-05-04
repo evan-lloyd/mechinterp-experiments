@@ -1,15 +1,16 @@
-from functools import wraps
 from dataclasses import dataclass
+from functools import wraps
 from itertools import repeat
 from typing import (
     Any,
+    Callable,
+    Concatenate,
     List,
     Mapping,
     Optional,
     ParamSpec,
+    Tuple,
     TypeVar,
-    Callable,
-    Concatenate,
 )
 
 import torch
@@ -219,6 +220,13 @@ class SAE(torch.nn.Module):
             for a in self.encoder.activation
             if hasattr(a, "threshold")
         )
+
+    def set_activation_thresholds(self, thresholds: Tuple[float]):
+        cur_threshold = 0
+        for a in self.encoder.activation:
+            if hasattr(a, "threshold"):
+                a.threshold.fill_(thresholds[cur_threshold])
+                cur_threshold += 1
 
     def set_activation_threshold_lr(self, lr: float):
         for a in self.encoder.activation:

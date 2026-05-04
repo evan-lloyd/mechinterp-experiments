@@ -23,6 +23,8 @@ dependencies = [
     "deepspeed>=0.18.9",
     "mpi4py>=4.1.1",
     "mpich>=5.0.0",
+    "ipdb>=0.13.13",
+    "pdbpp>=0.12.1",
 ]
 version = "0.0.0"
 

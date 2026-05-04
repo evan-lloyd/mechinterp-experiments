@@ -178,6 +178,12 @@ class BatchTopKActivationFunction(ActivationFunction):
                 self.threshold = (1 - lr) * self.threshold + lr * threshold.to(
                     self.threshold.dtype
                 )
+            return (
+                torch.zeros_like(x.view(-1))
+                .scatter(-1, topk.indices, topk.values)
+                .reshape(x.shape)
+            )
+
         # JumpReLU during inference
         else:
             threshold = self.threshold

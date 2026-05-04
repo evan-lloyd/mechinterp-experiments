@@ -17,7 +17,7 @@ from transformers_sae.validation import generate_with_replacement, run_validatio
 # Tweak TRAINING_BATCH_SIZE for your hardware if necessary
 if torch.cuda.is_available():
     TRAINING_DEVICE = "cuda:0"
-    TRAINING_BATCH_SIZE = 1
+    TRAINING_BATCH_SIZE = 2
 elif torch.mps.is_available():
     TRAINING_DEVICE = "mps:0"
     TRAINING_BATCH_SIZE = 2
@@ -143,21 +143,21 @@ training_results = train(
             int(1e7),
         )
     ),
-    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_lista_feature_rescaling/",
+    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_lista_sparse_btk/",
     force_retrain=False,
     offload_after_training=False,
 )
 
-tune_activation_thresholds(
-    model,
-    tokenizer,
-    training_results.final_saes,
-    training_dataset,
-    TOKENIZER_BATCH_SIZE,
-    TRAINING_BATCH_SIZE,
-    int(1e6),
-    offload_after_training=False,
-)
+# tune_activation_thresholds(
+#     model,
+#     tokenizer,
+#     training_results.final_saes,
+#     training_dataset,
+#     TOKENIZER_BATCH_SIZE,
+#     TRAINING_BATCH_SIZE,
+#     int(1e6),
+#     offload_after_training=False,
+# )
 
 validations = run_validations(
     model,
