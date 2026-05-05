@@ -1,4 +1,7 @@
 from __future__ import annotations
+from transformers_sae.training_step.in_place_finetuned import (
+    InPlaceFinetunedTrainingStepper,
+)
 
 import os
 import re
@@ -65,6 +68,7 @@ class TrainingMethod(Enum):
     next_layer_finetuned = "Next Layer + Fine-Tuning"
     e2e_full = "End-to-end Full Replacement"
     full_replacement = "Full Replacement"
+    in_place_finetuned = "Next Layer + In-Place Fine-Tuning"
 
 
 class LRSchedule(Protocol):
@@ -1021,13 +1025,23 @@ def train(
     force_retrain: bool = False,
     fine_tune_source_dir: Optional[str] = None,
     skip_kl_eval: bool = False,
+    fine_tune_in_place: bool = False,
+    override_token_offset: Optional[int] = None,
 ) -> TrainingResult:
     try:
         model.eval()
-        training_saes = {
-            layer: SAE(deepcopy(initial_saes[layer].config))
-            for layer in config.train_layers
-        }
+
+        assert (override_token_offset is not None) == fine_tune_in_place, (
+            "override_token_offset only valid option if fine_tune_in_place"
+        )
+
+        if fine_tune_in_place:
+            training_saes = initial_saes
+        else:
+            training_saes = {
+                layer: SAE(deepcopy(initial_saes[layer].config))
+                for layer in config.train_layers
+            }
         train_result = TrainingResult(training_saes)
 
         for layer in sorted(config.train_layers, reverse=True):
@@ -1055,6 +1069,21 @@ def train(
                 ]
                 training_saes[layer] = sae
                 token_offset = checkpoint.total_tokens_trained
+                if fine_tune_in_place:
+                    with open(f"{checkpoint_dir}/train_thresholds_{layer}", "rb") as f:
+                        loaded_thresholds = cloudpickle.load(f)
+                    for update_layer, sae in training_saes.items():
+                        sae.set_activation_thresholds(loaded_thresholds[update_layer])
+
+            elif fine_tune_in_place:
+                assert override_token_offset is not None, (
+                    "Must set override_token_offset if finetuning in place"
+                )
+                token_offset = override_token_offset
+                train_result._layer_results[layer][
+                    -1
+                ].total_tokens_trained = token_offset
+                sae = training_saes[layer]
             elif fine_tune_source_dir is not None:
                 # Init weights from source checkpoint
                 source_checkpoint, token_offset = find_checkpoint_after(
@@ -1114,6 +1143,8 @@ def train(
                 stepper = NextLayerFinetunedTrainingStepper(model, layer, training_saes)
             elif config.method is TrainingMethod.full_replacement:
                 stepper = FullReplacementTrainingStepper(model, training_saes)
+            elif config.method is TrainingMethod.in_place_finetuned:
+                stepper = InPlaceFinetunedTrainingStepper(model, layer, training_saes)
 
             eval_model = make_replacement_model(model, training_saes)
 
@@ -1122,19 +1153,25 @@ def train(
                     training_saes, list(training_saes.keys()), config
                 )
             else:
-                # Keep SAEs used in the replacement model in train mode, so eg for BatchTopK
-                # we automatically retune the threshold based on now having an SAE at the previous layer.
-                # Unused layers should be in eval mode.
-                for other_layer in range(layer, model.num_layers):
-                    if other_layer in stepper.replacement_model.sae_layers:
+                if fine_tune_in_place:
+                    for other_layer in training_saes.keys():
                         training_saes[other_layer].train()
                         training_saes[other_layer].requires_grad_(layer == other_layer)
-                    elif other_layer in training_saes:
-                        training_saes[other_layer].eval()
+                else:
+                    # Keep SAEs used in the replacement model in train mode, so eg for BatchTopK
+                    # we automatically retune the threshold based on now having an SAE at the previous layer.
+                    # Unused layers should be in eval mode.
+                    for other_layer in range(layer, model.num_layers):
+                        if other_layer in stepper.replacement_model.sae_layers:
+                            training_saes[other_layer].train()
+                            training_saes[other_layer].requires_grad_(
+                                layer == other_layer
+                            )
+                        elif other_layer in training_saes:
+                            training_saes[other_layer].eval()
                 # backward_fn = None
                 optimizer = make_optimizer(training_saes, [layer], config)
 
-            print(training_saes[layer].encoder)
             training_loop(
                 stepper,
                 train_result,
@@ -1176,6 +1213,15 @@ def train(
                     keep_in_ram=True,
                     blocking=True,
                 )
+                if fine_tune_in_place:
+                    with open(f"{checkpoint_dir}/train_thresholds_{layer}", "wb") as f:
+                        cloudpickle.dump(
+                            {
+                                save_layer: sae.activation_thresholds()
+                                for save_layer, sae in training_saes.items()
+                            },
+                            f,
+                        )
 
         return train_result
     finally:

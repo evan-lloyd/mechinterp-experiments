@@ -1,6 +1,7 @@
 import copy
 import math
 import os
+import re
 import tempfile
 import threading
 import uuid
@@ -448,6 +449,69 @@ def save_validations(validations: Dict[int, "ValidationResult"], out_dir: str) -
             continue
         with open(filepath, "wb") as f:
             cloudpickle.dump(result, f)
+
+
+def load_saes(
+    checkpoint_dir: str, num_layers: int, start_layer: int = 0
+) -> Dict[int, "SAE"]:
+    saes = {}
+    loaded_thresholds = {}
+
+    if checkpoint_dir and os.path.isdir(checkpoint_dir):
+        max_idx = None
+        min_idx = None
+        thresholds_file = None
+        for fname in os.listdir(checkpoint_dir):
+            # tuning moves in the forward direction, so we want the max
+            m = re.match(r"tuned_thresholds_(\d+)$", fname)
+            if m:
+                idx = int(m.group(1))
+                if max_idx is None or idx > max_idx:
+                    max_idx = idx
+                    thresholds_file = fname
+
+            # training moves backwards, so we want the min
+            m = re.match(r"train_thresholds_(\d+)$", fname)
+            if m:
+                idx = int(m.group(1))
+                if idx < start_layer:
+                    continue
+                if min_idx is None or idx < min_idx:
+                    min_idx = idx
+                    thresholds_file = fname
+        if thresholds_file:
+            with open(os.path.join(checkpoint_dir, thresholds_file), "rb") as f:
+                print(f"Loading thresholds from {f.name}")
+                loaded_thresholds = cloudpickle.load(f)
+
+    def load_layer_checkpoint(layer):
+        checkpoint = find_latest_checkpoint(checkpoint_dir, layer)
+        if checkpoint is not None:
+            cp = load_checkpoint(checkpoint)
+            assert cp.sae is not None
+            # if cp.total_tokens_trained < NUM_TRAINING_TOKENS:
+            #     print(f"No checkpoint found for layer {layer}")
+            #     return layer, None
+            sae = cp.sae
+            print(f"Loaded checkpoint for layer {layer}")
+            if layer in loaded_thresholds:
+                print(f"Updated thresholds for layer {layer}")
+                sae.set_activation_thresholds(loaded_thresholds[layer])
+            return layer, sae
+        else:
+            print(f"No checkpoint found for layer {layer}")
+            return layer, None
+
+    # Load the latest checkpoints for each layer in parallel
+    with ThreadPoolExecutor() as executor:
+        results = executor.map(
+            load_layer_checkpoint, range(num_layers - 1, start_layer - 1, -1)
+        )
+        for layer, sae in results:
+            if sae is not None:
+                saes[layer] = sae
+
+    return saes
 
 
 def load_validations(from_dir: str) -> Dict[int, "ValidationResult"]:

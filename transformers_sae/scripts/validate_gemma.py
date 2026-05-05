@@ -1,8 +1,6 @@
 import os
-import re
 from concurrent.futures import ThreadPoolExecutor
 
-import cloudpickle
 import numpy as np
 import torch
 from datasets import load_dataset
@@ -12,8 +10,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers_sae.benchmark import BenchmarkModel, MMLUBenchmark
 from transformers_sae.ops import (
     MemoryTrackingMode,
-    find_latest_checkpoint,
-    load_checkpoint,
+    load_saes,
     save_validations,
 )
 from transformers_sae.replacement_model import GemmaReplacement, make_replacement_model
@@ -84,53 +81,6 @@ NUM_TRAINING_TOKENS = int(5e7)
 # NUM_TRAINING_TOKENS = 0
 
 
-def load_saes(checkpoint_dir: str, start_layer: int = 0):
-    saes = {}
-    if checkpoint_dir and os.path.isdir(checkpoint_dir):
-        max_idx = None
-        thresholds_file = None
-        for fname in os.listdir(checkpoint_dir):
-            m = re.match(r"tuned_thresholds_(\d+)$", fname)
-            if m:
-                idx = int(m.group(1))
-                if max_idx is None or idx > max_idx:
-                    max_idx = idx
-                    thresholds_file = fname
-        loaded_thresholds = {}
-        if thresholds_file:
-            with open(os.path.join(checkpoint_dir, thresholds_file), "rb") as f:
-                loaded_thresholds = cloudpickle.load(f)
-
-    def load_layer_checkpoint(layer):
-        checkpoint = find_latest_checkpoint(checkpoint_dir, layer)
-        if checkpoint is not None:
-            cp = load_checkpoint(checkpoint)
-            assert cp.sae is not None
-            # if cp.total_tokens_trained < NUM_TRAINING_TOKENS:
-            #     print(f"No checkpoint found for layer {layer}")
-            #     return layer, None
-            sae = cp.sae
-            print(f"Loaded checkpoint for layer {layer}")
-            if layer in loaded_thresholds:
-                print(f"Updated thresholds for layer {layer}")
-                sae.set_activation_thresholds(loaded_thresholds[layer])
-            return layer, sae
-        else:
-            print(f"No checkpoint found for layer {layer}")
-            return layer, None
-
-    # Load the latest checkpoints for each layer in parallel
-    with ThreadPoolExecutor() as executor:
-        results = executor.map(
-            load_layer_checkpoint, range(model.num_layers - 1, start_layer - 1, -1)
-        )
-        for layer, sae in results:
-            if sae is not None:
-                saes[layer] = sae
-
-    return saes
-
-
 MMLU_TASKS = [
     MMLUTask.BUSINESS_ETHICS,
     MMLUTask.CLINICAL_KNOWLEDGE,
@@ -176,7 +126,7 @@ training_config = TrainingConfig(
     method=TrainingMethod.next_layer,
 )
 
-START_LAYER = 24
+START_LAYER = 14
 
 for training_method in (
     # "next_layer_finetuned_interaction",
@@ -187,10 +137,9 @@ for training_method in (
     # "next_layer_lista_normalized_decoder",
     # "next_layer_finetuned_lista_normalized_decoder",
     # "next_layer_lista_feature_rescaling",
-    "next_layer_lista_sparse_btk",
     # "next_layer_finetuned_lista_feature_rescaling",
     # "next_layer_lista_spectral_norm",
-    # "next_layer_finetuned_lista",
+    "next_layer_finetuned_lista",
 ):
     results_path = f"{VALIDATION_BASE_PATH}/{training_method}"
 
@@ -204,7 +153,9 @@ for training_method in (
         print(f"Skipping {training_method}, validations already complete")
         continue
 
-    saes = load_saes(f"{CHECKPOINT_BASE_PATH}/{training_method}", START_LAYER)
+    saes = load_saes(
+        f"{CHECKPOINT_BASE_PATH}/{training_method}", model.num_layers, START_LAYER
+    )
     # saes = load_saes(
     #     f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}_densebtk",
     #     START_LAYER,
@@ -226,7 +177,7 @@ for training_method in (
             training_config,
             NUM_THRESHOLD_TUNING_TOKENS,
             offload_after_training=False,
-            checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}_densebtk",
+            checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}",
         )
         saes = tr.final_saes
 
