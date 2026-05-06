@@ -1087,7 +1087,6 @@ def train(
                         loaded_thresholds = cloudpickle.load(f)
                     for update_layer, sae in training_saes.items():
                         sae.set_activation_thresholds(loaded_thresholds[update_layer])
-
             elif fine_tune_in_place:
                 assert override_token_offset is not None, (
                     "Must set override_token_offset if finetuning in place"

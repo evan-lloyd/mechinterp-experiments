@@ -13,6 +13,7 @@ from transformers_sae.ops import (
     MemoryTrackingMode,
     find_latest_checkpoint,
     load_checkpoint,
+    load_saes,
 )
 from transformers_sae.replacement_model import GemmaReplacement, make_replacement_model
 from transformers_sae.sae_lens_wrapper import (
@@ -60,18 +61,20 @@ MMLU_BATCH_SIZE = 16
 START_LAYER = 0
 
 CHECKPOINT_TRAINING_METHODS = (
-    "next_layer_full_replacement_interaction_k_200",
-    "next_layer_full_replacement_interaction",
-    "next_layer_finetuned_interaction",
-    "next_layer",
-    "next_layer_interaction",
-    "next_layer_finetuned",
+    # "next_layer_full_replacement_interaction_k_200",
+    # "next_layer_full_replacement_interaction",
+    # "next_layer_finetuned_interaction",
+    # "next_layer",
+    # "next_layer_interaction",
+    # "next_layer_finetuned",
+    "next_layer_finetuned_lista",
+    # "next_layer_finetuned_lista_tuned_encoder_0",
 )
 
 GEMMA_SCOPE_TRAINING_METHODS = (
-    "gemma_scope",
-    "gemma_scope_canonical_l0",
-    "gemma_scope_100_l0",
+    # "gemma_scope",
+    # "gemma_scope_canonical_l0",
+    # "gemma_scope_100_l0",
 )
 
 gemma_release = "gemma-scope-2b-pt-res-canonical"
@@ -110,36 +113,6 @@ gemma_scope_sae_target_l0 = {
     for yd in yaml_rows
     if yd["id"] == f"layer_{layer}/width_16k/canonical"
 }
-
-
-def load_saes_from_checkpoints(checkpoint_dir: str):
-    saes = {}
-
-    def load_layer_checkpoint(layer):
-        checkpoint = find_latest_checkpoint(checkpoint_dir, layer)
-        if checkpoint is not None:
-            cp = load_checkpoint(checkpoint)
-            if cp.total_tokens_trained < NUM_TRAINING_TOKENS:
-                print(f"Checkpoint below token budget for layer {layer}")
-                return layer, None
-            sae = load_checkpoint(checkpoint).sae
-            sae.eval()
-            sae.onload()
-            print(f"Loaded checkpoint for layer {layer}")
-            return layer, sae
-        else:
-            print(f"No checkpoint found for layer {layer}")
-            return layer, None
-
-    with ThreadPoolExecutor() as executor:
-        results = executor.map(
-            load_layer_checkpoint, range(model.num_layers - 1, -1, -1)
-        )
-        for layer, sae in results:
-            if sae is not None:
-                saes[layer] = sae
-
-    return saes
 
 
 def load_saes_gemma_scope():
@@ -203,18 +176,15 @@ def run_baseline_benchmark():
 
 def run_sae_benchmark(training_method: str, saes):
     out_path = f"{BENCHMARK_BASE_PATH}/{training_method}"
-    if os.path.isfile(out_path):
-        print(f"Skipping {training_method}, benchmark file already exists")
-        return
 
     assert len(saes) == model.num_layers, (
         f"Missing SAEs for {training_method}, only had {set(saes.keys())}"
     )
 
     # Try a variant with no threshold replacement
-    if training_method != "gemma_scope":
-        replacement_thresholds = load_activation_thresholds(training_method)
-        apply_replacement_thresholds(saes, replacement_thresholds)
+    # if training_method != "gemma_scope":
+    #     replacement_thresholds = load_activation_thresholds(training_method)
+    #     apply_replacement_thresholds(saes, replacement_thresholds)
 
     os.makedirs(BENCHMARK_BASE_PATH, exist_ok=True)
     mmlu = MMLUBenchmark(
@@ -238,12 +208,15 @@ def run_sae_benchmark(training_method: str, saes):
 gemma_scope_saes = None
 for training_method in CHECKPOINT_TRAINING_METHODS:
     out_path = f"{BENCHMARK_BASE_PATH}/{training_method}"
-    if os.path.isfile(out_path):
-        print(f"Skipping {training_method}, benchmark file already exists")
-        continue
+    # if os.path.isfile(out_path):
+    #     print(f"Skipping {training_method}, benchmark file already exists")
+    #     continue
 
     print(f"Running benchmarks for {training_method}")
-    saes = load_saes_from_checkpoints(f"{CHECKPOINT_BASE_PATH}/{training_method}")
+    saes = load_saes(f"{CHECKPOINT_BASE_PATH}/{training_method}", model.num_layers)
+    for sae in saes.values():
+        sae.onload()
+        sae.eval()
     run_sae_benchmark(training_method, saes)
 
 for training_method in GEMMA_SCOPE_TRAINING_METHODS:

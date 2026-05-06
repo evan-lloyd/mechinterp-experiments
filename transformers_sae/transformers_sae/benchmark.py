@@ -21,6 +21,7 @@ from .ops import generate
 class AnswerProbs:
     top_logit_answer: str
     multiple_choice_probs: torch.Tensor
+    force_mc_answer: str
 
 
 @dataclass
@@ -29,6 +30,7 @@ class ScoreWrapper:
     any_multiple_choice_answer_prob: float
     correct_answer_prob: float
     conditional_correct_answer_prob: float
+    force_mc_answer_is_correct: bool
 
     def __bool__(self):
         return self.top_logit_answer_is_correct
@@ -84,11 +86,15 @@ class BenchmarkModel(DeepEvalBaseLLM):
             answer_probs = []
             top_logit_answers = probs.max(-1).indices
             mc_probs = probs[:, self.answer_token_ids]
+            force_mc_answers = probs[:, self.answer_token_ids].max(-1).indices
             for i in range(probs.shape[0]):
                 answer_probs.append(
                     AnswerProbs(
                         self.tokenizer.decode(top_logit_answers[i].item()),
                         mc_probs[i].to("cpu"),
+                        self.tokenizer.decode(
+                            self.answer_token_ids[force_mc_answers[i].item()]
+                        ),
                     )
                 )
 
@@ -111,6 +117,7 @@ class BenchmarkScorer(Scorer):
             total_mc_probs,
             correct_answer_prob,
             correct_answer_prob / (total_mc_probs + 1e-9),
+            target.strip() == prediction.force_mc_answer.strip(),
         )
 
 
@@ -134,6 +141,7 @@ class MMLUBenchmark(MMLU):
                     sw.any_multiple_choice_answer_prob,
                     sw.correct_answer_prob,
                     sw.conditional_correct_answer_prob,
+                    sw.force_mc_answer_is_correct,
                 )
                 for sw in self.predictions["Correct"]
             ],
@@ -142,7 +150,12 @@ class MMLUBenchmark(MMLU):
                 "any_mc_answer",
                 "correct_answer",
                 "conditional_correct_answer",
+                "force_mc",
             ],
+        )
+        print(
+            "Accuracy for top logit among valid answers: ",
+            self.answer_stats["force_mc"].mean().item(),
         )
         print(
             "Mean probability for any multiple choice answer: ",
