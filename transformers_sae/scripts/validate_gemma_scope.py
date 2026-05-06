@@ -1,27 +1,18 @@
-import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from importlib.resources import files
 
-import cloudpickle
 import numpy as np
 import torch
 import yaml
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from transformers_sae.ops import (
-    MemoryTrackingMode,
-    save_validations,
-)
+from transformers_sae.ops import MemoryTrackingMode, save_validations
 from transformers_sae.replacement_model import GemmaReplacement, make_replacement_model
-from transformers_sae.sae_lens_wrapper import wrap_sae_lens_pretrained, convert_sae_lens_pretrained
-from transformers_sae.training import (
-    tune_encoder,
-    TrainingConfig,
-    TrainingMethod,
-)
-from transformers_sae.validation import run_validations
+from transformers_sae.sae_lens_wrapper import convert_sae_lens_pretrained
+from transformers_sae.training import TrainingConfig, TrainingMethod, tune_encoder
+from transformers_sae.validation import generate_with_replacement, run_validations
 
 # Tweak TRAINING_BATCH_SIZE for your hardware if necessary
 if torch.cuda.is_available():
@@ -124,16 +115,17 @@ gemma_scope_sae_target_l0 = {
 }
 
 
-def load_saes(checkpoint_dir: str, start_layer: int):
+def load_gemma_scope_saes(start_layer: int, target_l0):
     saes = {}
 
     def load_gemma_scope(layer):
         sae = convert_sae_lens_pretrained(
-            gemma_scope_sae_target_l0[layer],
+            target_l0[layer],
             release=gemma_release,
             sae_id=f"layer_{layer}/width_16k/canonical",
             device=TRAINING_DEVICE,
         )
+        print(f"Loaded gemma scope {layer} with target L0={target_l0[layer]}")
         return layer, sae
 
     # Load the latest checkpoints for each layer in parallel
@@ -156,11 +148,11 @@ def load_saes(checkpoint_dir: str, start_layer: int):
 #     return (1.0 - frac_trained) * MAX_THRESHOLD_LR + frac_trained * MIN_THRESHOLD_LR
 
 
-START_LAYER = 23
+START_LAYER = 0
 saes = {}
 for training_method in (
-    "gemma_scope_canonical_l0",
-    # "gemma_scope_100_l0",
+    # "gemma_scope_canonical_l0",
+    "gemma_scope_100_l0",
 ):
     if "canonical" in training_method:
         target_l0 = gemma_scope_sae_target_l0
@@ -170,17 +162,17 @@ for training_method in (
     results_path = f"{VALIDATION_BASE_PATH}/{training_method}"
 
     # Check if all validation files already exist
-    existing_validations = set(
-        layer
-        for layer in range(model.num_layers)
-        if os.path.isfile(f"{results_path}/{layer}.validation.cloudpickle")
-    )
-    if len(existing_validations) == model.num_layers:
-        print(f"Skipping {training_method}, validations already complete")
-        continue
+    # existing_validations = set(
+    #     layer
+    #     for layer in range(model.num_layers)
+    #     if os.path.isfile(f"{results_path}/{layer}.validation.cloudpickle")
+    # )
+    # if len(existing_validations) == model.num_layers:
+    #     print(f"Skipping {training_method}, validations already complete")
+    #     continue
 
     if not saes:
-        saes = load_saes(f"{CHECKPOINT_BASE_PATH}/{training_method}", START_LAYER)
+        saes = load_gemma_scope_saes(START_LAYER, target_l0)
     # assert len(saes) == model.num_layers, (
     #     f"Missing SAEs for {training_method}, only had {set(saes.keys())}"
     # )
@@ -189,9 +181,6 @@ for training_method in (
         print(
             f"Running validations for {training_method} replacement starting at {start_layer}"
         )
-        for layer, sae in saes.items():
-            sae.threshold_offset.fill_(0.0)
-            sae.target_l0 = target_l0[layer]
 
         tr = tune_encoder(
             model,
@@ -201,6 +190,7 @@ for training_method in (
             training_config,
             NUM_THRESHOLD_TUNING_TOKENS,
             offload_after_training=False,
+            checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}",
         )
         saes = tr.final_saes
         # tune_activation_thresholds(
@@ -249,13 +239,19 @@ for training_method in (
             ).item(),
         )
         print(
-            f"arith mean kl={ {k: np.mean(v.kl).item() for k, v in validations.layer_results.items() if v.kl is not None} }"
-        )
-        print(
             f"mean rre={ {k: np.mean(v.rre).item() for k, v in validations.layer_results.items() if v.rre is not None} }"
         )
         print(
             f"geom mean rre={ {k: np.exp(np.mean(np.log(np.clip(v.rre, a_min=1e-9, a_max=None)))).item() for k, v in validations.layer_results.items() if v.rre is not None} }"
+        )
+        print(
+            f"geom mean kl={ {k: np.exp(np.mean(np.log(np.clip(v.kl, min=1e-9)))).item() for k, v in validations.layer_results.items() if v.kl is not None} }"
+        )
+        print(
+            f"arith mean kl={ {k: np.mean(v.kl).item() for k, v in validations.layer_results.items() if v.kl is not None} }"
+        )
+        print(
+            f"live features={ {k: sum(v.live_features) / saes[k].config.d_sae for k, v in validations.layer_results.items() if v.live_features is not None} }"
         )
         mean_l0 = {
             k: np.mean(v.l0).item()
@@ -266,3 +262,14 @@ for training_method in (
         print(f"mean l0={mean_l0}")
         print(f"target l0={target_l0}")
         print(f"l0 diff={l0_diff}")
+        with torch.autocast(
+            device_type="cuda" if model.device.type == "cuda" else "cpu",
+            dtype=torch.bfloat16,
+        ):
+            generate_with_replacement(
+                model,
+                tokenizer,
+                "The capital of France,",
+                saes,
+                offload=False,
+            )

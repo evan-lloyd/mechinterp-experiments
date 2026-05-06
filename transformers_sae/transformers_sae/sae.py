@@ -215,16 +215,22 @@ class SAE(torch.nn.Module):
             self.to(self.config.device)
 
     def activation_thresholds(self):
-        return tuple(
-            a.threshold.item()
-            for a in self.encoder.activation
-            if hasattr(a, "threshold")
-        )
+        thresholds = []
+        for a in self.encoder.activation:
+            if hasattr(a, "threshold_offset"):
+                thresholds.append(a.threshold_offset)
+            elif hasattr(a, "threshold"):
+                thresholds.append(a.threshold)
+        return tuple(thresholds)
 
     def set_activation_thresholds(self, thresholds: Tuple[float]):
         cur_threshold = 0
         for a in self.encoder.activation:
-            if hasattr(a, "threshold"):
+            # Don't bonk JumpReLU thresholds; set offset instead
+            if hasattr(a, "threshold_offset"):
+                a.threshold_offset.fill_(thresholds[cur_threshold])
+                cur_threshold += 1
+            elif hasattr(a, "threshold"):
                 a.threshold.fill_(thresholds[cur_threshold])
                 cur_threshold += 1
 

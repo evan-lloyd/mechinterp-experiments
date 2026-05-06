@@ -402,9 +402,22 @@ def tune_encoder(
                 sae.init_weights(baseline_saes[layer])
                 sae.decoder.requires_grad_(False)
                 for i, a in enumerate(sae.encoder.activation):
-                    a.threshold.fill_(
-                        baseline_saes[layer].encoder.activation[i].threshold.item()
-                    )
+                    if hasattr(a, "threshold_offset"):
+                        a.threshold_offset.fill_(
+                            baseline_saes[layer]
+                            .encoder.activation[i]
+                            .threshold_offset.item()
+                        )
+                        a.threshold = (
+                            baseline_saes[layer]
+                            .encoder.activation[i]
+                            .threshold.detach()
+                            .contiguous()
+                        )
+                    else:
+                        a.threshold.fill_(
+                            baseline_saes[layer].encoder.activation[i].threshold.item()
+                        )
 
         for sae in baseline_saes.values():
             sae.eval()

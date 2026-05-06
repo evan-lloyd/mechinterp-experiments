@@ -248,17 +248,6 @@ def load_checkpoint(in_file: str) -> "SAECheckpoint":
                         device=sae.encoder.config.device,
                     )
 
-                # if "encoder.linear.parametrizations.weight.original" not in state_dict:
-                #     linear = _shallow_copy_model(sae.encoder.linear)
-                #     linear.load_state_dict(
-                #         {"weight": state_dict.pop("encoder.linear.weight")}, assign=True
-                #     )
-                #     linear = torch.nn.utils.parametrizations.spectral_norm(linear)
-                #     linear.state_dict(
-                #         destination=state_dict,
-                #         prefix="encoder.linear.",
-                #     )
-
             sae.load_state_dict(state_dict, assign=True)
 
         checkpoint = SAECheckpoint(

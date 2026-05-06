@@ -195,7 +195,9 @@ def wrap_sae_lens_pretrained(target_l0: int, **sae_lens_kwargs) -> SAELensSAEWra
 
 
 @torch.no_grad()
-def convert_sae_lens(saelens: SAELens, saelens_config: Dict[str, Any], device=None):
+def convert_sae_lens(
+    target_k: int, saelens: SAELens, saelens_config: Dict[str, Any], device=None
+):
     device = torch.device(device or saelens_config["device"])
 
     if saelens_config["architecture"] == "jumprelu":
@@ -213,7 +215,8 @@ def convert_sae_lens(saelens: SAELens, saelens_config: Dict[str, Any], device=No
             train_dtype=getattr(torch, saelens_config["dtype"]),
             inference_dtype=torch.bfloat16,
             activation_function=JumpReluActivationFunctionConfig(
-                saelens_config["d_sae"]
+                d_sae=saelens_config["d_sae"],
+                k=target_k,
             ),
         )
     else:
@@ -260,11 +263,11 @@ def convert_sae_lens(saelens: SAELens, saelens_config: Dict[str, Any], device=No
     return sae
 
 
-def convert_sae_lens_pretrained(**sae_lens_kwargs) -> MySAE:
+def convert_sae_lens_pretrained(target_k: int, **sae_lens_kwargs) -> MySAE:
     saelens, saelens_config, _ = SAELens.from_pretrained_with_cfg_and_sparsity(
         **sae_lens_kwargs
     )
-    return convert_sae_lens(saelens, saelens_config)
+    return convert_sae_lens(target_k, saelens, saelens_config)
 
 
 SAE_KIND_TO_SAE_LENS: MappingProxyType[ActivationKind, Type[SAELens]] = (

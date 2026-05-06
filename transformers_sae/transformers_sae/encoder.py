@@ -28,6 +28,8 @@ class ActivationFunctionConfig:
 @dataclass
 class JumpReluActivationFunctionConfig(ActivationFunctionConfig):
     d_sae: int
+    k: int
+    threshold_lr: float = 0.01
 
     def __post_init__(self):
         self.kind = "jump_relu"
@@ -78,9 +80,10 @@ class ReluActivationFunction(ActivationFunction):
 
 class JumpReluActivationFunction(ActivationFunction):
     """Stub for a JumpReLU activation function. Note that training is not implemented; this class is currently
-    only used to load existing JumpReLU SAEs from SAELens."""
+    only used to load existing JumpReLU SAEs from SAELens. It can also tune a global threshold offset
+    BatchTopK style."""
 
-    config: ReluActivationFunctionConfig
+    config: JumpReluActivationFunctionConfig
     threshold: torch.Tensor
     threshold_offset: torch.Tensor
     device: torch.device
@@ -106,10 +109,42 @@ class JumpReluActivationFunction(ActivationFunction):
         self.device = device
 
     def forward(self, x: torch.Tensor, token_mask: torch.Tensor) -> torch.Tensor:
-        return x * (x > self.threshold)
+        # BatchTopK during training
+        if self.training:
+            # This is crucial; otherwise we are wasting our non-zero activations on tokens that aren't even
+            # being evaluated or trained on.
+            with torch.no_grad():
+                x[~token_mask.bool()] = torch.finfo(x.dtype).min
+            num_tokens = x.shape[0] * x.shape[1]
+            topk = torch.topk(
+                (x - self.threshold).view(-1),
+                k=self.config.k * num_tokens,
+                dim=-1,
+                sorted=True,
+            )
+            threshold_offset = topk.values[-1]
+            # threshold_offset = torch.maximum(
+            #     topk.values[-1], torch.zeros_like(topk.values[-1])
+            # )
+            lr = self.config.threshold_lr
+
+            # Adapted from https://github.com/decoderesearch/SAELens/blob/69c4c62b0dc24e5ba23fc773a0286149514b4a23/sae_lens/saes/batchtopk_sae.py
+            with torch.no_grad(), torch.autocast(x.device.type, enabled=False):
+                self.threshold_offset = (
+                    1 - lr
+                ) * self.threshold_offset + lr * threshold_offset.to(
+                    self.threshold_offset.dtype
+                )
+
+        # JumpReLU during inference
+        else:
+            threshold_offset = self.threshold_offset
+        return (x * (x >= (self.threshold + threshold_offset))).relu()
 
     def init_weights(self):
-        self.threshold = torch.zeros((self.config.d_sae,), device=self.device)
+        self.threshold = torch.zeros(
+            (self.config.d_sae,), device=self.device, requires_grad=False
+        )
         self.threshold_offset = torch.tensor(
             0.0,
             dtype=torch.float64 if self.device.type != "mps" else torch.float32,
