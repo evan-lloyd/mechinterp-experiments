@@ -1,5 +1,4 @@
 import os
-from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import torch
@@ -7,17 +6,14 @@ from datasets import load_dataset
 from deepeval.benchmarks.mmlu.task import MMLUTask
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from transformers_sae.benchmark import BenchmarkModel, MMLUBenchmark
 from transformers_sae.ops import (
     MemoryTrackingMode,
     load_saes,
-    save_validations,
 )
 from transformers_sae.replacement_model import GemmaReplacement, make_replacement_model
 from transformers_sae.training import (
     TrainingConfig,
     TrainingMethod,
-    tune_activation_thresholds,
     tune_encoder,
 )
 from transformers_sae.validation import generate_with_replacement, run_validations
@@ -76,6 +72,7 @@ VALIDATION_BASE_PATH = "/workspace/sae_checkpoints/validations/gemma_2_2b"
 CHECKPOINT_BASE_PATH = "/workspace/sae_checkpoints/gemma_2_2b"
 TOKENIZER_BATCH_SIZE = 256
 NUM_VALIDATION_TOKENS = int(1e6)
+NUM_ENCODER_TUNING_TOKENS = int(1e7)
 NUM_THRESHOLD_TUNING_TOKENS = int(1e6)
 NUM_TRAINING_TOKENS = int(5e7)
 # NUM_TRAINING_TOKENS = 0
@@ -143,60 +140,26 @@ for training_method in (
 ):
     results_path = f"{VALIDATION_BASE_PATH}/{training_method}"
 
-    # Check if all validation files already exist
-    existing_validations = set(
-        layer
-        for layer in range(model.num_layers)
-        if os.path.isfile(f"{results_path}/{layer}.validation.cloudpickle")
-    )
-    if len(existing_validations) == model.num_layers:
-        print(f"Skipping {training_method}, validations already complete")
-        continue
-
-    # saes = load_saes(
-    #     f"{CHECKPOINT_BASE_PATH}/{training_method}", model.num_layers, START_LAYER
-    # )
     saes = load_saes(
-        f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}_densebtk",
-        model.num_layers,
-        START_LAYER,
+        f"{CHECKPOINT_BASE_PATH}/{training_method}", model.num_layers, START_LAYER
     )
-    # assert len(saes) == model.num_layers, (
-    #     f"Missing SAEs for {training_method}, only had {set(saes.keys())}"
-    # )
     for start_layer in (START_LAYER,):
-        # for start_layer in sorted(set(saes.keys()) - existing_validations, reverse=False):
         print(
-            f"Running validations for {training_method} replacement starting at {start_layer}"
+            f"Tuning encoders for {training_method} replacement starting at {start_layer}"
         )
 
-        # tr = tune_encoder(
-        #     model,
-        #     tokenizer,
-        #     {layer: sae for layer, sae in saes.items() if layer >= start_layer},
-        #     training_dataset,
-        #     training_config,
-        #     NUM_THRESHOLD_TUNING_TOKENS,
-        #     offload_after_training=False,
-        #     checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}",
-        # )
-        # saes = tr.final_saes
-
-        # tune_activation_thresholds(
-        #     model,
-        #     tokenizer,
-        #     {layer: sae for layer, sae in saes.items() if layer >= start_layer},
-        #     training_dataset,
-        #     TOKENIZER_BATCH_SIZE,
-        #     TRAINING_BATCH_SIZE,
-        #     NUM_THRESHOLD_TUNING_TOKENS,
-        #     offload_after_training=False,
-        # )
-        # new_thresholds = {
-        #     layer: tuple(a.threshold.item() for a in sae.encoder.activation)
-        #     for layer, sae in saes.items()
-        #     if layer >= start_layer
-        # }
+        tr = tune_encoder(
+            model,
+            tokenizer,
+            {layer: sae for layer, sae in saes.items() if layer >= start_layer},
+            training_dataset,
+            training_config,
+            num_encoder_tuning_tokens=NUM_ENCODER_TUNING_TOKENS,
+            num_threshold_tuning_tokens=NUM_THRESHOLD_TUNING_TOKENS,
+            offload_after_training=False,
+            checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}_1e7",
+        )
+        saes = tr.final_saes
 
         validations = run_validations(
             model,
@@ -209,9 +172,6 @@ for training_method in (
             start_layer=start_layer,
             offload=False,
         )
-        # save_validations({start_layer: validations}, results_path)
-        # with open(f"{results_path}/{start_layer}.activation_thresholds", "wb") as f:
-        #     cloudpickle.dump(new_thresholds, f)
 
         print(
             f"{training_method} start layer {start_layer} metrics",
@@ -222,7 +182,6 @@ for training_method in (
         print(
             f"geom mean rre={ {k: np.exp(np.mean(np.log(np.clip(v.rre, a_min=1e-9, a_max=None)))).item() for k, v in validations.layer_results.items() if v.rre is not None} }"
         )
-
         print(
             f"mean l0={ {k: np.mean(v.l0).item() for k, v in validations.layer_results.items() if v.l0 is not None} }"
         )
@@ -235,7 +194,6 @@ for training_method in (
         print(
             f"live features={ {k: sum(v.live_features) / saes[k].config.d_sae for k, v in validations.layer_results.items() if v.live_features is not None} }"
         )
-        # if start_layer == 0:
         with torch.autocast(
             device_type="cuda" if model.device.type == "cuda" else "cpu",
             dtype=torch.bfloat16,
@@ -247,12 +205,3 @@ for training_method in (
                 saes,
                 offload=False,
             )
-            # mmlu = MMLUBenchmark(
-            #     tokenizer,
-            #     model.context_length,
-            #     tasks=MMLU_TASKS,
-            # )
-            # mmlu.evaluate(
-            #     model=BenchmarkModel(make_replacement_model(model, saes), tokenizer),
-            #     batch_size=MMLU_BATCH_SIZE,
-            # )

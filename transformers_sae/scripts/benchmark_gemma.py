@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from importlib.resources import files
 
@@ -8,7 +9,12 @@ import torch
 import yaml
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from transformers_sae.benchmark import BenchmarkModel, MMLUBenchmark, MMLUTask
+from transformers_sae.benchmark import (
+    BenchmarkModel,
+    BoolQBenchmark,
+    MMLUBenchmark,
+    MMLUTask,
+)
 from transformers_sae.ops import (
     MemoryTrackingMode,
     find_latest_checkpoint,
@@ -56,7 +62,7 @@ MMLU_TASKS = [
     MMLUTask.ABSTRACT_ALGEBRA,
 ]
 
-MMLU_BATCH_SIZE = 16
+BENCHMARK_BATCH_SIZE = 16
 # Validations are saved per start_layer; benchmarks use full replacement (all layers).
 START_LAYER = 0
 
@@ -67,7 +73,8 @@ CHECKPOINT_TRAINING_METHODS = (
     # "next_layer",
     # "next_layer_interaction",
     # "next_layer_finetuned",
-    "next_layer_finetuned_lista",
+    # "next_layer_finetuned_lista",
+    "next_layer_in_place_finetuned",
     # "next_layer_finetuned_lista_tuned_encoder_0",
 )
 
@@ -155,23 +162,29 @@ def load_activation_thresholds(training_method: str):
 
 
 def run_baseline_benchmark():
-    out_path = f"{BENCHMARK_BASE_PATH}/baseline"
-    if os.path.isfile(out_path):
-        print("Skipping baseline, benchmark file already exists")
-        return
+    # out_path = f"{BENCHMARK_BASE_PATH}/baseline"
+    # if os.path.isfile(out_path):
+    #     print("Skipping baseline, benchmark file already exists")
+    #     return
 
     os.makedirs(BENCHMARK_BASE_PATH, exist_ok=True)
-    mmlu = MMLUBenchmark(
-        tokenizer,
-        model.context_length,
-        tasks=MMLU_TASKS,
+    # mmlu = MMLUBenchmark(
+    #     tokenizer,
+    #     model.context_length,
+    #     tasks=MMLU_TASKS,
+    # )
+    # mmlu.evaluate(model=BenchmarkModel(model, tokenizer), batch_size=BENCHMARK_BATCH_SIZE)
+    boolq = BoolQBenchmark(tokenizer, model.context_length, n_shots=0)
+    boolq.evaluate(
+        model=BenchmarkModel(model, tokenizer, is_multiple_choice=False),
+        batch_size=BENCHMARK_BATCH_SIZE,
     )
-    mmlu.evaluate(model=BenchmarkModel(model, tokenizer), batch_size=MMLU_BATCH_SIZE)
-    with open(out_path, "wb") as f:
-        cloudpickle.dump(
-            {"answer_stats": mmlu.answer_stats, "predictions": mmlu.predictions}, f
-        )
-    print(f"Wrote {out_path}")
+
+    # with open(out_path, "wb") as f:
+    #     cloudpickle.dump(
+    #         {"answer_stats": mmlu.answer_stats, "predictions": mmlu.predictions}, f
+    #     )
+    # print(f"Wrote {out_path}")
 
 
 def run_sae_benchmark(training_method: str, saes):
@@ -186,24 +199,37 @@ def run_sae_benchmark(training_method: str, saes):
     #     replacement_thresholds = load_activation_thresholds(training_method)
     #     apply_replacement_thresholds(saes, replacement_thresholds)
 
+    replacement_model = make_replacement_model(model, saes)
+
     os.makedirs(BENCHMARK_BASE_PATH, exist_ok=True)
-    mmlu = MMLUBenchmark(
+    # mmlu = MMLUBenchmark(
+    #     tokenizer,
+    #     model.context_length,
+    #     tasks=MMLU_TASKS,
+    # )
+    # mmlu.evaluate(
+    #     model=BenchmarkModel(replacement_model, tokenizer),
+    #     batch_size=BENCHMARK_BATCH_SIZE,
+    # )
+    boolq = BoolQBenchmark(
         tokenizer,
         model.context_length,
-        tasks=MMLU_TASKS,
+        n_shots=0,
+        # n_problems=64,
     )
-    mmlu.evaluate(
-        model=BenchmarkModel(make_replacement_model(model, saes), tokenizer),
-        batch_size=MMLU_BATCH_SIZE,
+    boolq.evaluate(
+        model=BenchmarkModel(replacement_model, tokenizer, is_multiple_choice=False),
+        batch_size=BENCHMARK_BATCH_SIZE,
     )
-    with open(out_path, "wb") as f:
-        cloudpickle.dump(
-            {"answer_stats": mmlu.answer_stats, "predictions": mmlu.predictions}, f
-        )
-    print(f"Wrote {out_path}")
+    # with open(out_path, "wb") as f:
+    #     cloudpickle.dump(
+    #         {"answer_stats": mmlu.answer_stats, "predictions": mmlu.predictions}, f
+    #     )
+    # print(f"Wrote {out_path}")
 
 
 # run_baseline_benchmark()
+# sys.exit(0)
 
 gemma_scope_saes = None
 for training_method in CHECKPOINT_TRAINING_METHODS:

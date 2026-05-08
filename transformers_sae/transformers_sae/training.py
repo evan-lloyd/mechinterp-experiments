@@ -334,7 +334,8 @@ def tune_encoder(
     baseline_saes: Dict[int, SAE],
     dataset: IterableDataset,
     config: TrainingConfig,
-    num_tokens: int,
+    num_encoder_tuning_tokens: int,
+    num_threshold_tuning_tokens: int = int(1e6),
     offload_after_training: bool = True,
     checkpoint_dir: Optional[str] = None,
 ) -> TrainingResult:
@@ -431,7 +432,9 @@ def tune_encoder(
                 training_saes[layer + 1].onload()
 
             num_tokens_for_layer = (
-                num_tokens * 2 if layer == last_sae_layer else num_tokens
+                num_encoder_tuning_tokens + num_threshold_tuning_tokens
+                if layer == last_sae_layer
+                else num_encoder_tuning_tokens
             )
             progress = MultilineProgress(
                 total=num_tokens_for_layer,
@@ -471,7 +474,7 @@ def tune_encoder(
                     if other_layer < layer:
                         sae.onload()
 
-                if num_used_tokens < num_tokens:
+                if num_used_tokens < num_encoder_tuning_tokens:
                     with (
                         torch.no_grad(),
                         torch.autocast(
@@ -611,9 +614,6 @@ def tune_encoder(
                     loss = (cur_layer_loss + next_layer_loss) / 2
 
                     loss.backward()
-
-                    # if loss.item() > 1e9:
-                    #     breakpoint()
 
                     progress.set_postfix(
                         {
