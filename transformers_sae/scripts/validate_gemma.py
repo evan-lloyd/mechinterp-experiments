@@ -157,7 +157,7 @@ for training_method in (
     #     f"{CHECKPOINT_BASE_PATH}/{training_method}", model.num_layers, START_LAYER
     # )
     saes = load_saes(
-        f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}_densebtk",
+        f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}_1e7",
         model.num_layers,
         START_LAYER,
     )
