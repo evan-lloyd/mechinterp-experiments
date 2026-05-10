@@ -1,5 +1,6 @@
 import os
 
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 import numpy as np
 import torch
 from datasets import load_dataset
@@ -73,7 +74,7 @@ VALIDATION_BASE_PATH = "/workspace/sae_checkpoints/validations/gemma_2_2b"
 CHECKPOINT_BASE_PATH = "/workspace/sae_checkpoints/gemma_2_2b"
 TOKENIZER_BATCH_SIZE = 256
 NUM_VALIDATION_TOKENS = int(1e6)
-NUM_ENCODER_TUNING_TOKENS = int(2e6)
+NUM_ENCODER_TUNING_TOKENS = int(1e6)
 NUM_THRESHOLD_TUNING_TOKENS = int(1e6)
 NUM_TRAINING_TOKENS = int(5e7)
 # NUM_TRAINING_TOKENS = 0
@@ -127,14 +128,14 @@ training_config = TrainingConfig(
 START_LAYER = 0
 
 for training_method in (
-    "next_layer_finetuned_interaction",
+    # "next_layer_finetuned_interaction",
     # "next_layer",
     # "next_layer_interaction",
     # "next_layer_finetuned",
     # "next_layer_lista",
     # "next_layer_lista_normalized_decoder",
     # "next_layer_finetuned_lista_normalized_decoder",
-    # "next_layer_lista_feature_rescaling",
+    "next_layer_lista_feature_rescaling",
     # "next_layer_finetuned_lista_feature_rescaling",
     # "next_layer_lista_spectral_norm",
     # "next_layer_finetuned_lista",
@@ -161,7 +162,7 @@ for training_method in (
             num_encoder_tuning_tokens=NUM_ENCODER_TUNING_TOKENS,
             num_threshold_tuning_tokens=NUM_THRESHOLD_TUNING_TOKENS,
             offload_after_training=False,
-            # checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}_1e7",
+            checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_parallel",
         )
         saes = tr.final_saes
 

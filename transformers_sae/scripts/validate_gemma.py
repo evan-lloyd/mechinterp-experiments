@@ -129,14 +129,14 @@ training_config = TrainingConfig(
 START_LAYER = 0
 
 for training_method in (
-    # "next_layer_finetuned_interaction",
+    "next_layer_finetuned_interaction",
     # "next_layer",
     # "next_layer_interaction",
     # "next_layer_finetuned",
     # "next_layer_lista",
     # "next_layer_lista_normalized_decoder",
     # "next_layer_finetuned_lista_normalized_decoder",
-    "next_layer_lista_feature_rescaling",
+    # "next_layer_lista_feature_rescaling",
     # "next_layer_finetuned_lista_feature_rescaling",
     # "next_layer_lista_spectral_norm",
     # "next_layer_finetuned_lista",
@@ -157,7 +157,7 @@ for training_method in (
     #     f"{CHECKPOINT_BASE_PATH}/{training_method}", model.num_layers, START_LAYER
     # )
     saes = load_saes(
-        f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}_1e7",
+        f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_parallel",
         model.num_layers,
         START_LAYER,
     )

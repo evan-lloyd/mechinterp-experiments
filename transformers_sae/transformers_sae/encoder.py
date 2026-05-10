@@ -111,13 +111,11 @@ class JumpReluActivationFunction(ActivationFunction):
     def forward(self, x: torch.Tensor, token_mask: torch.Tensor) -> torch.Tensor:
         # BatchTopK during training
         if self.training:
-            # This is crucial; otherwise we are wasting our non-zero activations on tokens that aren't even
-            # being evaluated or trained on.
-            with torch.no_grad():
-                x[~token_mask.bool()] = torch.finfo(x.dtype).min
             num_tokens = x.shape[0] * x.shape[1]
             topk = torch.topk(
-                (x - self.threshold).view(-1),
+                # Applying mask is crucial; otherwise we are wasting our non-zero activations on tokens
+                # that aren't even being evaluated or trained on.
+                (x[token_mask.bool()] - self.threshold).view(-1),
                 k=self.config.k * num_tokens,
                 dim=-1,
                 sorted=True,
@@ -192,13 +190,11 @@ class BatchTopKActivationFunction(ActivationFunction):
     def forward(self, x: torch.Tensor, token_mask: torch.Tensor) -> torch.Tensor:
         # BatchTopK during training
         if self.training:
-            # This is crucial; otherwise we are wasting our non-zero activations on tokens that aren't even
-            # being evaluated or trained on.
-            with torch.no_grad():
-                x[~token_mask.bool()] = torch.finfo(x.dtype).min
             num_tokens = x.shape[0] * x.shape[1]
             topk = torch.topk(
-                x.view(-1),
+                # This is crucial; otherwise we are wasting our non-zero activations on tokens that aren't even
+                # being evaluated or trained on.
+                x[token_mask.bool()].view(-1),
                 k=self.config.k * num_tokens,
                 dim=-1,
                 sorted=True,
@@ -491,7 +487,6 @@ class LISTA(Encoder):
         features = torch.zeros(
             (x.shape[0], x.shape[1], self.config.d_sae), device=x.device, dtype=x.dtype
         )
-
         for i in range(self.config.n_iterations):
             residual = x - self.decoder(features)
 
@@ -503,7 +498,14 @@ class LISTA(Encoder):
                 features + self.scale[i] * self.linear(residual),
                 token_mask,
             )
-            # features = 1000.0 * torch.tanh(features / 1000.0)
+            # residual = (
+            #     x
+            #     - self.decoder(features)
+            #     + self.scale[i]
+            #     * residual
+            #     * self.activation[i].config.k
+            #     / self.config.d_model
+            # )
 
         # features *= self.feature_scale
         if should_cast:

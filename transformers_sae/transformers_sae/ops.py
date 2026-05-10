@@ -358,7 +358,7 @@ def save_training_result(
     Each checkpoint is saved to its own file, named based on the layer
     and number of training tokens for that checkpoint.
 
-    The save happens asynchronously in a background thread.
+    Each save happens in its own background thread.
     """
     import threading
 
@@ -372,17 +372,23 @@ def save_training_result(
             filepath = os.path.join(out_dir, filename)
             save_tasks.append((checkpoint, filepath))
 
-    def _save_async():
-        for checkpoint, filepath in save_tasks:
-            save_checkpoint(checkpoint, filepath)
-            if not keep_in_ram:
-                checkpoint.sae = None
+    threads = []
+
+    def save_task_fn(checkpoint, filepath):
+        save_checkpoint(checkpoint, filepath)
+        if not keep_in_ram:
+            checkpoint.sae = None
+
+    for checkpoint, filepath in save_tasks:
+        thread = threading.Thread(
+            target=save_task_fn, args=(checkpoint, filepath), daemon=not blocking
+        )
+        thread.start()
+        threads.append(thread)
 
     if blocking:
-        _save_async()
-    else:
-        thread = threading.Thread(target=_save_async, daemon=True)
-        thread.start()
+        for thread in threads:
+            thread.join()
 
 
 def load_training_result(
