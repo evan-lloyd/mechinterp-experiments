@@ -125,17 +125,18 @@ training_config = TrainingConfig(
     method=TrainingMethod.next_layer,
 )
 
-START_LAYER = 0
+START_LAYER = 21
 
 for training_method in (
+    "next_layer_lista_36k",
     # "next_layer_finetuned_interaction",
+    # "next_layer_lista_feature_rescaling",
     # "next_layer",
     # "next_layer_interaction",
     # "next_layer_finetuned",
     # "next_layer_lista",
     # "next_layer_lista_normalized_decoder",
     # "next_layer_finetuned_lista_normalized_decoder",
-    "next_layer_lista_feature_rescaling",
     # "next_layer_finetuned_lista_feature_rescaling",
     # "next_layer_lista_spectral_norm",
     # "next_layer_finetuned_lista",
@@ -153,7 +154,7 @@ for training_method in (
             f"Tuning encoders for {training_method} replacement starting at {start_layer}"
         )
 
-        tr = tune_encoder_parallel(
+        tr = tune_encoder(
             model,
             tokenizer,
             {layer: sae for layer, sae in saes.items() if layer >= start_layer},
@@ -162,9 +163,21 @@ for training_method in (
             num_encoder_tuning_tokens=NUM_ENCODER_TUNING_TOKENS,
             num_threshold_tuning_tokens=NUM_THRESHOLD_TUNING_TOKENS,
             offload_after_training=False,
-            checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_parallel",
+            checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}",
         )
         saes = tr.final_saes
+        # tr = tune_encoder_parallel(
+        #     model,
+        #     tokenizer,
+        #     {layer: sae for layer, sae in saes.items() if layer >= start_layer},
+        #     training_dataset,
+        #     training_config,
+        #     num_encoder_tuning_tokens=NUM_ENCODER_TUNING_TOKENS,
+        #     num_threshold_tuning_tokens=NUM_THRESHOLD_TUNING_TOKENS,
+        #     offload_after_training=False,
+        #     checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_parallel",
+        # )
+        # saes = tr.final_saes
 
         validations = run_validations(
             model,

@@ -1,3 +1,4 @@
+from functools import partial
 from contextlib import ExitStack, contextmanager, nullcontext
 
 import torch
@@ -13,6 +14,7 @@ def truncated_model(
     end_layer: int,
     start_at_sae: bool,
     sae_kwargs: dict,
+    stop_before_sae: bool = False,
 ):
     """Modifies a transformer model in place for the duration of the context manager,
     such that only the layers between start_layer and end_layer are executed.
@@ -95,6 +97,7 @@ def truncated_model(
                             *layer_args,
                             **layer_kwargs,
                             **sae_kwargs,
+                            bypass_sae=(i == end_layer - 1) and stop_before_sae,
                         )
                     )
                 else:
@@ -116,16 +119,20 @@ def truncated_model(
         # additional arguments into the call to each SAE layer.
         if start_layer == -1:
 
-            def _set_layer_kwargs(module, args, kwargs):
-                kwargs = {**kwargs, **sae_kwargs}
+            def _set_layer_kwargs(layer_idx, module, args, kwargs):
+                kwargs = {
+                    **kwargs,
+                    **sae_kwargs,
+                    "bypass_sae": (layer_idx == end_layer - 1) and stop_before_sae,
+                }
                 return args, kwargs
 
             yield_context = ExitStack()
-            for layer in patched_layers:
+            for i, layer in enumerate(patched_layers):
                 if isinstance(layer, SAEReplacementLayer):
                     yield_context.enter_context(
                         layer.register_forward_pre_hook(
-                            _set_layer_kwargs, with_kwargs=True
+                            partial(_set_layer_kwargs, i), with_kwargs=True
                         )
                     )
             model.set_submodule(model.layer_path, patched_layers)

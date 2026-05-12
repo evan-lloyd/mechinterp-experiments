@@ -37,6 +37,7 @@ def _run_replacement_model(
     start_layer: int = -1,
     end_layer: Optional[int] = None,
     start_at_sae: bool = False,
+    stop_before_sae: bool = False,
 ):
     input_args, input_kwargs = model.get_base_model_args(
         batch, start_input, start_layer == -1
@@ -56,7 +57,8 @@ def _run_replacement_model(
             start_layer,
             end_layer,
             start_at_sae,
-            model.get_sae_kwargs(batch),
+            stop_before_sae=stop_before_sae,
+            sae_kwargs=model.get_sae_kwargs(batch),
         ) as model_to_run,
     ):
         for hook_name, module in hooks.items():
@@ -83,6 +85,7 @@ def make_activation_batch(
     start_layer: int = -1,
     end_layer: Optional[int] = None,
     start_at_sae: bool = False,
+    stop_before_sae: bool = False,
 ) -> Dict[int, ActivationBatch]:
     hooks = {}
     request_attrs_by_layer = defaultdict(list)
@@ -121,6 +124,7 @@ def make_activation_batch(
         start_layer,
         end_layer,
         start_at_sae,
+        stop_before_sae,
     )
     if (replacement_model.num_layers, "log_probs") in model_run:
         model_run[(replacement_model.num_layers, "log_probs")] = ensure_tensor(

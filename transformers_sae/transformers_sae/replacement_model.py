@@ -24,8 +24,13 @@ class SAEReplacementLayer(torch.nn.Module):
 
     def forward(self, *args, **kwargs):
         additional_sae_kwargs = self.sae.pop_sae_kwargs(kwargs)
+        bypass_sae = kwargs.pop("bypass_sae", False)
 
         original_output = self.original_layer(*args, **kwargs)
+
+        if bypass_sae:
+            return original_output
+
         tuple_expected = isinstance(original_output, tuple)
         if tuple_expected:
             original_output, *rest = original_output

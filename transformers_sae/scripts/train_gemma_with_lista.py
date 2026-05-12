@@ -71,7 +71,8 @@ NUM_TRAINING_TOKENS = int(5e7)
 EVAL_INTERVAL = int(1e5)
 NUM_VALIDATION_TOKENS = int(1e6)
 # to match Gemma Scope
-D_SAE = 16384
+# D_SAE = 16384
+D_SAE = model.d_model * 16 # 36,864
 D_MODEL = model.d_model
 TOPK = 100
 TOKENIZER_BATCH_SIZE = 256
@@ -143,7 +144,7 @@ training_results = train(
             int(1e7),
         )
     ),
-    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_lista_sparse_btk/",
+    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_lista_36k/",
     force_retrain=False,
     offload_after_training=False,
 )

@@ -488,7 +488,15 @@ class LISTA(Encoder):
             (x.shape[0], x.shape[1], self.config.d_sae), device=x.device, dtype=x.dtype
         )
         for i in range(self.config.n_iterations):
+            # if i == 0:
             residual = x - self.decoder(features)
+            # else:
+            #     # "Onsager correction" term (Borgerding and Schniter 2016)
+            #     residual = (
+            #         x
+            #         - self.decoder(features)
+            #         + residual * self.activation[i - 1].config.k / self.config.d_model
+            #     )
 
             # Rescale features to current iteration. This helps to prevent their magnitude
             # from sometimes blowing up.

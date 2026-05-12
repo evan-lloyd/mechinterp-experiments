@@ -75,7 +75,7 @@ TOKENIZER_BATCH_SIZE = 256
 
 CHECKPOINT_BASE_PATH = f"{os.getenv('HF_BUCKET_LOCAL')}/gemma_2_2b/"
 saes = load_saes(
-    f"{CHECKPOINT_BASE_PATH}/next_layer_lista_feature_rescaling_tuned_encoder_0_densebtk",
+    f"{CHECKPOINT_BASE_PATH}/next_layer_lista_feature_rescaling_tuned_encoder_0",
     model.num_layers,
 )
 for sae in saes.values():

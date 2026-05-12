@@ -1,5 +1,4 @@
 from __future__ import annotations
-from decorator import contextmanager
 
 import os
 import re
@@ -26,10 +25,11 @@ import cloudpickle
 import numpy as np
 import torch
 from datasets import IterableDataset
+from decorator import contextmanager
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
-from transformers_sae.metrics import kl_loss, l0_eval, mse_loss
+from transformers_sae.metrics import cos_dist_loss, kl_loss, l0_eval, l1_loss, mse_loss, gmse_loss
 from transformers_sae.training_step.in_place_finetuned import (
     InPlaceFinetunedTrainingStepper,
 )
@@ -39,6 +39,7 @@ from .activation_data import TrainingBatch, make_activation_batch, make_batch_fo
 from .encoder import LISTA
 from .multiline_progress import MultilineProgress
 from .ops import (
+    clone_sae,
     find_checkpoint_after,
     find_latest_checkpoint,
     get_state_dict_from_checkpoint,
@@ -735,18 +736,20 @@ def tune_encoder_parallel(
     encoders to work within the full replacement model, without changing the semantics of the SAE features.
     """
     try:
-        first_sae_layer = min(baseline_saes.keys())
         training_saes = {
             layer: SAE(deepcopy(sae.config)) for layer, sae in baseline_saes.items()
         }
         train_result = TrainingResult(training_saes)
+        max_layer = max(layer for layer in baseline_saes.keys())
 
         for layer, sae in training_saes.items():
-            # sae.init_weights(None)
             # sae.decoder.init_weights(baseline_saes[layer].decoder)
             # sae.encoder.init_weights(sae.decoder)
             # sae.decoder.requires_grad_(False)
-            # sae.onload()
+            # # We're initializing in a weird way, so manually set our device rather than onload()
+            # sae._device_tracker = torch.nn.Buffer(
+            #     torch.empty((0,), device=sae.config.device)
+            # )
 
             sae.init_weights(baseline_saes[layer])
             sae.decoder.requires_grad_(False)
@@ -787,6 +790,36 @@ def tune_encoder_parallel(
             for layer in training_saes.keys()
         }
 
+        frozen_layers = set()
+
+        def _maybe_freeze_layer(layer):
+            if layer in frozen_layers:
+                return
+            frozen_layers.add(layer)
+            print(f"Freezing layer {layer}")
+            if checkpoint_dir:
+                checkpoint = SAECheckpoint(
+                    sae=clone_sae(training_saes[layer], to_device="cpu"),
+                    total_tokens_trained=num_used_tokens,
+                )
+                checkpoint.finalize()
+                save_training_result(
+                    {layer: [checkpoint]},
+                    checkpoint_dir,
+                    keep_in_ram=False,
+                    blocking=layer == max_layer,
+                )
+                with open(f"{checkpoint_dir}/tuned_thresholds_{layer}", "wb") as f:
+                    cloudpickle.dump(
+                        {
+                            save_layer: sae.activation_thresholds()
+                            for save_layer, sae in training_saes.items()
+                        },
+                        f,
+                    )
+            training_saes[layer].eval()
+            training_saes[layer].encoder.train_activations()
+
         replacement_model = make_replacement_model(model, training_saes)
         for batch in make_dataloader(
             model,
@@ -804,48 +837,75 @@ def tune_encoder_parallel(
                 ),
                 0.0,
             )
+            # frac_trained = max(frac_trained, 0.5)
             lr_mult = {}
             # Linear warmup, with layers progressively coming online such that all layers have full base
-            # LR at 50% through training.
+            # LR at 50% through training, then cool-down so that we freeze earlier layers.
             for layer, optimizer in optimizers.items():
-                ramp_start = layer / (2 * model.num_layers)
-                ramp_end = (layer + 1) / (2 * model.num_layers)
-                if frac_trained < ramp_start:
+                warm_up_start = (layer - 1) / (2 * model.num_layers) - 1e-6
+                warm_up_end = (layer) / (2 * model.num_layers)
+                cool_down_start = 0.5 + layer / (2 * model.num_layers)
+                cool_down_end = 0.5 + (layer + 1) / (2 * model.num_layers) + 1e-6
+                if frac_trained < warm_up_start:
                     lr_mult[layer] = 0.0
-                elif frac_trained < ramp_end:
-                    lr_mult[layer] = (frac_trained - ramp_start) * 2 * model.num_layers
-                else:
+                elif frac_trained < warm_up_end:
+                    lr_mult[layer] = (
+                        (frac_trained - warm_up_start) * 2 * model.num_layers
+                    )
+                elif frac_trained < cool_down_start:
                     lr_mult[layer] = 1.0
+                elif frac_trained < cool_down_end:
+                    lr_mult[layer] = (
+                        1.0 - (frac_trained - cool_down_start) * 2 * model.num_layers
+                    )
+                else:
+                    # Cooldown finished for this layer; we should freeze it and write its full-precision
+                    # weights, then switch to threshold-only eval mode.
+                    lr_mult[layer] = 0.0
+                    if layer < max_layer:
+                        _maybe_freeze_layer(layer)
+                lr_mult[layer] = min(max(lr_mult[layer], 0.0), 1.0)
                 for pg in optimizer.param_groups:
                     pg["lr"] = (
-                        pg["base_lr"]
-                        * lr_mult[layer]
-                        * config.lr_schedule(
-                            frac_trained,
-                            pg_name=pg["name"],
-                        )
+                        pg["base_lr"] * lr_mult[layer]
+                        # * config.lr_schedule(
+                        #     frac_trained,
+                        #     pg_name=pg["name"],
+                        # )
                     )
 
-            # We need to toggle this to prune the autograd graph
-            # training_saes[first_sae_layer].encoder.requires_grad_(True)
+            first_sae_layer = min(
+                layer
+                for layer in baseline_saes.keys()
+                if lr_mult[layer] > 0.0 or layer == max(baseline_saes.keys())
+            )
+
             with torch.no_grad(), _autocast():
                 baseline_input = make_activation_batch(
                     model,
                     [(first_sae_layer, "layer")],
                     batch,
                     end_layer=first_sae_layer + 1,
-                )[first_sae_layer].layer_output
+                )[first_sae_layer]
+                replacement_input = make_activation_batch(
+                    replacement_model,
+                    [(first_sae_layer, "layer")],
+                    batch,
+                    end_layer=first_sae_layer + 1,
+                    stop_before_sae=True,
+                )[first_sae_layer]
 
             with _autocast():
+                training_saes[first_sae_layer].encoder.requires_grad_(True)
                 replacement_input = make_activation_batch(
                     replacement_model,
                     [(first_sae_layer, "sae")],
                     batch,
                     start_layer=first_sae_layer,
-                    start_input=baseline_input,
+                    start_input=replacement_input.layer_output,
                     end_layer=first_sae_layer + 1,
                     start_at_sae=True,
-                )[first_sae_layer].sae_output
+                )[first_sae_layer]
 
             total_loss = 0.0
             prev_loss = torch.ones((1,), device=model.device)
@@ -853,60 +913,64 @@ def tune_encoder_parallel(
             last_sae_layer = max(
                 layer
                 for layer in baseline_saes.keys()
-                if lr_mult[layer] > 0.0 or layer == first_sae_layer
+                if layer == first_sae_layer or (layer > 0 and lr_mult[layer - 1] > 0.0)
             )
-            layers_to_tune = list(range(first_sae_layer, last_sae_layer + 1))
-
-            for layer in layers_to_tune[1:]:
+            for layer in range(first_sae_layer, last_sae_layer + 1):
                 baseline_sae = baseline_saes[layer]
                 training_sae = training_saes[layer]
 
+                training_sae.encoder.requires_grad_(True)
+
                 with torch.no_grad(), _autocast():
-                    baseline_input = make_activation_batch(
-                        model,
-                        [(layer, "layer")],
-                        batch,
-                        start_layer=layer,
-                        end_layer=layer + 1,
-                        start_input=baseline_input,
-                    )[layer].layer_output
                     expected_features = baseline_sae.encode(
-                        baseline_input,
+                        baseline_input.layer_output,
                         batch.token_mask,
                     )
-                    # max_feature_scale = (
-                    #     2 * expected_features[batch.token_mask.bool()].max()
+                    if layer + 1 < last_sae_layer:
+                        baseline_input = make_activation_batch(
+                            model,
+                            [(layer + 1, "layer")],
+                            batch,
+                            start_layer=layer + 1,
+                            end_layer=layer + 2,
+                            start_input=baseline_input.layer_output,
+                        )[layer + 1]
+                    # expected_recon = baseline_sae(
+                    #     baseline_input,
+                    #     token_mask=batch.token_mask,
+                    #     pass_through_positions=batch.special_token_indices,
                     # )
 
                 with _autocast():
-                    replacement_input = make_activation_batch(
-                        replacement_model,
-                        [(layer, "sae")],
-                        batch,
-                        start_layer=layer,
-                        end_layer=layer + 1,
-                        start_input=replacement_input,
-                        # We need to run the transformer layer too
-                        start_at_sae=False,
-                    )[layer]
                     loss = (
-                        mse_loss(
+                        gmse_loss(
                             replacement_input.sae_features,
-                            # max_feature_scale
-                            # * torch.tanh(
-                            #     replacement_input.sae_features / max_feature_scale
-                            # ),
                             expected_features,
+                            # replacement_input.sae_output,
+                            # expected_recon,
                             batch,
                         )
+                        # * training_sae.encoder.activation[-1].config.k
                         # Rescale loss to be "per active feature"
-                        * training_sae.config.d_sae
+                        # * training_sae.config.d_sae
                         / training_sae.encoder.activation[-1].config.k
                     )
-                    assert loss.item() < 1e9, "Loss exploded"
+                    # assert loss.item() < 1e9, "Loss exploded"
+                    if layer + 1 < last_sae_layer:
+                        replacement_input = make_activation_batch(
+                            replacement_model,
+                            [(layer + 1, "sae")],
+                            batch,
+                            start_layer=layer + 1,
+                            end_layer=layer + 2,
+                            start_input=replacement_input.sae_output,
+                            # We need to run the transformer layer too
+                            start_at_sae=False,
+                        )[layer + 1]
                     # print(loss)
                     total_loss += loss.item()
                     del expected_features
+                    # del expected_recon
 
                 with torch.no_grad():
                     loss_scale = prev_loss / (loss + 1e-8)
@@ -914,53 +978,56 @@ def tune_encoder_parallel(
                 prev_loss = loss.detach()
                 del loss
 
-                # We don't step until we've computed the loss for the next layer
-                optimizer = optimizers[layer - 1]
-                torch.nn.utils.clip_grad_norm_(
-                    [
-                        p
-                        for pg in optimizer.param_groups
-                        for p in pg["params"]
-                        if p.requires_grad
-                    ],
-                    max_norm=1.0,
-                )
-                optimizer.step()
-                optimizer.zero_grad()
-
-                # We need to keep the autograd graph for the KL term if this is the last layer
-                if layer == model.num_layers - 1:
-                    replacement_input = replacement_input.sae_output
-                else:
-                    replacement_input = replacement_input.sae_output.detach()
+                # Don't step until we've computed the loss for the next layer
+                if layer > first_sae_layer:
+                    optimizer = optimizers[layer - 1]
+                    torch.nn.utils.clip_grad_norm_(
+                        [
+                            p
+                            for pg in optimizer.param_groups
+                            for p in pg["params"]
+                            if p.requires_grad
+                        ],
+                        max_norm=1.0,
+                    )
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    # Temporarily freeze earlier layers until the next batch
+                    training_saes[layer - 1].encoder.requires_grad_(False)
 
             # Compute KL for last layer loss?
             if last_sae_layer == model.num_layers - 1:
+                replacement_input.sae_features = None
+                replacement_input.sae_output = replacement_input.sae_output.detach()
                 with torch.no_grad(), _autocast():
                     baseline_input = make_activation_batch(
                         model,
                         [(model.num_layers, "layer")],
                         batch,
-                        start_layer=model.num_layers,
+                        start_layer=model.num_layers - 1,
                         end_layer=model.num_layers + 1,
-                        start_input=baseline_input,
-                    )[model.num_layers].log_probs
+                        start_input=baseline_input.layer_output,
+                    )[model.num_layers]
                 with _autocast():
                     replacement_input = make_activation_batch(
                         replacement_model,
                         [(model.num_layers, "layer")],
                         batch,
-                        start_layer=model.num_layers,
+                        start_layer=model.num_layers - 1,
                         end_layer=model.num_layers + 1,
-                        start_input=replacement_input,
-                    )[model.num_layers].log_probs
-                loss = kl_loss(replacement_input, baseline_input, batch)
+                        start_input=replacement_input.sae_output,
+                    )[model.num_layers]
+                loss = kl_loss(
+                    replacement_input.log_probs, baseline_input.log_probs, batch
+                )
                 with torch.no_grad():
                     loss_scale = prev_loss / (loss + 1e-8)
                 (loss * loss_scale / 2).backward()
+                total_loss += loss.item()
 
             optimizers[last_sae_layer].step()
             optimizers[last_sae_layer].zero_grad()
+            training_saes[last_sae_layer].requires_grad_(False)
             del baseline_input
             del replacement_input
 
@@ -968,23 +1035,54 @@ def tune_encoder_parallel(
             num_used_tokens += batch.num_tokens
             progress.total = max(num_encoder_tuning_tokens, num_used_tokens)
             progress.update(batch.num_tokens)
+            # for batch in training loop
+
+        _maybe_freeze_layer(max_layer)
         progress.close()
-        # end training loop
 
+        # Second phase: tune activation thresholds
+        progress = MultilineProgress(
+            total=num_threshold_tuning_tokens,
+            desc=["Tuning BatchTopK thresholds for replacement model"],
+            num_header_lines=1,
+        )
+        num_used_tokens = 0
+        for batch in make_dataloader(
+            replacement_model,
+            tokenizer,
+            dataset,
+            max_tokens=num_threshold_tuning_tokens,
+            tokenizer_batch_size=config.tokenizer_batch_size,
+            inference_batch_size=config.training_batch_size,
+        ):
+            batch.to(replacement_model.device)
+
+            # Run the model until just prior to outputting logits, since this will be enough
+            # to get activations to flow through each SAE.
+            with torch.no_grad():
+                make_activation_batch(
+                    replacement_model,
+                    [],
+                    batch,
+                    end_layer=model.num_layers,
+                )
+
+            num_used_tokens += batch.num_tokens
+            progress.total = max(num_threshold_tuning_tokens, num_used_tokens)
+            progress.update(batch.num_tokens)
+
+        # Overwrite final tuned thresholds
         if checkpoint_dir:
-            checkpoints = {
-                layer: [SAECheckpoint(sae=sae, total_tokens_trained=num_used_tokens)]
-                for layer, sae in training_saes.items()
-            }
-            for checkpoint_list in checkpoints.values():
-                checkpoint_list[0].finalize()
+            with open(f"{checkpoint_dir}/tuned_thresholds_{max_layer}", "wb") as f:
+                cloudpickle.dump(
+                    {
+                        save_layer: sae.activation_thresholds()
+                        for save_layer, sae in training_saes.items()
+                    },
+                    f,
+                )
 
-            save_training_result(
-                checkpoints,
-                checkpoint_dir,
-                keep_in_ram=True,
-                blocking=True,
-            )
+        progress.close()
 
         return train_result
     finally:
