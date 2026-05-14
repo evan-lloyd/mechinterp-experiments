@@ -318,7 +318,8 @@ def _input_generator(
             # NB: this should maybe technically discard some rows from the start, since we'll effectively
             # be training on the overlapping tokens twice, but I doubt this matters much.
             yield batch
-        state.num_tokens_generated += batch.num_tokens
+        if not batch.skipped:
+            state.num_tokens_generated += batch.num_tokens
 
 
 def mock_data_generator(

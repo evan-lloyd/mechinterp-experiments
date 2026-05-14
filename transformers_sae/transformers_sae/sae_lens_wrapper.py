@@ -74,6 +74,7 @@ class SAELensSAEWrapper(torch.nn.Module):
         return {
             "token_mask": kwargs.pop("token_mask"),
             "pass_through_positions": kwargs.pop("pass_through_positions"),
+            "feature_soft_cap": kwargs.pop("feature_soft_cap", None),
         }
 
     def forward(

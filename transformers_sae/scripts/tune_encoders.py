@@ -125,7 +125,7 @@ training_config = TrainingConfig(
     method=TrainingMethod.next_layer,
 )
 
-START_LAYER = 21
+START_LAYER = 10
 
 for training_method in (
     "next_layer_lista_36k",

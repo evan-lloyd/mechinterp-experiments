@@ -358,14 +358,19 @@ class Encoder(torch.nn.Module):
         x: torch.Tensor,
         token_mask: torch.Tensor,
         should_cast: bool = True,
+        feature_soft_cap: Optional[torch.Tensor] = None,
     ):
         out_dtype = x.dtype
         if should_cast:
             x = x.to(self.dtype)
-        result = self.activation[0](self.linear(x), token_mask)
+        features = self.activation[0](self.linear(x), token_mask)
+
+        if feature_soft_cap is not None:
+            features = feature_soft_cap * (features / feature_soft_cap).tanh()
+
         if should_cast:
-            result = result.to(out_dtype)
-        return result
+            features = features.to(out_dtype)
+        return features
 
 
 class LISTA(Encoder):
@@ -477,7 +482,11 @@ class LISTA(Encoder):
         yield from (("scale", self.scale), ("feature_scale", self.feature_scale))
 
     def forward(
-        self, x: torch.Tensor, token_mask: torch.Tensor, should_cast: bool = True
+        self,
+        x: torch.Tensor,
+        token_mask: torch.Tensor,
+        should_cast: bool = True,
+        feature_soft_cap: Optional[torch.Tensor] = None,
     ):
         out_dtype = x.dtype
         if should_cast:
@@ -516,6 +525,9 @@ class LISTA(Encoder):
             # )
 
         # features *= self.feature_scale
+        if feature_soft_cap is not None:
+            features = feature_soft_cap * (features / feature_soft_cap).tanh()
+
         if should_cast:
             features = features.to(out_dtype)
         return features
@@ -585,7 +597,11 @@ class InteractionEncoder(Encoder):
         )
 
     def forward(
-        self, x: torch.Tensor, token_mask: torch.Tensor, should_cast: bool = True
+        self,
+        x: torch.Tensor,
+        token_mask: torch.Tensor,
+        should_cast: bool = True,
+        feature_soft_cap: Optional[torch.Tensor] = None,
     ):
         out_dtype = x.dtype
         if should_cast:
@@ -596,6 +612,9 @@ class InteractionEncoder(Encoder):
             features = self.activation[i + 1](
                 encoder_output + features @ self.interaction, token_mask
             )
+
+        if feature_soft_cap is not None:
+            features = feature_soft_cap * (features / feature_soft_cap).tanh()
 
         if should_cast:
             features = features.to(out_dtype)

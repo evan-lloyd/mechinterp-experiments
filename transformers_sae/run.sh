@@ -57,7 +57,18 @@ fi
 # Check for Python script
 if [[ -f "$SCRIPTS_DIR/$SCRIPT_NAME.py" ]]; then
     if [[ $USE_PDB -eq 1 ]]; then
-        exec uv run -m pdb -c continue -m "scripts.$SCRIPT_NAME" "$@"
+        exec uv run python -c "
+import pdb, sys, traceback, runpy, bdb
+try:
+    runpy.run_path('scripts/$SCRIPT_NAME.py', run_name='__main__')
+except (SystemExit, bdb.BdbQuit):
+    raise
+except Exception:
+    traceback.print_exc()
+    pdb.post_mortem()
+    sys.exit(1)
+"
+        # exec uv run -m pdb -c "c" -m "scripts.$SCRIPT_NAME" "$@"
     else
         exec uv run -m "scripts.$SCRIPT_NAME" "$@"
     fi

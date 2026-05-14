@@ -245,14 +245,25 @@ class SAE(torch.nn.Module):
 
     @_check_device
     def encode(
-        self, x: torch.Tensor, token_mask: torch.Tensor, should_cast: bool = True
+        self,
+        x: torch.Tensor,
+        token_mask: torch.Tensor,
+        should_cast: bool = True,
+        feature_soft_cap: Optional[torch.Tensor] = None,
     ):
-        return self.encoder(x, token_mask=token_mask, should_cast=should_cast)
+        features = self.encoder(
+            x,
+            token_mask=token_mask,
+            should_cast=should_cast,
+            feature_soft_cap=feature_soft_cap,
+        )
+        return features
 
     def pop_sae_kwargs(self, kwargs):
         return {
             "token_mask": kwargs.pop("token_mask"),
             "pass_through_positions": kwargs.pop("pass_through_positions"),
+            "feature_soft_cap": kwargs.pop("feature_soft_cap", None),
         }
 
     def load_state_dict(
@@ -270,11 +281,15 @@ class SAE(torch.nn.Module):
         *args,
         pass_through_positions: torch.Tensor,
         token_mask: torch.Tensor,
+        feature_soft_cap: Optional[torch.Tensor] = None,
         **kwargs,
     ):
         decoder_result = self.decode(
             self.encode(
-                x.to(self.encoder.dtype), token_mask=token_mask, should_cast=False
+                x.to(self.encoder.dtype),
+                token_mask=token_mask,
+                should_cast=False,
+                feature_soft_cap=feature_soft_cap,
             ),
             should_cast=False,
         ).to(x.dtype)

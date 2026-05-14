@@ -114,6 +114,8 @@ def _batch_gmean(
     [torch.Tensor, torch.Tensor, DataBatch, _ReturnType],
     torch.Tensor | np.ndarray | float,
 ]:
+    """Geometric mean loss over a batch of tokens."""
+
     def _inner(
         actual: torch.Tensor,
         target: torch.Tensor,
@@ -137,6 +139,63 @@ def _batch_gmean(
     return _inner
 
 
+@overload
+def _batch_tmean(
+    fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+) -> Callable[
+    [torch.Tensor, torch.Tensor, DataBatch, float],
+    torch.Tensor,
+]: ...
+
+
+@overload
+def _batch_tmean(
+    fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+) -> Callable[
+    [torch.Tensor, torch.Tensor, DataBatch, float, Literal["tensor"]],
+    torch.Tensor,
+]: ...
+
+
+@overload
+def _batch_tmean(
+    fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+) -> Callable[
+    [torch.Tensor, torch.Tensor, DataBatch, float, Literal["float"]],
+    float,
+]: ...
+
+def _batch_tmean(
+    fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+) -> Callable[
+    [torch.Tensor, torch.Tensor, DataBatch, float, _ReturnType],
+    torch.Tensor | np.ndarray | float,
+]:
+    """Trimmed mean loss over a batch of tokens"""
+    def _inner(
+        actual: torch.Tensor,
+        target: torch.Tensor,
+        batch: DataBatch,
+        trim_fraction: float,
+        return_type: _ReturnType = "tensor",
+    ) -> torch.Tensor | np.ndarray | float:
+        result = fn(actual, target)[batch.token_mask.bool()].flatten()
+        if return_type == "np":
+            top_k = result.topk(int(trim_fraction * batch.num_tokens), sorted=False)
+            result[top_k.indices] = 0.0
+            return tensor_to_numpy(
+                result.cpu()
+            )
+        # We need to 
+        top_k = result.topk(int((1.0 - trim_fraction) * batch.num_tokens), sorted=False, largest=False)        
+        result = result[top_k.indices].mean()
+        if return_type == "tensor":
+            return result
+        return result.item()
+
+    return _inner
+
+
 @_batch_mean
 def cos_dist_loss(actual: torch.Tensor, target: torch.Tensor):
     return 1 - torch.nn.functional.cosine_similarity(actual, target, dim=-1)
@@ -144,6 +203,11 @@ def cos_dist_loss(actual: torch.Tensor, target: torch.Tensor):
 
 @_batch_mean
 def mse_loss(actual: torch.Tensor, target: torch.Tensor):
+    return ((actual - target) ** 2).mean(dim=-1)
+
+
+@_batch_tmean
+def tmse_loss(actual: torch.Tensor, target: torch.Tensor):
     return ((actual - target) ** 2).mean(dim=-1)
 
 

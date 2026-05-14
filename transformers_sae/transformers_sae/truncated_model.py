@@ -19,7 +19,6 @@ def truncated_model(
     """Modifies a transformer model in place for the duration of the context manager,
     such that only the layers between start_layer and end_layer are executed.
     """
-
     if (
         start_layer == -1
         or start_layer >= model.num_layers

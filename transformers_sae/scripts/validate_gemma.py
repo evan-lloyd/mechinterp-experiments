@@ -126,10 +126,11 @@ training_config = TrainingConfig(
     method=TrainingMethod.next_layer,
 )
 
-START_LAYER = 0
+START_LAYER = 10
 
 for training_method in (
-    "next_layer_finetuned_interaction",
+    "next_layer_lista_36k",
+    # "next_layer_finetuned_interaction",
     # "next_layer",
     # "next_layer_interaction",
     # "next_layer_finetuned",
@@ -153,14 +154,14 @@ for training_method in (
         print(f"Skipping {training_method}, validations already complete")
         continue
 
-    # saes = load_saes(
-    #     f"{CHECKPOINT_BASE_PATH}/{training_method}", model.num_layers, START_LAYER
-    # )
     saes = load_saes(
-        f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_parallel",
-        model.num_layers,
-        START_LAYER,
+        f"{CHECKPOINT_BASE_PATH}/{training_method}", model.num_layers, START_LAYER
     )
+    # saes = load_saes(
+    #     f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}",
+    #     model.num_layers,
+    #     START_LAYER,
+    # )
     # assert len(saes) == model.num_layers, (
     #     f"Missing SAEs for {training_method}, only had {set(saes.keys())}"
     # )

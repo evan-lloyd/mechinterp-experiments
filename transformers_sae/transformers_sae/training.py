@@ -29,7 +29,15 @@ from decorator import contextmanager
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
-from transformers_sae.metrics import cos_dist_loss, kl_loss, l0_eval, l1_loss, mse_loss, gmse_loss
+from transformers_sae.metrics import (
+    cos_dist_loss,
+    kl_loss,
+    l0_eval,
+    l1_loss,
+    mse_loss,
+    gmse_loss,
+    tmse_loss,
+)
 from transformers_sae.training_step.in_place_finetuned import (
     InPlaceFinetunedTrainingStepper,
 )
@@ -470,6 +478,13 @@ def tune_encoder(
                 optimizer.zero_grad()
                 batch.to(model.device)
 
+                # Avoid some NaNs caused by blowing-up feature values in masked positions by passing
+                # them through the SAE (this is a problem because 0 * NaN = NaN). TODO: we might want
+                # to just do this by default.
+                batch.special_token_indices = torch.flatten(
+                    torch.nonzero(batch.token_mask == 0, as_tuple=False)
+                )
+
                 for sae in baseline_saes.values():
                     sae.onload()
                 for other_layer, sae in training_saes.items():
@@ -548,6 +563,10 @@ def tune_encoder(
                         # print(f"CUDA available memory: {mem_gb:.2f} GB")
 
                         # Get the actual input our SAE will receive in the replacement model
+                        with torch.no_grad():
+                            cur_layer_max_feature = (
+                                cur_layer_expected_features.max() * 10
+                            )
                         replacement_activations = make_activation_batch(
                             replacement_model,
                             [(layer + 1, "layer"), (layer, "sae")],
@@ -556,6 +575,9 @@ def tune_encoder(
                             start_layer=layer,
                             end_layer=layer + 2,
                             start_at_sae=True,
+                            additional_sae_kwargs={
+                                "feature_soft_cap": cur_layer_max_feature
+                            },
                         )
                         del start_input
 
@@ -566,41 +588,52 @@ def tune_encoder(
                         next_layer_input = replacement_activations[
                             layer + 1
                         ].layer_output
-                        del replacement_activations
+                        # del replacement_activations
 
+                        # Trimmed MSE loss, where we keep only the lowest 90% of per-token values.
+                        # This mitigates extreme outliers we observe, especially with LISTA encoders, that can
+                        # lead to inf loss.
+                        # Likely a better solution would be to find a way to make the encoder more numerically
+                        # stable.
                         cur_layer_loss = (
-                            mse_loss(
+                            tmse_loss(
                                 cur_layer_actual_features,
                                 cur_layer_expected_features,
                                 batch,
+                                0.1,
                             )
                             * training_sae.config.d_sae
                             / training_sae.encoder.activation[-1].config.k
                         )
-                        del cur_layer_actual_features
-                        del cur_layer_expected_features
+                        # del cur_layer_actual_features
+                        # del cur_layer_expected_features
 
                         if layer + 1 in training_saes:
+                            with torch.no_grad():
+                                next_layer_max_feature = expected_features.max() * 10
                             actual_features = training_saes[layer + 1].encode(
                                 next_layer_input,
                                 batch.token_mask,
+                                feature_soft_cap=next_layer_max_feature,
                             )
-                            del next_layer_input
+                            # del next_layer_input
 
                             # Using MSE loss on features here (rather than cosdist as we do elsewhere) because ideally
                             # our tuned SAE matches the original features *exactly* on the distorted input.
                             next_layer_loss = (
-                                mse_loss(
-                                    actual_features,
+                                tmse_loss(
+                                    next_layer_max_feature
+                                    * (actual_features / next_layer_max_feature).tanh(),
                                     expected_features,
                                     batch,
+                                    0.1,
                                 )
                                 # Rescale loss to be "per active feature"
                                 * training_sae.config.d_sae
                                 / training_sae.encoder.activation[-1].config.k
                             )
-                            del actual_features
-                            del expected_features
+                            # del actual_features
+                            # del expected_features
                         else:
                             next_layer_loss = kl_loss(
                                 actual_log_probs,
@@ -614,9 +647,6 @@ def tune_encoder(
                             )
                             next_layer_loss = kl_scale * next_layer_loss
                     loss = (cur_layer_loss + next_layer_loss) / 2
-
-                    loss.backward()
-
                     progress.set_postfix(
                         {
                             "loss": loss.item(),
@@ -624,36 +654,49 @@ def tune_encoder(
                             "next_layer_loss": next_layer_loss.item(),
                         }
                     )
-                    del loss
-                    del next_layer_loss
-                    del cur_layer_loss
 
-                    torch.nn.utils.clip_grad_norm_(
-                        [
-                            p
-                            for pg in optimizer.param_groups
-                            for p in pg["params"]
-                            if p.requires_grad
-                        ],
-                        max_norm=1.0,
-                    )
+                    # TODO: we should fix the underlying stability issue, rather than skipping batches we
+                    # can't handle
+                    if loss.isfinite().item():
+                        loss.backward()
 
-                    optimizer.step()
-                    num_used_tokens += batch.num_tokens
-                    progress.total = max(num_tokens_for_layer, num_used_tokens)
-                    progress.update(batch.num_tokens)
+                        del loss
+                        del next_layer_loss
+                        del cur_layer_loss
 
-                    for pg in optimizer.param_groups:
-                        pg["lr"] = pg["base_lr"] * config.lr_schedule(
-                            max(
-                                min(
-                                    num_used_tokens / config.num_train_tokens,
-                                    1.0,
-                                ),
-                                0.0,
-                            ),
-                            pg_name=pg["name"],
+                        torch.nn.utils.clip_grad_norm_(
+                            [
+                                p
+                                for pg in optimizer.param_groups
+                                for p in pg["params"]
+                                if p.requires_grad
+                            ],
+                            max_norm=1.0,
+                            error_if_nonfinite=True,
                         )
+
+                        optimizer.step()
+                        num_used_tokens += batch.num_tokens
+                        progress.total = max(num_tokens_for_layer, num_used_tokens)
+                        progress.update(batch.num_tokens)
+
+                        for pg in optimizer.param_groups:
+                            pg["lr"] = pg["base_lr"] * config.lr_schedule(
+                                max(
+                                    min(
+                                        num_used_tokens / config.num_train_tokens,
+                                        1.0,
+                                    ),
+                                    0.0,
+                                ),
+                                pg_name=pg["name"],
+                            )
+                    else:
+                        breakpoint()
+                        del loss
+                        del next_layer_loss
+                        del cur_layer_loss
+                        batch.skipped = True
                     # end for each batch
                 else:
                     # Just tuning activation threshold for final layer
