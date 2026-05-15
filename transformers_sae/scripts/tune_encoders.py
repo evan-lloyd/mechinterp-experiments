@@ -1,6 +1,7 @@
 import os
 
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+
 import numpy as np
 import torch
 from datasets import load_dataset
@@ -12,18 +13,13 @@ from transformers_sae.ops import (
     load_saes,
 )
 from transformers_sae.replacement_model import GemmaReplacement, make_replacement_model
-from transformers_sae.training import (
-    TrainingConfig,
-    TrainingMethod,
-    tune_encoder,
-    tune_encoder_parallel,
-)
+from transformers_sae.training import TrainingConfig, TrainingMethod, tune_encoder
 from transformers_sae.validation import generate_with_replacement, run_validations
 
 # Tweak TRAINING_BATCH_SIZE for your hardware if necessary
 if torch.cuda.is_available():
     TRAINING_DEVICE = "cuda:0"
-    TRAINING_BATCH_SIZE = 1
+    TRAINING_BATCH_SIZE = 2
 elif torch.mps.is_available():
     TRAINING_DEVICE = "mps:0"
     TRAINING_BATCH_SIZE = 2
@@ -125,7 +121,7 @@ training_config = TrainingConfig(
     method=TrainingMethod.next_layer,
 )
 
-START_LAYER = 10
+START_LAYER = 0
 
 for training_method in (
     "next_layer_lista_36k",
@@ -162,22 +158,9 @@ for training_method in (
             training_config,
             num_encoder_tuning_tokens=NUM_ENCODER_TUNING_TOKENS,
             num_threshold_tuning_tokens=NUM_THRESHOLD_TUNING_TOKENS,
-            offload_after_training=False,
             checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}",
         )
         saes = tr.final_saes
-        # tr = tune_encoder_parallel(
-        #     model,
-        #     tokenizer,
-        #     {layer: sae for layer, sae in saes.items() if layer >= start_layer},
-        #     training_dataset,
-        #     training_config,
-        #     num_encoder_tuning_tokens=NUM_ENCODER_TUNING_TOKENS,
-        #     num_threshold_tuning_tokens=NUM_THRESHOLD_TUNING_TOKENS,
-        #     offload_after_training=False,
-        #     checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_parallel",
-        # )
-        # saes = tr.final_saes
 
         validations = run_validations(
             model,

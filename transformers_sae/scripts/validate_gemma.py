@@ -1,5 +1,4 @@
 import os
-from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import torch
@@ -7,7 +6,6 @@ from datasets import load_dataset
 from deepeval.benchmarks.mmlu.task import MMLUTask
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from transformers_sae.benchmark import BenchmarkModel, MMLUBenchmark
 from transformers_sae.ops import (
     MemoryTrackingMode,
     load_saes,
@@ -17,7 +15,6 @@ from transformers_sae.replacement_model import GemmaReplacement, make_replacemen
 from transformers_sae.training import (
     TrainingConfig,
     TrainingMethod,
-    tune_activation_thresholds,
     tune_encoder,
 )
 from transformers_sae.validation import generate_with_replacement, run_validations
@@ -126,7 +123,7 @@ training_config = TrainingConfig(
     method=TrainingMethod.next_layer,
 )
 
-START_LAYER = 10
+START_LAYER = 20
 
 for training_method in (
     "next_layer_lista_36k",

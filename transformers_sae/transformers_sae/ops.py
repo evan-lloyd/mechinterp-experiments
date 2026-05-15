@@ -42,7 +42,19 @@ if TYPE_CHECKING:
 
 
 def _shallow_copy_model(source: torch.nn.Module):
-    copied = copy.copy(source)
+    # Hack to get around parametrized modules not supporting shallow copy
+    if torch.nn.utils.parametrize.is_parametrized(source):
+        try:
+            old_parametrizations = source.parametrizations
+            old_getstate = source.__class__.__getstate__
+            source.parametrizations = None
+            del source.__class__.__getstate__
+            copied = copy.copy(source)
+        finally:
+            source.parametrizations = old_parametrizations
+            source.__class__.__getstate__ = old_getstate
+    else:
+        copied = copy.copy(source)
     copied._modules = {}
     copied._buffers = dict(**source._buffers)
     copied._parameters = dict(**source._parameters)

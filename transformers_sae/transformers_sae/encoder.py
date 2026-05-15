@@ -1,5 +1,5 @@
+from copy import copy
 from dataclasses import dataclass, field
-from itertools import chain
 from typing import (
     TYPE_CHECKING,
     Iterator,
@@ -237,6 +237,7 @@ class LISTAConfig(EncoderConfig):
     # Per-layer activation configs. When set, must have length == n_iterations.
     # When None, `activation_function` is replicated across all iterations.
     per_layer_activation_functions: Optional[List[ActivationFunctionConfig]] = None
+    use_onsager_correction: bool = False
 
     def __post_init__(self):
         if self.per_layer_activation_functions is not None:
@@ -497,34 +498,25 @@ class LISTA(Encoder):
             (x.shape[0], x.shape[1], self.config.d_sae), device=x.device, dtype=x.dtype
         )
         for i in range(self.config.n_iterations):
-            # if i == 0:
-            residual = x - self.decoder(features)
-            # else:
-            #     # "Onsager correction" term (Borgerding and Schniter 2016)
-            #     residual = (
-            #         x
-            #         - self.decoder(features)
-            #         + residual * self.activation[i - 1].config.k / self.config.d_model
-            #     )
+            if i == 0 or not self.config.use_onsager_correction:
+                residual = x - self.decoder(features)
+            else:
+                # "Onsager correction" term (Borgerding and Schniter 2016)
+                residual = (
+                    x
+                    - self.decoder(features)
+                    + residual * self.activation[i - 1].config.k / self.config.d_model
+                )
 
             # Rescale features to current iteration. This helps to prevent their magnitude
             # from sometimes blowing up.
-            if i >= 1:
+            if i >= 1 and not self.config.use_onsager_correction:
                 features *= self.scale[i] / self.scale[i - 1]
             features = self.activation[i](
                 features + self.scale[i] * self.linear(residual),
                 token_mask,
             )
-            # residual = (
-            #     x
-            #     - self.decoder(features)
-            #     + self.scale[i]
-            #     * residual
-            #     * self.activation[i].config.k
-            #     / self.config.d_model
-            # )
 
-        # features *= self.feature_scale
         if feature_soft_cap is not None:
             features = feature_soft_cap * (features / feature_soft_cap).tanh()
 

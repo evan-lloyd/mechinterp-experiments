@@ -10,7 +10,6 @@ from transformers_sae.training import (
     TrainingConfig,
     TrainingMethod,
     train,
-    tune_activation_thresholds,
 )
 from transformers_sae.validation import generate_with_replacement, run_validations
 
@@ -71,8 +70,8 @@ NUM_TRAINING_TOKENS = int(5e7)
 EVAL_INTERVAL = int(1e5)
 NUM_VALIDATION_TOKENS = int(1e6)
 # to match Gemma Scope
-# D_SAE = 16384
-D_SAE = model.d_model * 16 # 36,864
+D_SAE = 16384
+# D_SAE = model.d_model * 16  # 36,864
 D_MODEL = model.d_model
 TOPK = 100
 TOKENIZER_BATCH_SIZE = 256
@@ -91,6 +90,7 @@ empty_saes = {
             top_k=list(range(TOPK // N_ITERATIONS, TOPK + 1, TOPK // N_ITERATIONS)),
             encoder_kind="lista",
             n_iterations=N_ITERATIONS,
+            extra_encoder_config_kwargs={"use_onsager_correction": True},
         )
     )
     for layer in range(model.num_layers)
@@ -144,21 +144,10 @@ training_results = train(
             int(1e7),
         )
     ),
-    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_lista_36k/",
+    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_lista_onsager/",
     force_retrain=False,
     offload_after_training=False,
 )
-
-# tune_activation_thresholds(
-#     model,
-#     tokenizer,
-#     training_results.final_saes,
-#     training_dataset,
-#     TOKENIZER_BATCH_SIZE,
-#     TRAINING_BATCH_SIZE,
-#     int(1e6),
-#     offload_after_training=False,
-# )
 
 validations = run_validations(
     model,

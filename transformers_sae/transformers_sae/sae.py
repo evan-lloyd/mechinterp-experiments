@@ -5,6 +5,7 @@ from typing import (
     Any,
     Callable,
     Concatenate,
+    Dict,
     List,
     Mapping,
     Optional,
@@ -60,7 +61,8 @@ def make_sae_config(
     activation_kind: ActivationKind | List[ActivationKind],
     top_k: int | List[int] | None = None,
     encoder_kind: EncoderKind = "encoder",
-    n_iterations: int | None = None,
+    n_iterations: Optional[int] = None,
+    extra_encoder_config_kwargs: Optional[Dict] = None,
 ) -> SAEConfig:
     if isinstance(activation_kind, list):
         assert activation_kind, (
@@ -96,29 +98,29 @@ def make_sae_config(
 
     device = torch.device(device)
 
-    encoder_class_kwargs = dict(
+    encoder_cfg_kwargs = dict(
         d_model=d_model,
         d_sae=d_sae,
         device=device,
         train_dtype=train_dtype,
         inference_dtype=inference_dtype,
-    )
+    ) | (extra_encoder_config_kwargs or {})
     if encoder_kind in ("lista", "interaction"):
         if encoder_kind == "lista":
             encoder_cfg_class = LISTAConfig
             n_iterations = len(top_k) if isinstance(top_k, list) else n_iterations
-            encoder_class_kwargs["n_iterations"] = n_iterations
+            encoder_cfg_kwargs["n_iterations"] = n_iterations
         elif encoder_kind == "interaction":
             encoder_cfg_class = InteractionEncoderConfig
-            encoder_class_kwargs["n_interaction_iterations"] = n_iterations
+            encoder_cfg_kwargs["n_interaction_iterations"] = n_iterations
 
-        encoder_class_kwargs["activation_function"] = activation_config[0]
+        encoder_cfg_kwargs["activation_function"] = activation_config[0]
         if len(activation_config) > 1:
-            encoder_class_kwargs["per_layer_activation_functions"] = activation_config
+            encoder_cfg_kwargs["per_layer_activation_functions"] = activation_config
     else:
         encoder_cfg_class = EncoderConfig
-        encoder_class_kwargs["activation_function"] = activation_config[0]
-    encoder_config = encoder_cfg_class(**encoder_class_kwargs)
+        encoder_cfg_kwargs["activation_function"] = activation_config[0]
+    encoder_config = encoder_cfg_class(**encoder_cfg_kwargs)
 
     decoder_config = DecoderConfig(d_model, d_sae, device, train_dtype, inference_dtype)
     return SAEConfig(
@@ -284,6 +286,8 @@ class SAE(torch.nn.Module):
         feature_soft_cap: Optional[torch.Tensor] = None,
         **kwargs,
     ):
+        # if not self.training:
+        # orig_norms = torch.linalg.vector_norm(x, dim=-1, keepdim=True)
         decoder_result = self.decode(
             self.encode(
                 x.to(self.encoder.dtype),
@@ -297,4 +301,7 @@ class SAE(torch.nn.Module):
         decoder_result.view(x.shape[0] * x.shape[1], x.shape[2])[
             pass_through_positions, :
         ] = x.view(x.shape[0] * x.shape[1], x.shape[2])[pass_through_positions, :]
+        # if not self.training:
+        # new_norms = torch.linalg.vector_norm(decoder_result, dim=-1, keepdim=True)
+        # return decoder_result * orig_norms / (new_norms + 1e-8)
         return decoder_result
