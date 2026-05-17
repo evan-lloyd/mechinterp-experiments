@@ -74,7 +74,8 @@ CHECKPOINT_TRAINING_METHODS = (
     # "next_layer_interaction",
     # "next_layer_finetuned",
     # "next_layer_finetuned_lista",
-    "next_layer_in_place_finetuned",
+    # "next_layer_in_place_finetuned",
+    "next_layer_lista_onsager_tuned_encoder_0",
     # "next_layer_finetuned_lista_tuned_encoder_0",
 )
 
@@ -168,17 +169,17 @@ def run_baseline_benchmark():
     #     return
 
     os.makedirs(BENCHMARK_BASE_PATH, exist_ok=True)
-    # mmlu = MMLUBenchmark(
-    #     tokenizer,
-    #     model.context_length,
-    #     tasks=MMLU_TASKS,
-    # )
-    # mmlu.evaluate(model=BenchmarkModel(model, tokenizer), batch_size=BENCHMARK_BATCH_SIZE)
-    boolq = BoolQBenchmark(tokenizer, model.context_length, n_shots=0)
-    boolq.evaluate(
-        model=BenchmarkModel(model, tokenizer, is_multiple_choice=False),
-        batch_size=BENCHMARK_BATCH_SIZE,
+    mmlu = MMLUBenchmark(
+        tokenizer,
+        model.context_length,
+        tasks=MMLU_TASKS,
     )
+    mmlu.evaluate(model=BenchmarkModel(model, tokenizer), batch_size=BENCHMARK_BATCH_SIZE)
+    # boolq = BoolQBenchmark(tokenizer, model.context_length, n_shots=0)
+    # boolq.evaluate(
+    #     model=BenchmarkModel(model, tokenizer, is_multiple_choice=False),
+    #     batch_size=BENCHMARK_BATCH_SIZE,
+    # )
 
     # with open(out_path, "wb") as f:
     #     cloudpickle.dump(
@@ -202,25 +203,25 @@ def run_sae_benchmark(training_method: str, saes):
     replacement_model = make_replacement_model(model, saes)
 
     os.makedirs(BENCHMARK_BASE_PATH, exist_ok=True)
-    # mmlu = MMLUBenchmark(
-    #     tokenizer,
-    #     model.context_length,
-    #     tasks=MMLU_TASKS,
-    # )
-    # mmlu.evaluate(
-    #     model=BenchmarkModel(replacement_model, tokenizer),
-    #     batch_size=BENCHMARK_BATCH_SIZE,
-    # )
-    boolq = BoolQBenchmark(
+    mmlu = MMLUBenchmark(
         tokenizer,
         model.context_length,
-        n_shots=0,
-        # n_problems=64,
+        tasks=MMLU_TASKS,
     )
-    boolq.evaluate(
-        model=BenchmarkModel(replacement_model, tokenizer, is_multiple_choice=False),
+    mmlu.evaluate(
+        model=BenchmarkModel(replacement_model, tokenizer),
         batch_size=BENCHMARK_BATCH_SIZE,
     )
+    # boolq = BoolQBenchmark(
+    #     tokenizer,
+    #     model.context_length,
+    #     n_shots=0,
+    #     # n_problems=64,
+    # )
+    # boolq.evaluate(
+    #     model=BenchmarkModel(replacement_model, tokenizer, is_multiple_choice=False),
+    #     batch_size=BENCHMARK_BATCH_SIZE,
+    # )
     # with open(out_path, "wb") as f:
     #     cloudpickle.dump(
     #         {"answer_stats": mmlu.answer_stats, "predictions": mmlu.predictions}, f

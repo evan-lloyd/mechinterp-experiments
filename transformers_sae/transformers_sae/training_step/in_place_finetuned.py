@@ -1,5 +1,7 @@
 from typing import Dict
 
+import torch
+
 from ..activation_data import ActivationBatch, make_activation_batch
 from ..data_batch import DataBatch
 from ..replacement_model import ReplacementModel, make_replacement_model
@@ -31,10 +33,21 @@ class InPlaceFinetunedTrainingStepper(NextLayerFinetunedTrainingStepper):
         ]
         if self.target_layer + 1 < self.replacement_model.num_layers:
             activation_requests.append((self.target_layer + 1, "sae"))
+
+        with torch.no_grad():
+            replacement_input = make_activation_batch(
+                self.replacement_model,
+                [(self.target_layer, "layer")],
+                batch,
+                end_layer=self.target_layer + 1,
+                stop_before_sae=True,
+            )[self.target_layer].layer_output
         return make_activation_batch(
             self.replacement_model,
             activation_requests,
             batch,
-            start_layer=-1,
+            start_input=replacement_input,
+            start_layer=self.target_layer,
             end_layer=self.replacement_model.num_layers + 1,
+            start_at_sae=True,
         )

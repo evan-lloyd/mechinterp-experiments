@@ -124,7 +124,8 @@ training_config = TrainingConfig(
 START_LAYER = 0
 
 for training_method in (
-    "next_layer_lista_36k",
+    "next_layer_lista_onsager",
+    # "next_layer_lista_36k",
     # "next_layer_finetuned_interaction",
     # "next_layer_lista_feature_rescaling",
     # "next_layer",

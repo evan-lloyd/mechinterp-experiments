@@ -75,11 +75,15 @@ TOKENIZER_BATCH_SIZE = 256
 
 CHECKPOINT_BASE_PATH = f"{os.getenv('HF_BUCKET_LOCAL')}/gemma_2_2b/"
 saes = load_saes(
-    f"{CHECKPOINT_BASE_PATH}/next_layer_lista_feature_rescaling_tuned_encoder_0",
+    f"{CHECKPOINT_BASE_PATH}/next_layer_lista_onsager_tuned_encoder_0",
     model.num_layers,
 )
+
+# TODO: we should refactor the fine tune logic in training.py to handle this
 for sae in saes.values():
     sae.onload()
+    # We will re-load the training version when we get to it
+    sae.eval()
 
 
 def linear_decay_during_finetune(frac_trained: float, **kwargs):
@@ -116,7 +120,8 @@ training_results = train(
     saes,
     training_dataset,
     training_config,
-    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_finetuned_lista/",
+    checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/next_layer_finetuned_lista_onsager",
+    fine_tune_source_dir=f"{CHECKPOINT_BASE_PATH}/next_layer_lista_onsager_tuned_encoder_0",
     force_retrain=False,
     offload_after_training=False,
     fine_tune_in_place=True,
