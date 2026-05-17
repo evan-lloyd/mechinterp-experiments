@@ -511,7 +511,7 @@ class LISTA(Encoder):
             # Rescale features to current iteration. This helps to prevent their magnitude
             # from sometimes blowing up.
             if i >= 1 and not self.config.use_onsager_correction:
-                features *= self.scale[i] / self.scale[i - 1]
+                features = features * self.scale[i] / self.scale[i - 1]
             features = self.activation[i](
                 features + self.scale[i] * self.linear(residual),
                 token_mask,

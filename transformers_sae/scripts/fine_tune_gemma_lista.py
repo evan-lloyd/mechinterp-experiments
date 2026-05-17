@@ -1,5 +1,7 @@
 import os
 
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+
 import numpy as np
 import torch
 from datasets import load_dataset

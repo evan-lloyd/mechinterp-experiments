@@ -1123,6 +1123,8 @@ def train(
                 print(f"Loading {source_checkpoint} for finetuning")
                 sae = load_checkpoint(source_checkpoint).sae
                 training_saes[layer] = sae
+                train_result._layer_results[layer][-1].sae = sae
+                train_result._layer_results[layer][-1].total_tokens_trained = token_offset
                 sae.onload()
                 if fine_tune_in_place:
                     with open(
