@@ -75,22 +75,6 @@ NUM_THRESHOLD_TUNING_TOKENS = int(1e6)
 NUM_TRAINING_TOKENS = int(5e7)
 # NUM_TRAINING_TOKENS = 0
 
-
-MMLU_TASKS = [
-    MMLUTask.BUSINESS_ETHICS,
-    MMLUTask.CLINICAL_KNOWLEDGE,
-    MMLUTask.MEDICAL_GENETICS,
-    MMLUTask.HIGH_SCHOOL_PHYSICS,
-    MMLUTask.VIROLOGY,
-    MMLUTask.HIGH_SCHOOL_MICROECONOMICS,
-    MMLUTask.ECONOMETRICS,
-    MMLUTask.COLLEGE_COMPUTER_SCIENCE,
-    MMLUTask.HIGH_SCHOOL_BIOLOGY,
-    MMLUTask.ABSTRACT_ALGEBRA,
-]
-MMLU_BATCH_SIZE = 16
-
-
 FINETUNE_FRACTION = 0.2
 
 
@@ -124,6 +108,7 @@ training_config = TrainingConfig(
 START_LAYER = 0
 
 for training_method in (
+    # "next_layer_finetuned_lista_onsager",
     "next_layer_lista_onsager",
     # "next_layer_lista_36k",
     # "next_layer_finetuned_interaction",
@@ -160,6 +145,7 @@ for training_method in (
             num_encoder_tuning_tokens=NUM_ENCODER_TUNING_TOKENS,
             num_threshold_tuning_tokens=NUM_THRESHOLD_TUNING_TOKENS,
             checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}",
+            num_grad_accumulation_steps=2,
         )
         saes = tr.final_saes
 

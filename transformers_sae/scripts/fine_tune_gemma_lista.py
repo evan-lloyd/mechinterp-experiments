@@ -67,7 +67,7 @@ print(model)
 print(mtm.memory_max)
 print(mtm.memory_cur)
 
-NUM_TRAINING_TOKENS = int(5e7)
+NUM_TRAINING_TOKENS = int(6e7)
 NUM_FINETUNE_TOKENS = int(1e7)
 TOTAL_TOKENS = NUM_TRAINING_TOKENS + NUM_FINETUNE_TOKENS
 FINETUNE_FRACTION = NUM_FINETUNE_TOKENS / TOTAL_TOKENS
@@ -77,7 +77,7 @@ TOKENIZER_BATCH_SIZE = 256
 
 CHECKPOINT_BASE_PATH = f"{os.getenv('HF_BUCKET_LOCAL')}/gemma_2_2b/"
 saes = load_saes(
-    f"{CHECKPOINT_BASE_PATH}/next_layer_lista_onsager_tuned_encoder_0",
+    f"{CHECKPOINT_BASE_PATH}/next_layer_finetuned_lista_onsager",
     model.num_layers,
 )
 
@@ -122,8 +122,8 @@ training_results = train(
     saes,
     training_dataset,
     training_config,
-    checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/next_layer_finetuned_lista_onsager",
-    fine_tune_source_dir=f"{CHECKPOINT_BASE_PATH}/next_layer_lista_onsager_tuned_encoder_0",
+    checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/next_layer_finetuned_lista_onsager_7e7",
+    fine_tune_source_dir=f"{CHECKPOINT_BASE_PATH}/next_layer_finetuned_lista_onsager",
     force_retrain=False,
     offload_after_training=False,
     fine_tune_in_place=True,

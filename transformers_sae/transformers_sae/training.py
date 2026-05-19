@@ -266,6 +266,8 @@ def tune_encoder(
     num_threshold_tuning_tokens: int = int(1e6),
     offload_after_training: bool = True,
     checkpoint_dir: Optional[str] = None,
+    train_encoders_from_scratch: bool = False,
+    num_grad_accumulation_steps: int = 1,
 ) -> TrainingResult:
     """Do an encoder-only training run of the given SAEs, with their dictionaries fixed. This adapts the
     encoders to work within the full replacement model, without changing the semantics of the SAE features.
@@ -355,6 +357,15 @@ def tune_encoder(
             baseline_sae = baseline_saes[layer]
             training_sae = training_saes[layer]
 
+            # TODO: If we remove next layer term, we can just init this at the top of the function instead of
+            # loading baseline first.
+            if train_encoders_from_scratch:
+                training_sae.init_weights(None)
+                training_sae.decoder.init_weights(baseline_sae.decoder)
+                training_sae.encoder.init_weights(training_sae.decoder)
+                training_sae.decoder.requires_grad_(False)
+                training_sae.onload()
+
             training_sae.onload()
             if layer + 1 in training_saes:
                 training_saes[layer + 1].onload()
@@ -384,16 +395,17 @@ def tune_encoder(
                 model,
                 {i: training_saes[i] for i in range(first_sae_layer, layer)},
             )
-            for batch in make_dataloader(
-                model,
-                tokenizer,
-                dataset,
-                # Make sure we give the final layer enough time to set thresholds
-                max_tokens=num_tokens_for_layer,
-                tokenizer_batch_size=config.tokenizer_batch_size,
-                inference_batch_size=config.training_batch_size,
+            for step, batch in enumerate(
+                make_dataloader(
+                    model,
+                    tokenizer,
+                    dataset,
+                    # Make sure we give the final layer enough time to set thresholds
+                    max_tokens=num_tokens_for_layer,
+                    tokenizer_batch_size=config.tokenizer_batch_size,
+                    inference_batch_size=config.training_batch_size,
+                )
             ):
-                optimizer.zero_grad()
                 batch.to(model.device)
 
                 for sae in baseline_saes.values():
@@ -554,17 +566,18 @@ def tune_encoder(
                     del next_layer_loss
                     del cur_layer_loss
 
-                    torch.nn.utils.clip_grad_norm_(
-                        [
-                            p
-                            for pg in optimizer.param_groups
-                            for p in pg["params"]
-                            if p.requires_grad
-                        ],
-                        max_norm=1.0,
-                    )
-
-                    optimizer.step()
+                    if (step + 1) % num_grad_accumulation_steps == 0:
+                        torch.nn.utils.clip_grad_norm_(
+                            [
+                                p
+                                for pg in optimizer.param_groups
+                                for p in pg["params"]
+                                if p.requires_grad
+                            ],
+                            max_norm=1.0,
+                        )
+                        optimizer.step()
+                        optimizer.zero_grad()
                     num_used_tokens += batch.num_tokens
                     progress.total = max(num_tokens_for_layer, num_used_tokens)
                     progress.update(batch.num_tokens)
@@ -580,7 +593,7 @@ def tune_encoder(
                             ),
                             pg_name=pg["name"],
                         )
-                    # end for each batch
+                    # end if optimizing parameters
                 else:
                     # Just tuning activation threshold for final layer
                     with torch.no_grad():
@@ -601,9 +614,23 @@ def tune_encoder(
                     num_used_tokens += batch.num_tokens
                     progress.total = max(num_tokens_for_layer, num_used_tokens)
                     progress.update(batch.num_tokens)
+                # end for each batch
+
+            # If we had an odd number of batches, may have some acumulated gradients
+            torch.nn.utils.clip_grad_norm_(
+                [
+                    p
+                    for pg in optimizer.param_groups
+                    for p in pg["params"]
+                    if p.requires_grad
+                ],
+                max_norm=1.0,
+            )
+            optimizer.step()
+            optimizer.zero_grad()
 
             if checkpoint_dir:
-                checkpoint = SAECheckpoint(sae=training_sae, total_tokens_trained=0)
+                checkpoint = SAECheckpoint(sae=training_sae, total_tokens_trained=num_encoder_tuning_tokens)
                 checkpoint.finalize()
                 save_training_result(
                     {layer: [checkpoint]},
@@ -1124,14 +1151,24 @@ def train(
                 sae = load_checkpoint(source_checkpoint).sae
                 training_saes[layer] = sae
                 train_result._layer_results[layer][-1].sae = sae
-                train_result._layer_results[layer][-1].total_tokens_trained = token_offset
+                train_result._layer_results[layer][
+                    -1
+                ].total_tokens_trained = token_offset
                 sae.onload()
                 if fine_tune_in_place:
-                    with open(
-                        f"{fine_tune_source_dir}/tuned_thresholds_{max(config.train_layers)}",
-                        "rb",
-                    ) as f:
-                        loaded_thresholds = cloudpickle.load(f)
+                    try:
+                        with open(
+                            f"{fine_tune_source_dir}/tuned_thresholds_{max(config.train_layers)}",
+                            "rb",
+                        ) as f:
+                            loaded_thresholds = cloudpickle.load(f)
+                    except Exception:
+                        # Finetuning from previous fine_tune_in_place run
+                        with open(
+                            f"{fine_tune_source_dir}/train_thresholds_{min(config.train_layers)}",
+                            "rb",
+                        ) as f:
+                            loaded_thresholds = cloudpickle.load(f)
                     sae.set_activation_thresholds(loaded_thresholds[layer])
             else:
                 # Init weights from next layer, if it exists
