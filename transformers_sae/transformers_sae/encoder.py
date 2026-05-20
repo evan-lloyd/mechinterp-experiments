@@ -1,4 +1,3 @@
-from copy import copy
 from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
@@ -190,17 +189,22 @@ class BatchTopKActivationFunction(ActivationFunction):
     def forward(self, x: torch.Tensor, token_mask: torch.Tensor) -> torch.Tensor:
         # BatchTopK during training
         if self.training:
-            num_tokens = x.shape[0] * x.shape[1]
+            # TODO: this is a hack to distill encoders during encoder tuning, might want to make this an actual flag
+            if self.config.k == x.shape[-1]:
+                return x
+            masked_x = x[token_mask.bool()].view(-1)
+            num_tokens = masked_x.shape[0] // x.shape[-1]
             topk = torch.topk(
                 # This is crucial; otherwise we are wasting our non-zero activations on tokens that aren't even
                 # being evaluated or trained on.
-                x[token_mask.bool()].view(-1),
+                masked_x,
                 k=self.config.k * num_tokens,
                 dim=-1,
-                sorted=True,
+                sorted=False,
             )
             threshold = torch.maximum(
-                topk.values[-1], torch.zeros_like(topk.values[-1])
+                topk.values.min(),
+                torch.zeros((1,), dtype=masked_x.dtype, device=masked_x.device),
             )
             lr = self.config.threshold_lr
 
@@ -424,6 +428,13 @@ class LISTA(Encoder):
     ):
         from .decoder import Decoder
 
+        # Need to remove existing parametrization if we're re-initializing weights, otherwise
+        # torch complains.
+        if hasattr(self.linear, "parametrizations"):
+            self.linear = torch.nn.utils.parametrize.remove_parametrizations(
+                self.linear, "weight"
+            )
+
         super().init_weights(init_from, to_device)
         self.linear.bias = None
         self._set_parametrization()
@@ -441,6 +452,21 @@ class LISTA(Encoder):
             self.scale = torch.nn.Parameter(
                 init_from.scale.to(to_device or self.config.device, copy=True)
             )
+            if self.config.n_iterations != init_from.config.n_iterations:
+                # Maybe truncate
+                self.scale.data = self.scale.data[0 : self.config.n_iterations]
+                # Maybe expand
+                self.scale.data = torch.cat(
+                    (
+                        self.scale.data,
+                        torch.full(
+                            (self.config.n_iterations - init_from.config.n_iterations,),
+                            1.0 / self.config.n_iterations,
+                            device=self.scale.device,
+                            dtype=self.scale.dtype,
+                        ),
+                    )
+                )
             self.feature_scale = torch.nn.Parameter(
                 init_from.feature_scale.to(to_device or self.config.device, copy=True)
             )

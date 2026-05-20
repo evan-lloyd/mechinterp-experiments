@@ -69,7 +69,7 @@ print(mtm.memory_cur)
 VALIDATION_BASE_PATH = "/workspace/sae_checkpoints/validations/gemma_2_2b"
 CHECKPOINT_BASE_PATH = "/workspace/sae_checkpoints/gemma_2_2b"
 TOKENIZER_BATCH_SIZE = 256
-NUM_VALIDATION_TOKENS = int(1e6)
+NUM_VALIDATION_TOKENS = int(1e5)
 NUM_ENCODER_TUNING_TOKENS = int(1e6)
 NUM_THRESHOLD_TUNING_TOKENS = int(1e6)
 NUM_TRAINING_TOKENS = int(5e7)
@@ -106,6 +106,7 @@ training_config = TrainingConfig(
 )
 
 START_LAYER = 0
+END_LAYER = 1
 
 for training_method in (
     # "next_layer_finetuned_lista_onsager",
@@ -128,7 +129,8 @@ for training_method in (
     saes = load_saes(
         f"{CHECKPOINT_BASE_PATH}/{training_method}",
         # 2,
-        model.num_layers,
+        # model.num_layers,
+        END_LAYER + 1,
         START_LAYER,
     )
     for start_layer in (START_LAYER,):
@@ -139,13 +141,19 @@ for training_method in (
         tr = tune_encoder(
             model,
             tokenizer,
-            {layer: sae for layer, sae in saes.items() if layer >= start_layer},
+            {
+                layer: sae
+                for layer, sae in saes.items()
+                if layer >= start_layer and layer <= END_LAYER
+            },
             training_dataset,
             training_config,
             num_encoder_tuning_tokens=NUM_ENCODER_TUNING_TOKENS,
             num_threshold_tuning_tokens=NUM_THRESHOLD_TUNING_TOKENS,
-            checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}",
-            num_grad_accumulation_steps=2,
+            checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}_from_scratch",
+            num_grad_accumulation_steps=1,
+            force_retrain=True,
+            # train_encoders_from_scratch=True,
         )
         saes = tr.final_saes
 
@@ -158,6 +166,7 @@ for training_method in (
             TRAINING_BATCH_SIZE,
             NUM_VALIDATION_TOKENS,
             start_layer=start_layer,
+            end_layer=END_LAYER + 1,
             offload=False,
         )
 
@@ -182,14 +191,14 @@ for training_method in (
         print(
             f"live features={ {k: sum(v.live_features) / saes[k].config.d_sae for k, v in validations.layer_results.items() if v.live_features is not None} }"
         )
-        with torch.autocast(
-            device_type="cuda" if model.device.type == "cuda" else "cpu",
-            dtype=torch.bfloat16,
-        ):
-            generate_with_replacement(
-                model,
-                tokenizer,
-                "The capital of France,",
-                saes,
-                offload=False,
-            )
+        # with torch.autocast(
+        #     device_type="cuda" if model.device.type == "cuda" else "cpu",
+        #     dtype=torch.bfloat16,
+        # ):
+        #     generate_with_replacement(
+        #         model,
+        #         tokenizer,
+        #         "The capital of France,",
+        #         saes,
+        #         offload=False,
+        #     )
