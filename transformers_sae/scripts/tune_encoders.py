@@ -70,7 +70,8 @@ VALIDATION_BASE_PATH = "/workspace/sae_checkpoints/validations/gemma_2_2b"
 CHECKPOINT_BASE_PATH = "/workspace/sae_checkpoints/gemma_2_2b"
 TOKENIZER_BATCH_SIZE = 256
 NUM_VALIDATION_TOKENS = int(1e5)
-NUM_ENCODER_TUNING_TOKENS = int(1e6)
+# NUM_ENCODER_TUNING_TOKENS = int(2e6)
+NUM_ENCODER_TUNING_TOKENS = 0
 NUM_THRESHOLD_TUNING_TOKENS = int(1e6)
 NUM_TRAINING_TOKENS = int(5e7)
 # NUM_TRAINING_TOKENS = 0
@@ -106,7 +107,8 @@ training_config = TrainingConfig(
 )
 
 START_LAYER = 0
-END_LAYER = 1
+# END_LAYER = model.num_layers - 1
+END_LAYER = 3
 
 for training_method in (
     # "next_layer_finetuned_lista_onsager",
@@ -150,10 +152,11 @@ for training_method in (
             training_config,
             num_encoder_tuning_tokens=NUM_ENCODER_TUNING_TOKENS,
             num_threshold_tuning_tokens=NUM_THRESHOLD_TUNING_TOKENS,
-            checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}_from_scratch",
-            num_grad_accumulation_steps=1,
+            checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}_tmse",
+            # num_grad_accumulation_steps=1,
             force_retrain=True,
-            # train_encoders_from_scratch=True,
+            train_encoders_from_scratch=False,
+            # num_previous_replacement_layers=1,
         )
         saes = tr.final_saes
 

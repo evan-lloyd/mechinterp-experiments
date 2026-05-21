@@ -189,9 +189,6 @@ class BatchTopKActivationFunction(ActivationFunction):
     def forward(self, x: torch.Tensor, token_mask: torch.Tensor) -> torch.Tensor:
         # BatchTopK during training
         if self.training:
-            # TODO: this is a hack to distill encoders during encoder tuning, might want to make this an actual flag
-            if self.config.k == x.shape[-1]:
-                return x
             masked_x = x[token_mask.bool()].view(-1)
             num_tokens = masked_x.shape[0] // x.shape[-1]
             topk = torch.topk(
@@ -413,9 +410,9 @@ class LISTA(Encoder):
         )
 
     def _set_parametrization(self):
-        if self.training and not hasattr(self.linear, "parametrizations"):
+        if self.training and not torch.nn.utils.parametrize.is_parametrized(self.linear):
             self.linear = torch.nn.utils.parametrizations.spectral_norm(self.linear)
-        elif not self.training and hasattr(self.linear, "parametrizations"):
+        elif not self.training and torch.nn.utils.parametrize.is_parametrized(self.linear):
             self.linear = torch.nn.utils.parametrize.remove_parametrizations(
                 self.linear, "weight"
             )
@@ -430,7 +427,7 @@ class LISTA(Encoder):
 
         # Need to remove existing parametrization if we're re-initializing weights, otherwise
         # torch complains.
-        if hasattr(self.linear, "parametrizations"):
+        if torch.nn.utils.parametrize.is_parametrized(self.linear):
             self.linear = torch.nn.utils.parametrize.remove_parametrizations(
                 self.linear, "weight"
             )
@@ -449,6 +446,11 @@ class LISTA(Encoder):
             submodule.init_weights()
 
         if isinstance(init_from, LISTA):
+            # If using spectral norm, uv vectors are randomized when we _set_parametrization, so
+            # we should make sure we match the source.
+            if torch.nn.utils.parametrize.is_parametrized(self.linear):
+                self.linear.load_state_dict(init_from.linear.state_dict())
+
             self.scale = torch.nn.Parameter(
                 init_from.scale.to(to_device or self.config.device, copy=True)
             )

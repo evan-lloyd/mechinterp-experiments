@@ -19,6 +19,8 @@ from typing import (
     Sequence,
     Tuple,
     Union,
+    Callable,
+    Any,
 )
 
 import cloudpickle
@@ -92,6 +94,18 @@ def _parse_checkpoint_filename(filename: str) -> Tuple[int, int] | None:
         return (layer, tokens)
     except ValueError:
         return None
+
+
+def hook_input(module: torch.nn.Module, fn: Callable[[], Any]):
+    result = [None, None]
+
+    def _hook(_module, args):
+        result[0] = args[0]
+
+    with module.register_forward_pre_hook(_hook):
+        result[1] = fn()
+
+    return tuple(result)
 
 
 def save_checkpoint(checkpoint: "SAECheckpoint", out_file: str):
