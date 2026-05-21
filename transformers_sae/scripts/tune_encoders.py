@@ -70,8 +70,7 @@ VALIDATION_BASE_PATH = "/workspace/sae_checkpoints/validations/gemma_2_2b"
 CHECKPOINT_BASE_PATH = "/workspace/sae_checkpoints/gemma_2_2b"
 TOKENIZER_BATCH_SIZE = 256
 NUM_VALIDATION_TOKENS = int(1e5)
-# NUM_ENCODER_TUNING_TOKENS = int(2e6)
-NUM_ENCODER_TUNING_TOKENS = 0
+NUM_ENCODER_TUNING_TOKENS = int(2e6)
 NUM_THRESHOLD_TUNING_TOKENS = int(1e6)
 NUM_TRAINING_TOKENS = int(5e7)
 # NUM_TRAINING_TOKENS = 0
@@ -92,10 +91,10 @@ training_config = TrainingConfig(
     eval_interval=int(1e5),
     # train_layers=list(range(10, model.num_layers)),
     train_layers=list(range(0, model.num_layers)),
-    betas=(
-        0.0,
-        0.999,
-    ),  # TODO: is this actually good for our training method? not for tinystories anyway
+    # betas=(
+    #     0.0,
+    #     0.999,
+    # ),  # TODO: is this actually good for our training method? not for tinystories anyway
     lr=1e-4,
     interaction_lr=1e-4,
     threshold_lr=1e-2,

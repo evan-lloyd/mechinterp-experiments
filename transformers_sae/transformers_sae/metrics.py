@@ -165,6 +165,7 @@ def _batch_tmean(
     float,
 ]: ...
 
+
 def _batch_tmean(
     fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
 ) -> Callable[
@@ -172,6 +173,7 @@ def _batch_tmean(
     torch.Tensor | np.ndarray | float,
 ]:
     """Trimmed mean loss over a batch of tokens"""
+
     def _inner(
         actual: torch.Tensor,
         target: torch.Tensor,
@@ -183,15 +185,32 @@ def _batch_tmean(
         if return_type == "np":
             top_k = result.topk(int(trim_fraction * batch.num_tokens), sorted=False)
             result[top_k.indices] = 0.0
-            return tensor_to_numpy(
-                result.cpu()
-            )
-        # We need to 
-        top_k = result.topk(int((1.0 - trim_fraction) * batch.num_tokens), sorted=False, largest=False)        
+            return tensor_to_numpy(result.cpu())
+
+        # Random suggestion from Claude, seems crazy but *shrug*. And actually kinda works????
+        # with torch.no_grad():
+        #     scale = 1 / (result + 1e-8)
+        # result = (result * scale).mean()
+
+        # Cauchy
+        # result = (0.5 * (result / 0.1) ** 2 + 1).log().mean()
+
+        top_k = result.topk(
+            int((1.0 - trim_fraction) * batch.num_tokens), sorted=False, largest=False
+        )
         result = result[top_k.indices].mean()
         if return_type == "tensor":
             return result
         return result.item()
+
+    return _inner
+
+
+def cauchy_loss(c: float | torch.Tensor):
+
+    @_batch_mean
+    def _inner(actual: torch.Tensor, target: torch.Tensor):
+        return (0.5 * ((actual - target) / c) ** 2 + 1).log().mean(dim=-1)
 
     return _inner
 

@@ -12,6 +12,8 @@ from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 from typing import (
     TYPE_CHECKING,
+    Any,
+    Callable,
     Collection,
     Dict,
     Iterable,
@@ -19,12 +21,11 @@ from typing import (
     Sequence,
     Tuple,
     Union,
-    Callable,
-    Any,
 )
 
 import cloudpickle
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 from IPython.display import HTML, SVG, display
 from ml_dtypes import bfloat16
@@ -858,7 +859,7 @@ def available_vram():
     return ""
 
 
-def tensor_to_numpy(t: torch.Tensor):
+def tensor_to_numpy(t: torch.Tensor) -> np.ndarray:
     """Convert tensor to numpy ndarray, handling bfloat16 if necessary using the
     ml_dtypes extension."""
 
