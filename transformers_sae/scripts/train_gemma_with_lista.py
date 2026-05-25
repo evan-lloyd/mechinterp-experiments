@@ -90,7 +90,10 @@ empty_saes = {
             top_k=list(range(TOPK // N_ITERATIONS, TOPK + 1, TOPK // N_ITERATIONS)),
             encoder_kind="lista",
             n_iterations=N_ITERATIONS,
-            extra_encoder_config_kwargs={"use_onsager_correction": True},
+            extra_encoder_config_kwargs={
+                "use_onsager_correction": True,
+                "force_unit_scale": True,
+            },
         )
     )
     for layer in range(model.num_layers)
@@ -144,7 +147,7 @@ training_results = train(
             int(1e7),
         )
     ),
-    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_lista_onsager/",
+    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_lista_unit_scale/",
     force_retrain=False,
     offload_after_training=False,
 )

@@ -67,17 +67,21 @@ print(model)
 print(mtm.memory_max)
 print(mtm.memory_cur)
 
-NUM_TRAINING_TOKENS = int(6e7)
-NUM_FINETUNE_TOKENS = int(1e7)
+NUM_TRAINING_TOKENS = int(5e7)
+NUM_FINETUNE_TOKENS = int(2e7)
 TOTAL_TOKENS = NUM_TRAINING_TOKENS + NUM_FINETUNE_TOKENS
 FINETUNE_FRACTION = NUM_FINETUNE_TOKENS / TOTAL_TOKENS
 EVAL_INTERVAL = int(1e5)
 NUM_VALIDATION_TOKENS = int(1e6)
 TOKENIZER_BATCH_SIZE = 256
-
 CHECKPOINT_BASE_PATH = f"{os.getenv('HF_BUCKET_LOCAL')}/gemma_2_2b/"
+
+FINE_TUNE_SOURCE_DIR = (
+    f"{CHECKPOINT_BASE_PATH}/next_layer_lista_unit_scale_tuned_encoder_0_2e6"
+)
+
 saes = load_saes(
-    f"{CHECKPOINT_BASE_PATH}/next_layer_finetuned_lista_onsager",
+    FINE_TUNE_SOURCE_DIR,
     model.num_layers,
 )
 
@@ -122,8 +126,8 @@ training_results = train(
     saes,
     training_dataset,
     training_config,
-    checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/next_layer_finetuned_lista_onsager_7e7",
-    fine_tune_source_dir=f"{CHECKPOINT_BASE_PATH}/next_layer_finetuned_lista_onsager",
+    checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/next_layer_finetuned_lista_unit_scale",
+    fine_tune_source_dir=FINE_TUNE_SOURCE_DIR,
     force_retrain=False,
     offload_after_training=False,
     fine_tune_in_place=True,

@@ -33,7 +33,12 @@ from transformers_sae.training_step.in_place_finetuned import (
 )
 
 from .activation_cache import load_cache
-from .activation_data import TrainingBatch, make_activation_batch, make_batch_for_evals
+from .activation_data import (
+    TrainingBatch,
+    make_activation_batch,
+    make_batch_for_evals,
+    ActivationBatch,
+)
 from .encoder import LISTA, BatchTopKActivationFunctionConfig
 from .multiline_progress import MultilineProgress
 from .ops import (
@@ -212,49 +217,48 @@ class TrainingResult:
 def make_optimizer(
     saes: Dict[int, SAE], layers: List[int], config: TrainingConfig
 ) -> torch.optim.Adam:
-    param_groups = [
-        {
-            "params": [
-                param
-                for layer in layers
-                for param in saes[layer].decoder.decoder_params()
-                if param.requires_grad
-            ],
-            "lr": config.decoder_lr or config.lr,
-            "name": "decoder",
-        },
-        {
-            "params": [
-                param
-                for layer in layers
-                for param in saes[layer].encoder.encoder_params()
-                if param.requires_grad
-            ],
-            "lr": config.encoder_lr or config.lr,
-            "name": "encoder",
-        },
-    ]
-
-    if any(
-        isinstance(s.encoder, LISTA) for layer, s in saes.items() if layer in layers
-    ):
-        param_groups.extend(
-            [
-                {
-                    "params": [param],
-                    "lr": config.interaction_lr or config.lr,
-                    "name": pg_name,
-                }
-                for layer in layers
-                for pg_name, param in saes[layer].encoder.interaction_params()
-                if isinstance(saes[layer].encoder, LISTA) and param.requires_grad
-            ]
-        )
+    param_groups = []
+    param_groups.extend(
+        [
+            {
+                "params": [param],
+                "lr": config.decoder_lr[layer] or config.lr,
+                "name": f"decoder_{layer}",
+            }
+            for layer in layers
+            for param in saes[layer].decoder.decoder_params()
+            if param.requires_grad
+        ]
+    )
+    param_groups.extend(
+        [
+            {
+                "params": [param],
+                "lr": config.encoder_lr[layer] or config.lr,
+                "name": f"encoder_{layer}",
+            }
+            for layer in layers
+            for param in saes[layer].encoder.encoder_params()
+            if param.requires_grad
+        ]
+    )
+    param_groups.extend(
+        [
+            {
+                "params": [param],
+                "lr": config.interaction_lr[layer] or config.lr,
+                "name": f"{pg_name}_{layer}",
+            }
+            for layer in layers
+            for pg_name, param in saes[layer].encoder.interaction_params()
+            if param.requires_grad
+        ]
+    )
 
     for pg in param_groups:
         pg["base_lr"] = pg["lr"]
 
-    return torch.optim.Adam(param_groups, lr=config.lr, betas=config.betas)
+    return torch.optim.Adam(param_groups, betas=config.betas)
 
 
 def tune_encoder(
@@ -270,6 +274,7 @@ def tune_encoder(
     force_retrain: bool = False,
     train_encoders_from_scratch: bool = False,
     num_previous_replacement_layers: Optional[int] = None,
+    run_full_evals: bool = False,
 ) -> TrainingResult:
     """Do an encoder-only training run of the given SAEs, with their dictionaries fixed. This adapts the
     encoders to work within the full replacement model, without changing the semantics of the SAE features.
@@ -332,10 +337,14 @@ def tune_encoder(
                     print(f"Updated thresholds for layer {layer}")
                     sae.set_activation_thresholds(loaded_thresholds[layer])
                 layers_to_tune.remove(layer)
+                sae.onload()
                 continue
             else:
                 sae.init_weights(baseline_saes[layer])
                 sae.decoder.requires_grad_(False)
+
+                if run_full_evals:
+                    sae.onload()
                 for i, a in enumerate(sae.encoder.activation):
                     if hasattr(a, "threshold_offset"):
                         a.threshold_offset.fill_(
@@ -357,15 +366,12 @@ def tune_encoder(
         for sae in baseline_saes.values():
             sae.eval()
 
+        if run_full_evals:
+            eval_model = make_replacement_model(model, training_saes)
+
         for layer in layers_to_tune:
             baseline_sae = baseline_saes[layer]
             training_sae = training_saes[layer]
-            # if torch.nn.utils.parametrize.is_parametrized(training_sae.encoder.linear):
-            #     training_sae.encoder.linear = (
-            #         torch.nn.utils.parametrize.remove_parametrizations(
-            #             training_sae.encoder.linear, "weight"
-            #         )
-            #     )
 
             def _init_sae(init_layer: int):
                 training_saes[init_layer].init_weights(None)
@@ -382,21 +388,28 @@ def tune_encoder(
                 if layer + 1 in training_saes:
                     _init_sae(layer + 1)
 
-            training_sae.onload()
-            baseline_sae.onload()
+            # training_sae.config.encoder.force_unit_scale = True
+            # training_sae.encoder.config.force_unit_scale = True
+            # with torch.no_grad():
+            #     training_sae.encoder.feature_scale.fill_(
+            #         training_sae.encoder.scale.mean().item()
+            #     )
+            #     training_sae.encoder.scale /= training_sae.encoder.scale.sum()
             if layer + 1 in training_saes:
                 training_saes[layer + 1].onload()
-                baseline_saes[layer + 1].onload()
-                # if torch.nn.utils.parametrize.is_parametrized(
-                #     training_saes[layer + 1].encoder.linear
-                # ):
-                #     training_saes[
-                #         layer + 1
-                #     ].encoder.linear = (
-                #         torch.nn.utils.parametrize.remove_parametrizations(
-                #             training_saes[layer + 1].encoder.linear, "weight"
-                #         )
+                # training_saes[layer + 1].config.encoder.force_unit_scale = True
+                # training_saes[layer + 1].encoder.config.force_unit_scale = True
+                # with torch.no_grad():
+                #     training_saes[layer + 1].encoder.feature_scale.fill_(
+                #         training_saes[layer + 1].encoder.scale.mean().item()
                 #     )
+                #     training_saes[layer + 1].encoder.scale /= training_saes[
+                #         layer + 1
+                #     ].encoder.scale.sum()
+                baseline_saes[layer + 1].onload()
+
+            training_sae.onload()
+            baseline_sae.onload()
 
             num_tokens_for_layer = (
                 num_encoder_tuning_tokens + num_threshold_tuning_tokens
@@ -408,7 +421,11 @@ def tune_encoder(
                 desc=[f"Tuning encoder {layer}"],
                 num_header_lines=1,
             )
-            loss_history = []
+            metrics = {
+                k: []
+                for k in ("total_loss", "cur_layer_loss", "next_layer_loss")
+                + tuple(f"rre_{metric_layer}" for metric_layer in layers_to_tune)
+            }
             num_used_tokens = 0
             num_used_encoder_tokens = None
             optimizer = make_optimizer(
@@ -417,7 +434,9 @@ def tune_encoder(
                 config,
             )
 
-            # first_sae_layer = max(first_sae_layer, layer - num_previous_replacement_layers)
+            first_sae_layer = max(
+                first_sae_layer, layer - num_previous_replacement_layers
+            )
             replacement_model = make_replacement_model(
                 model,
                 {i: training_saes[i] for i in range(first_sae_layer, layer + 1)},
@@ -426,18 +445,21 @@ def tune_encoder(
                 model,
                 {i: training_saes[i] for i in range(first_sae_layer, layer)},
             )
+            # offset = layer * num_encoder_tuning_tokens
+            offset = 0
             for batch in make_dataloader(
                 model,
                 tokenizer,
                 dataset,
                 # Make sure we give the final layer enough time to set thresholds
-                max_tokens=num_tokens_for_layer,
+                max_tokens=num_tokens_for_layer + offset,
                 tokenizer_batch_size=config.tokenizer_batch_size,
                 inference_batch_size=config.training_batch_size,
+                offset=offset,
             ):
                 optimizer.zero_grad()
                 batch.to(model.device)
-                if num_used_tokens < num_encoder_tuning_tokens:
+                if num_used_tokens < num_encoder_tuning_tokens or layer < last_sae_layer:
                     with (
                         torch.no_grad(),
                         torch.autocast(
@@ -548,18 +570,14 @@ def tune_encoder(
                         ].layer_output
                         del replacement_activations
 
-                        cur_layer_loss = (
-                            tmse_loss(
-                                cur_layer_actual_features,
-                                cur_layer_expected_features,
-                                batch,
-                                0.1,
-                            )
-                            # * training_sae.config.d_sae
-                            # / training_sae.encoder.activation[-1].config.k
+                        cur_layer_loss = mse_loss(
+                            cur_layer_actual_features,
+                            cur_layer_expected_features,
+                            batch,
+                            # 0.1,
                         )
-                        del cur_layer_actual_features
-                        del cur_layer_expected_features
+                        # del cur_layer_actual_features
+                        # del cur_layer_expected_features
 
                         if layer + 1 in training_saes:
                             actual_features = training_saes[layer + 1].encode(
@@ -577,19 +595,14 @@ def tune_encoder(
 
                             # Using MSE loss on features here (rather than cosdist as we do elsewhere) because ideally
                             # our tuned SAE matches the original features *exactly* on the distorted input.
-                            next_layer_loss = (
-                                tmse_loss(
-                                    actual_features,
-                                    expected_features,
-                                    batch,
-                                    0.1,
-                                )
-                                # Rescale loss to be "per active feature"
-                                # * training_sae.config.d_sae
-                                # / training_sae.encoder.activation[-1].config.k
+                            next_layer_loss = mse_loss(
+                                actual_features,
+                                expected_features,
+                                batch,
+                                # 0.1,
                             )
-                            del actual_features
-                            del expected_features
+                            # del actual_features
+                            # del expected_features
                         elif layer + 1 == model.num_layers:
                             next_layer_loss = kl_loss(
                                 actual_log_probs,
@@ -603,14 +616,47 @@ def tune_encoder(
                             )
                             next_layer_loss = kl_scale * next_layer_loss
                         else:
-                            next_layer_loss = 0.0
-                            # Keep same scale
-                            with torch.no_grad():
-                                cur_layer_loss *= 2
+                            next_layer_loss = cur_layer_loss.item()
                     loss = (cur_layer_loss + next_layer_loss) / 2
 
                     loss.backward()
-                    loss_history.append(loss.item())
+                    metrics["total_loss"].append(loss.item())
+                    metrics["cur_layer_loss"].append(cur_layer_loss.item())
+                    metrics["next_layer_loss"].append(
+                        next_layer_loss.item()
+                        if isinstance(next_layer_loss, torch.Tensor)
+                        else next_layer_loss
+                    )
+
+                    if run_full_evals:
+                        with torch.autocast(
+                            device_type="cuda"
+                            if model.device.type == "cuda"
+                            else "cpu",
+                            dtype=torch.bfloat16,
+                        ):
+                            evals = run_evals(
+                                make_batch_for_evals(
+                                    model,
+                                    eval_model,
+                                    TrainingBatch(
+                                        batch,
+                                        replacement_activations={},
+                                        baseline_activations={},
+                                        replacement_layers=[],
+                                    ),
+                                    layers_to_tune,
+                                ),
+                                layers_to_tune,
+                                aggregate=True,
+                            )
+                            for metric_layer, layer_result in evals.items():
+                                if layer_result.rre is not None:
+                                    if layer_result.rre > 5.0:
+                                        breakpoint()
+                                    metrics[f"rre_{metric_layer}"].append(
+                                        layer_result.rre
+                                    )
 
                     progress.set_postfix(
                         {
@@ -619,24 +665,26 @@ def tune_encoder(
                             "next_layer_loss": next_layer_loss.item()
                             if isinstance(next_layer_loss, torch.Tensor)
                             else next_layer_loss,
-                            "avg_loss": np.mean(loss_history[-50:]),
+                            "avg_loss": np.mean(metrics["total_loss"][-50:]),
                         }
                     )
                     del loss
                     del next_layer_loss
                     del cur_layer_loss
 
-                    torch.nn.utils.clip_grad_norm_(
-                        [
-                            p
-                            for pg in optimizer.param_groups
-                            for p in pg["params"]
-                            if p.requires_grad
-                        ],
-                        max_norm=1.0,
-                    )
-
+                    # torch.nn.utils.clip_grad_norm_(
+                    #     [
+                    #         p
+                    #         for pg in optimizer.param_groups
+                    #         for p in pg["params"]
+                    #         if p.requires_grad
+                    #     ],
+                    #     max_norm=1.0,
+                    # )
+                    # if num_used_tokens >= 1e5:
+                    #     breakpoint()
                     optimizer.step()
+                    # breakpoint()
                     num_used_tokens += batch.num_tokens
                     progress.total = max(num_tokens_for_layer, num_used_tokens)
                     progress.update(batch.num_tokens)
@@ -644,10 +692,7 @@ def tune_encoder(
                     for pg in optimizer.param_groups:
                         pg["lr"] = pg["base_lr"] * config.lr_schedule(
                             max(
-                                min(
-                                    num_used_tokens / config.num_train_tokens,
-                                    1.0,
-                                ),
+                                min(num_used_tokens / num_encoder_tuning_tokens, 1.0),
                                 0.0,
                             ),
                             pg_name=pg["name"],
@@ -666,8 +711,6 @@ def tune_encoder(
                     ):
                         if num_used_encoder_tokens is None:
                             num_used_encoder_tokens = num_used_tokens
-                            training_sae.eval()
-                            training_sae.encoder.train_activations()
 
                         ab = make_activation_batch(
                             replacement_model,
@@ -682,7 +725,10 @@ def tune_encoder(
                             "float",
                         )
                         progress.set_postfix(
-                            {"l0": l0, "avg_loss": np.mean(loss_history[-50:])},
+                            {
+                                "l0": l0,
+                                "avg_loss": np.mean(metrics["total_loss"][-50:]),
+                            },
                             refresh=False,
                         )
 
@@ -694,12 +740,12 @@ def tune_encoder(
             progress.close()
             if checkpoint_dir:
                 checkpoint = SAECheckpoint(
-                    # sae=training_sae,
-                    sae=None,
+                    sae=training_sae,
+                    # sae=None,
                     total_tokens_trained=num_used_tokens
                     if num_used_encoder_tokens is None
                     else num_used_encoder_tokens,  # Don't count activation tuning tokens
-                    step_metrics={"loss": np.array(loss_history)},
+                    step_metrics={k: np.array(lh) for k, lh in metrics.items()},
                 )
                 checkpoint.finalize()
                 save_training_result(
@@ -716,7 +762,8 @@ def tune_encoder(
                         },
                         f,
                     )
-
+            print(training_sae.encoder.scale)
+            print(training_sae.encoder.feature_scale)
             training_sae.eval()
             training_sae.encoder.train_activations()
             # end for each layer

@@ -125,7 +125,6 @@ def tokenize_strings(
     special_token_indices = torch.empty((0,), dtype=torch.long)
 
     for input_batch, row_len in zip(input_batches, row_lens):
-        row_lens.append(row_len)
         input_id_stack.append(
             torch.cat([torch.tensor(in_, dtype=torch.int64) for in_ in input_batch])
         )

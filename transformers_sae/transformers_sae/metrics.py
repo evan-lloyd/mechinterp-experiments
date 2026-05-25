@@ -8,12 +8,6 @@ from bitarray import bitarray
 from .activation_data import DataBatch
 from .ops import tensor_to_numpy
 
-"""NB: The losses here are deliberately taking a mean, rather than sum, on the final dimension, to factor out
-the implicit dependence on d_model (mse) or d_vocab (kl). This is probably non-standard, but is effectively
-just an arbitrary scaling factor that shouldn't affect anything other than the specific value of the optimal
-learning rate.
-"""
-
 _ReturnType = Literal["float", "tensor", "np"]
 
 
@@ -186,14 +180,6 @@ def _batch_tmean(
             top_k = result.topk(int(trim_fraction * batch.num_tokens), sorted=False)
             result[top_k.indices] = 0.0
             return tensor_to_numpy(result.cpu())
-
-        # Random suggestion from Claude, seems crazy but *shrug*. And actually kinda works????
-        # with torch.no_grad():
-        #     scale = 1 / (result + 1e-8)
-        # result = (result * scale).mean()
-
-        # Cauchy
-        # result = (0.5 * (result / 0.1) ** 2 + 1).log().mean()
 
         top_k = result.topk(
             int((1.0 - trim_fraction) * batch.num_tokens), sorted=False, largest=False

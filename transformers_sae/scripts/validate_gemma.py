@@ -123,10 +123,11 @@ training_config = TrainingConfig(
     method=TrainingMethod.next_layer,
 )
 
-START_LAYER = 20
+START_LAYER = 0
 
 for training_method in (
-    "next_layer_lista_36k",
+    # "next_layer_lista_onsager_tuned_encoder_0_unit_scale",
+    "next_layer_lista_unit_scale_tuned_encoder_0_2e6",
     # "next_layer_finetuned_interaction",
     # "next_layer",
     # "next_layer_interaction",
@@ -152,7 +153,9 @@ for training_method in (
         continue
 
     saes = load_saes(
-        f"{CHECKPOINT_BASE_PATH}/{training_method}", model.num_layers, START_LAYER
+        f"{CHECKPOINT_BASE_PATH}/{training_method}",
+        model.num_layers,
+        START_LAYER,
     )
     # saes = load_saes(
     #     f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}",
@@ -206,6 +209,7 @@ for training_method in (
             NUM_VALIDATION_TOKENS,
             start_layer=start_layer,
             offload=False,
+            eval_layers=list(saes.keys()) + [model.num_layers],
         )
         # save_validations({start_layer: validations}, results_path)
         # with open(f"{results_path}/{start_layer}.activation_thresholds", "wb") as f:

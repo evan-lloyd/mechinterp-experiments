@@ -147,6 +147,7 @@ def make_activation_batch(
     return result
 
 
+@torch.no_grad()
 def make_batch_for_evals(
     base_model: ReplacementModel,
     replacement_model: ReplacementModel,

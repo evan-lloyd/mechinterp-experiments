@@ -5,7 +5,6 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 import numpy as np
 import torch
 from datasets import load_dataset
-from deepeval.benchmarks.mmlu.task import MMLUTask
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from transformers_sae.ops import (
@@ -91,12 +90,12 @@ training_config = TrainingConfig(
     eval_interval=int(1e5),
     # train_layers=list(range(10, model.num_layers)),
     train_layers=list(range(0, model.num_layers)),
-    # betas=(
-    #     0.0,
-    #     0.999,
-    # ),  # TODO: is this actually good for our training method? not for tinystories anyway
+    betas=(
+        0.0,
+        0.999,
+    ),  # TODO: is this actually good for our training method? not for tinystories anyway
     lr=1e-4,
-    interaction_lr=1e-4,
+    interaction_lr=1e-2,
     threshold_lr=1e-2,
     lr_schedule=linear_decay_during_finetune,  # per Karvonen (2025)
     downstream_reconstruction_weight=1.0,
@@ -106,12 +105,13 @@ training_config = TrainingConfig(
 )
 
 START_LAYER = 0
-# END_LAYER = model.num_layers - 1
-END_LAYER = 3
+END_LAYER = model.num_layers - 1
+# END_LAYER = 2
 
 for training_method in (
+    "next_layer_lista_unit_scale",
     # "next_layer_finetuned_lista_onsager",
-    "next_layer_lista_onsager",
+    # "next_layer_lista_onsager",
     # "next_layer_lista_36k",
     # "next_layer_finetuned_interaction",
     # "next_layer_lista_feature_rescaling",
@@ -151,11 +151,11 @@ for training_method in (
             training_config,
             num_encoder_tuning_tokens=NUM_ENCODER_TUNING_TOKENS,
             num_threshold_tuning_tokens=NUM_THRESHOLD_TUNING_TOKENS,
-            checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}_tmse",
-            # num_grad_accumulation_steps=1,
-            force_retrain=True,
+            checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}_2e6",
+            force_retrain=False,
             train_encoders_from_scratch=False,
-            # num_previous_replacement_layers=1,
+            # run_full_evals=True,
+            # num_previous_replacement_layers=2,
         )
         saes = tr.final_saes
 
@@ -168,7 +168,7 @@ for training_method in (
             TRAINING_BATCH_SIZE,
             NUM_VALIDATION_TOKENS,
             start_layer=start_layer,
-            end_layer=END_LAYER + 1,
+            end_layer=END_LAYER + 1 if END_LAYER < model.num_layers - 1 else model.num_layers + 1,
             offload=False,
         )
 

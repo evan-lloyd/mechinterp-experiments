@@ -239,6 +239,7 @@ class LISTAConfig(EncoderConfig):
     # When None, `activation_function` is replicated across all iterations.
     per_layer_activation_functions: Optional[List[ActivationFunctionConfig]] = None
     use_onsager_correction: bool = False
+    force_unit_scale: bool = False
 
     def __post_init__(self):
         if self.per_layer_activation_functions is not None:
@@ -410,9 +411,13 @@ class LISTA(Encoder):
         )
 
     def _set_parametrization(self):
-        if self.training and not torch.nn.utils.parametrize.is_parametrized(self.linear):
+        if self.training and not torch.nn.utils.parametrize.is_parametrized(
+            self.linear
+        ):
             self.linear = torch.nn.utils.parametrizations.spectral_norm(self.linear)
-        elif not self.training and torch.nn.utils.parametrize.is_parametrized(self.linear):
+        elif not self.training and torch.nn.utils.parametrize.is_parametrized(
+            self.linear
+        ):
             self.linear = torch.nn.utils.parametrize.remove_parametrizations(
                 self.linear, "weight"
             )
@@ -538,12 +543,24 @@ class LISTA(Encoder):
 
             # Rescale features to current iteration. This helps to prevent their magnitude
             # from sometimes blowing up.
-            if i >= 1 and not self.config.use_onsager_correction:
+            if (
+                i >= 1
+                and not self.config.use_onsager_correction
+                and not self.config.force_unit_scale
+            ):
                 features = features * self.scale[i] / self.scale[i - 1]
+
+            if self.config.force_unit_scale:
+                scale = self.scale.tanh()[i]
+            else:
+                scale = self.scale[i]
             features = self.activation[i](
-                features + self.scale[i] * self.linear(residual),
+                features + scale * self.linear(residual),
                 token_mask,
             )
+
+        if self.config.force_unit_scale:
+            features = features * self.feature_scale
 
         if feature_soft_cap is not None:
             features = feature_soft_cap * (features / feature_soft_cap).tanh()

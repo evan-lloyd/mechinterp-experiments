@@ -230,10 +230,10 @@ class SAE(torch.nn.Module):
         for a in self.encoder.activation:
             # Don't bonk JumpReLU thresholds; set offset instead
             if hasattr(a, "threshold_offset"):
-                a.threshold_offset.fill_(thresholds[cur_threshold])
+                a.threshold_offset.fill_(float(thresholds[cur_threshold]))
                 cur_threshold += 1
             elif hasattr(a, "threshold"):
-                a.threshold.fill_(thresholds[cur_threshold])
+                a.threshold.fill_(float(thresholds[cur_threshold]))
                 cur_threshold += 1
 
     def set_activation_threshold_lr(self, lr: float):
