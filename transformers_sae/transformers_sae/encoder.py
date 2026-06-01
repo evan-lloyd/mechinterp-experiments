@@ -69,11 +69,17 @@ class ActivationFunction(torch.nn.Module):
     def init_weights(self):
         return
 
+    def onload(self):
+        pass
+
+    def offload(self):
+        pass
+
 
 class ReluActivationFunction(ActivationFunction):
     config: ReluActivationFunctionConfig
 
-    def forward(self, x: torch.Tensor, token_mask: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.relu()
 
 
@@ -107,22 +113,23 @@ class JumpReluActivationFunction(ActivationFunction):
         )
         self.device = device
 
-    def forward(self, x: torch.Tensor, token_mask: torch.Tensor) -> torch.Tensor:
+    def onload(self):
+        self.threshold = self.threshold.to(self.device)
+
+    def offload(self):
+        self.threshold = self.threshold.to("cpu")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # BatchTopK during training
         if self.training:
             num_tokens = x.shape[0] * x.shape[1]
             topk = torch.topk(
-                # Applying mask is crucial; otherwise we are wasting our non-zero activations on tokens
-                # that aren't even being evaluated or trained on.
-                (x[token_mask.bool()] - self.threshold).view(-1),
+                (x - self.threshold).view(-1),
                 k=self.config.k * num_tokens,
                 dim=-1,
-                sorted=True,
+                sorted=False,
             )
-            threshold_offset = topk.values[-1]
-            # threshold_offset = torch.maximum(
-            #     topk.values[-1], torch.zeros_like(topk.values[-1])
-            # )
+            threshold_offset = topk.values.min()
             lr = self.config.threshold_lr
 
             # Adapted from https://github.com/decoderesearch/SAELens/blob/69c4c62b0dc24e5ba23fc773a0286149514b4a23/sae_lens/saes/batchtopk_sae.py
@@ -153,7 +160,7 @@ class JumpReluActivationFunction(ActivationFunction):
 class TopKActivationFunction(ActivationFunction):
     config: TopKActivationFunctionConfig
 
-    def forward(self, x: torch.Tensor, token_mask: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         topk = torch.topk(x, k=self.config.k, dim=-1, sorted=False)
         result = torch.zeros_like(x)
         result.scatter_(-1, topk.indices, topk.values.relu())
@@ -186,22 +193,21 @@ class BatchTopKActivationFunction(ActivationFunction):
         # Doesn't transfer well across layers, so start from scratch
         self.threshold.fill_(0.0)
 
-    def forward(self, x: torch.Tensor, token_mask: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # BatchTopK during training
         if self.training:
-            masked_x = x[token_mask.bool()].view(-1)
-            num_tokens = masked_x.shape[0] // x.shape[-1]
+            num_tokens = x.shape[0] * x.shape[1]
             topk = torch.topk(
                 # This is crucial; otherwise we are wasting our non-zero activations on tokens that aren't even
                 # being evaluated or trained on.
-                masked_x,
+                x.view(-1),
                 k=self.config.k * num_tokens,
                 dim=-1,
                 sorted=False,
             )
             threshold = torch.maximum(
                 topk.values.min(),
-                torch.zeros((1,), dtype=masked_x.dtype, device=masked_x.device),
+                torch.zeros((1,), dtype=x.dtype, device=x.device),
             )
             lr = self.config.threshold_lr
 
@@ -356,17 +362,24 @@ class Encoder(torch.nn.Module):
     def encoder_params(self) -> Iterator[torch.nn.Parameter]:
         yield from self.linear.parameters()
 
+    def onload(self):
+        for a in self.activation:
+            a.onload()
+
+    def offload(self):
+        for a in self.activation:
+            a.offload()
+
     def forward(
         self,
         x: torch.Tensor,
-        token_mask: torch.Tensor,
         should_cast: bool = True,
         feature_soft_cap: Optional[torch.Tensor] = None,
     ):
         out_dtype = x.dtype
         if should_cast:
             x = x.to(self.dtype)
-        features = self.activation[0](self.linear(x), token_mask)
+        features = self.activation[0](self.linear(x))
 
         if feature_soft_cap is not None:
             features = feature_soft_cap * (features / feature_soft_cap).tanh()
@@ -518,7 +531,6 @@ class LISTA(Encoder):
     def forward(
         self,
         x: torch.Tensor,
-        token_mask: torch.Tensor,
         should_cast: bool = True,
         feature_soft_cap: Optional[torch.Tensor] = None,
     ):
@@ -554,10 +566,7 @@ class LISTA(Encoder):
                 scale = self.scale.tanh()[i]
             else:
                 scale = self.scale[i]
-            features = self.activation[i](
-                features + scale * self.linear(residual),
-                token_mask,
-            )
+            features = self.activation[i](features + scale * self.linear(residual))
 
         if self.config.force_unit_scale:
             features = features * self.feature_scale
@@ -636,7 +645,6 @@ class InteractionEncoder(Encoder):
     def forward(
         self,
         x: torch.Tensor,
-        token_mask: torch.Tensor,
         should_cast: bool = True,
         feature_soft_cap: Optional[torch.Tensor] = None,
     ):
@@ -644,10 +652,10 @@ class InteractionEncoder(Encoder):
         if should_cast:
             x = x.to(self.dtype)
         encoder_output = self.linear(x)
-        features = self.activation[0](encoder_output, token_mask)
+        features = self.activation[0](encoder_output)
         for i in range(self.config.n_interaction_iterations):
             features = self.activation[i + 1](
-                encoder_output + features @ self.interaction, token_mask
+                encoder_output + features @ self.interaction
             )
 
         if feature_soft_cap is not None:

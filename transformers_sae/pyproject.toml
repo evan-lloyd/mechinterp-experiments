@@ -29,7 +29,12 @@ dependencies = [
 version = "0.0.0"
 
 [dependency-groups]
-dev = ["jurigged>=0.6.1", "line-profiler>=5.0.1", "ruff>=0.14.10", "huggingface_hub>=1.10.2"]
+dev = [
+    "jurigged>=0.6.1",
+    "line-profiler>=5.0.1",
+    "ruff>=0.14.10",
+    "huggingface_hub>=1.10.2",
+]
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
@@ -63,7 +68,7 @@ torchvision = [
 override-dependencies = ["numpy>=2", "datasets>=4.4.2"]
 
 [tool.ty]
-rules = { all = "warn", missing-argument = "error" }
+rules = { all = "warn", missing-argument = "error", missing-override-decorator = "ignore" }
 
 [tool.ruff.lint.per-file-ignores]
 "*.ipynb" = [

@@ -120,7 +120,7 @@ def run_validations(
             results.position_ids = np.concatenate(
                 (
                     results.position_ids,
-                    batch.position_ids[batch.token_mask.bool()].flatten().cpu().numpy(),
+                    batch.position_ids[batch.token_mask].flatten().cpu().numpy(),
                 ),
                 axis=0,
             )
@@ -258,10 +258,7 @@ def run_single_layer_replacements(
                 results.position_ids = np.concatenate(
                     (
                         results.position_ids,
-                        batch.position_ids[batch.token_mask.bool()]
-                        .flatten()
-                        .cpu()
-                        .numpy(),
+                        batch.position_ids[batch.token_mask].flatten().cpu().numpy(),
                     ),
                     axis=0,
                 )
@@ -339,14 +336,10 @@ def run_evals(
                 ),
                 l0=l0_eval(
                     replacement.sae_features,
-                    None,
-                    batch.input_data,
                     eval_type,
                 ),
                 live_features=live_features_eval(
                     replacement.sae_features,
-                    None,
-                    batch.input_data,
                     eval_type,
                 ),
             )

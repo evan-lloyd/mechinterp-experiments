@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Callable, Literal, overload
+from typing import Callable, Literal, Protocol, cast, overload
 
 import numpy as np
 import torch
@@ -63,16 +63,79 @@ def _batch_mean(
         a numpy array of the raw values returned by the wrapped function, for only the non-masked tokens.
         """
         if return_type == "np":
-            return tensor_to_numpy(
-                fn(actual, target)[batch.token_mask.bool()].flatten().cpu()
-            )
+            return tensor_to_numpy(fn(actual, target)[batch.token_mask].flatten().cpu())
         else:
-            result = (fn(actual, target) * batch.token_mask).sum() / batch.num_tokens
+            result = (fn(actual, target)[batch.token_mask]).sum() / batch.num_tokens
             if return_type == "tensor":
                 return result
             return result.item()
 
     return _inner
+
+
+class FeatureSpaceMetric(Protocol):
+    @overload
+    def __call__(
+        self,
+        actual: torch.Tensor,
+        target: torch.Tensor,
+        return_type: Literal["tensor"] = ...,
+    ) -> torch.Tensor: ...
+
+    @overload
+    def __call__(
+        self,
+        actual: torch.Tensor,
+        target: torch.Tensor,
+        return_type: Literal["np"],
+    ) -> np.ndarray: ...
+
+    @overload
+    def __call__(
+        self,
+        actual: torch.Tensor,
+        target: torch.Tensor,
+        return_type: Literal["float"],
+    ) -> float: ...
+
+    @overload
+    def __call__(
+        self,
+        actual: torch.Tensor,
+        target: torch.Tensor,
+        return_type: _ReturnType,
+    ) -> torch.Tensor | np.ndarray | float: ...
+
+    def __call__(
+        self,
+        actual: torch.Tensor,
+        target: torch.Tensor,
+        return_type: _ReturnType = "tensor",
+    ) -> torch.Tensor | np.ndarray | float: ...
+
+
+def _feature_space_mean(
+    fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+) -> FeatureSpaceMetric:
+    """Decorator to return the batch mean of the given function. Equivalent to _batch_mean except we assume
+    that the token mask has already been applied, which will happen when the inputs are in feature space, since
+    we mask the input to our SAEs.
+    """
+
+    def _inner(
+        actual: torch.Tensor,
+        target: torch.Tensor,
+        return_type: _ReturnType = "tensor",
+    ) -> torch.Tensor | np.ndarray | float:
+        if return_type == "np":
+            return tensor_to_numpy(fn(actual, target).flatten().cpu())
+        else:
+            result = fn(actual, target).mean()
+            if return_type == "tensor":
+                return result
+            return result.item()
+
+    return cast(FeatureSpaceMetric, _inner)
 
 
 @overload
@@ -120,11 +183,9 @@ def _batch_gmean(
         a numpy array of the raw values returned by the wrapped function, for only the non-masked tokens.
         """
         if return_type == "np":
-            return tensor_to_numpy(
-                fn(actual, target)[batch.token_mask.bool()].flatten().cpu()
-            )
+            return tensor_to_numpy(fn(actual, target)[batch.token_mask].flatten().cpu())
         else:
-            result = fn(actual, target)[batch.token_mask.bool()]
+            result = fn(actual, target)[batch.token_mask]
             result = result.clip(min=1e-9).log().mean().exp()
             if return_type == "tensor":
                 return result
@@ -175,7 +236,7 @@ def _batch_tmean(
         trim_fraction: float,
         return_type: _ReturnType = "tensor",
     ) -> torch.Tensor | np.ndarray | float:
-        result = fn(actual, target)[batch.token_mask.bool()].flatten()
+        result = fn(actual, target)[batch.token_mask].flatten()
         if return_type == "np":
             top_k = result.topk(int(trim_fraction * batch.num_tokens), sorted=False)
             result[top_k.indices] = 0.0
@@ -201,14 +262,17 @@ def cauchy_loss(c: float | torch.Tensor):
     return _inner
 
 
-@_batch_mean
+@_feature_space_mean
 def cos_dist_loss(actual: torch.Tensor, target: torch.Tensor):
     return 1 - torch.nn.functional.cosine_similarity(actual, target, dim=-1)
 
 
-@_batch_mean
-def mse_loss(actual: torch.Tensor, target: torch.Tensor):
+def _mse(actual: torch.Tensor, target: torch.Tensor):
     return ((actual - target) ** 2).mean(dim=-1)
+
+
+mse_loss = _batch_mean(_mse)
+feature_mse_loss = _feature_space_mean(_mse)
 
 
 @_batch_tmean
@@ -244,14 +308,14 @@ def kl_loss(
         torch.subtract(target, actual, out=actual)
         target.exp_()
         torch.mul(target, actual, out=actual)
-        result = actual.sum(dim=-1)[batch.token_mask.bool()]
+        result = actual.sum(dim=-1)[batch.token_mask]
     else:
         result = torch.nn.functional.kl_div(
             actual,
             target,
             reduction="none",
             log_target=True,
-        ).sum(dim=-1)[batch.token_mask.bool()]
+        ).sum(dim=-1)[batch.token_mask]
 
     if return_type == "np":
         return tensor_to_numpy(result.flatten().cpu())
@@ -272,16 +336,26 @@ def rre_eval(actual: torch.Tensor, target: torch.Tensor):
     )
 
 
-@_batch_mean
-def l0_eval(features: torch.Tensor, _):
+def _target_only(
+    fn: Callable[[torch.Tensor], torch.Tensor],
+) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
+    def _inner(actual: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        return fn(target)
+
+    return _inner
+
+
+@_feature_space_mean
+def _l0(_, features: torch.Tensor):
     return (features > 0).to(torch.float32).sum(dim=-1)
+
+
+l0_eval = partial(_l0, torch.empty((0,)))
 
 
 # Not using decorator, since aggregation logic is different.
 def live_features_eval(
     features: torch.Tensor,
-    _: torch.Tensor,
-    batch: DataBatch,
     return_type: _ReturnType = "float",
 ):
     # TODO: handle this more cleanly, but for now detect if we should mock the result for profiling
@@ -290,7 +364,7 @@ def live_features_eval(
             return 1.0
         else:
             return bitarray([1] * features.shape[1])
-    result = bitarray((features[batch.token_mask.bool()].sum(dim=0) > 0).tolist())
+    result = bitarray((features.squeeze(0).sum(dim=0) > 0).tolist())
     if return_type == "float":
         return sum(result) / features.shape[-1]
     return result

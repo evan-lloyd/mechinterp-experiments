@@ -615,9 +615,9 @@ def generate(
             token_mask = torch.ones(
                 (value.shape[0], value.shape[1] if value.ndim > 1 else 1),
                 device=model.device,
-                dtype=model.dtype,
+                dtype=torch.bool,
             )
-            token_mask.view(-1)[special_token_indices] = 0.0
+            token_mask.view(-1)[special_token_indices] = False
 
         def end(self):
             if stream:

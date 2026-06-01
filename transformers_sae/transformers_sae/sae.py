@@ -211,10 +211,12 @@ class SAE(torch.nn.Module):
     def offload(self):
         if self._device_tracker.device != torch.device("meta"):
             self.to(torch.device("cpu"))
+            self.encoder.offload()
 
     def onload(self):
         if self._device_tracker.device != torch.device("meta"):
             self.to(self.config.device)
+            self.encoder.onload()
 
     def activation_thresholds(self):
         thresholds = []
@@ -254,8 +256,9 @@ class SAE(torch.nn.Module):
         feature_soft_cap: Optional[torch.Tensor] = None,
     ):
         features = self.encoder(
-            x,
-            token_mask=token_mask,
+            # Masking unravels (batch, token) dimension to 1d, so need to unsqueeze for compatibility with
+            # unmasked code paths.
+            x[token_mask].unsqueeze(0),
             should_cast=should_cast,
             feature_soft_cap=feature_soft_cap,
         )
@@ -286,9 +289,8 @@ class SAE(torch.nn.Module):
         feature_soft_cap: Optional[torch.Tensor] = None,
         **kwargs,
     ):
-        # if not self.training:
-        # orig_norms = torch.linalg.vector_norm(x, dim=-1, keepdim=True)
-        decoder_result = self.decode(
+        decoder_result = torch.empty_like(x)
+        decoder_result[token_mask] = self.decode(
             self.encode(
                 x.to(self.encoder.dtype),
                 token_mask=token_mask,
@@ -297,11 +299,6 @@ class SAE(torch.nn.Module):
             ),
             should_cast=False,
         ).to(x.dtype)
-        # We want special tokens to "pass through" the SAE, since we don't train on them.
-        decoder_result.view(x.shape[0] * x.shape[1], x.shape[2])[
-            pass_through_positions, :
-        ] = x.view(x.shape[0] * x.shape[1], x.shape[2])[pass_through_positions, :]
-        # if not self.training:
-        # new_norms = torch.linalg.vector_norm(decoder_result, dim=-1, keepdim=True)
-        # return decoder_result * orig_norms / (new_norms + 1e-8)
+        # Allow un-used tokens (including special tokens, which we don't train on) to "pass through"
+        decoder_result[~token_mask] = x[~token_mask]
         return decoder_result

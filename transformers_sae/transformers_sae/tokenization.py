@@ -1,7 +1,7 @@
 import multiprocessing
 from dataclasses import dataclass, field
 from math import inf
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple, Generator
 
 import torch
 from datasets import IterableDataset
@@ -85,7 +85,7 @@ def tokenize_strings(
     max_tokens: Optional[int] = None,
     max_batch_size: Optional[int] = None,
     token_offset: int = 0,
-):
+) -> Tuple[DataBatch, List[torch.Tensor]]:
     token_ids = _ensure_tokenized(inputs, tokenizer, context_length)
 
     input_id_stack = []
@@ -204,9 +204,9 @@ def tokenize_strings(
 
     unused_inputs = list(token_ids.values())
     position_ids = torch.stack(position_id_stack)
-    token_mask = (position_ids >= 0).to(dtype=torch.float32)
+    token_mask = position_ids >= 0
     # Make sure these don't show up in evals/loss calculations
-    token_mask.view(-1)[special_token_indices] = 0.0
+    token_mask.view(-1)[special_token_indices] = False
 
     # These have to be non-negative on CUDA kernels
     position_ids = torch.where(position_ids >= 0, position_ids, 0)
@@ -241,7 +241,7 @@ def _iter_dataset(
     tokenizer_batch_size: int,
     inference_batch_size: int,
     context_length: int,
-):
+) -> Generator[_IterState]:
     state = _IterState()
     dataset_iterable = dataset.iter(max(tokenizer_batch_size // 2, 1))
 
@@ -285,7 +285,7 @@ def _input_generator(
     tokenizer_batch_size: int = 1,
     inference_batch_size: int = 1,
     offset: int = 0,
-):
+) -> Generator[DataBatch]:
     zeros = torch.zeros((context_length, context_length), dtype=dtype)
     ones = torch.ones((context_length, context_length), dtype=dtype)
     for state in _iter_dataset(
@@ -328,7 +328,7 @@ def mock_data_generator(
     max_batches: Optional[int],
     inference_batch_size: int,
     offset: Optional[int],
-):
+) -> Generator[DataBatch]:
     assert max_tokens or max_batches, "Need some limit for mock data generation"
 
     fake_tokens = offset
@@ -371,7 +371,7 @@ def make_dataloader(
     inference_batch_size: int,
     offset: int = 0,
     max_batches: int | None = None,
-):
+) -> DataLoader | Generator[DataBatch]:
     # If we're in fake tensor mode, mock out reading from the dataset
     if torch._guards.detect_fake_mode():
         return mock_data_generator(
@@ -384,7 +384,7 @@ def make_dataloader(
         )
 
     class InputGeneratorDataset(TorchIterableDataset):
-        def __iter__(self):
+        def __iter__(self) -> Iterator[DataBatch]:
             return iter(
                 _input_generator(
                     model.context_length,

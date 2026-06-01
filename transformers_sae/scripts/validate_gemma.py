@@ -1,3 +1,4 @@
+import argparse
 import os
 
 import numpy as np
@@ -15,6 +16,7 @@ from transformers_sae.replacement_model import GemmaReplacement, make_replacemen
 from transformers_sae.training import (
     TrainingConfig,
     TrainingMethod,
+    tune_activation_thresholds,
     tune_encoder,
 )
 from transformers_sae.validation import generate_with_replacement, run_validations
@@ -22,7 +24,7 @@ from transformers_sae.validation import generate_with_replacement, run_validatio
 # Tweak TRAINING_BATCH_SIZE for your hardware if necessary
 if torch.cuda.is_available():
     TRAINING_DEVICE = "cuda:0"
-    TRAINING_BATCH_SIZE = 1
+    TRAINING_BATCH_SIZE = 2
 elif torch.mps.is_available():
     TRAINING_DEVICE = "mps:0"
     TRAINING_BATCH_SIZE = 2
@@ -125,21 +127,20 @@ training_config = TrainingConfig(
 
 START_LAYER = 0
 
-for training_method in (
-    # "next_layer_lista_onsager_tuned_encoder_0_unit_scale",
-    "next_layer_lista_unit_scale_tuned_encoder_0_2e6",
-    # "next_layer_finetuned_interaction",
-    # "next_layer",
-    # "next_layer_interaction",
-    # "next_layer_finetuned",
-    # "next_layer_lista",
-    # "next_layer_lista_normalized_decoder",
-    # "next_layer_finetuned_lista_normalized_decoder",
-    # "next_layer_lista_feature_rescaling",
-    # "next_layer_finetuned_lista_feature_rescaling",
-    # "next_layer_lista_spectral_norm",
-    # "next_layer_finetuned_lista",
-):
+parser = argparse.ArgumentParser(
+    description="Validate SAEs for specified training method(s)"
+)
+parser.add_argument(
+    "-m",
+    "--method",
+    dest="training_methods",
+    action="append",
+    required=True,
+    help="Training method to validate (may be specified multiple times, e.g. -m next_layer_lista_onsager -m next_layer)",
+)
+args = parser.parse_args()
+
+for training_method in args.training_methods:
     results_path = f"{VALIDATION_BASE_PATH}/{training_method}"
 
     # Check if all validation files already exist
@@ -171,33 +172,15 @@ for training_method in (
             f"Running validations for {training_method} replacement starting at {start_layer}"
         )
 
-        # tr = tune_encoder(
-        #     model,
-        #     tokenizer,
-        #     {layer: sae for layer, sae in saes.items() if layer >= start_layer},
-        #     training_dataset,
-        #     training_config,
-        #     NUM_THRESHOLD_TUNING_TOKENS,
-        #     offload_after_training=False,
-        #     checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}",
-        # )
-        # saes = tr.final_saes
-
         # tune_activation_thresholds(
         #     model,
         #     tokenizer,
-        #     {layer: sae for layer, sae in saes.items() if layer >= start_layer},
+        #     saes,
         #     training_dataset,
         #     TOKENIZER_BATCH_SIZE,
         #     TRAINING_BATCH_SIZE,
         #     NUM_THRESHOLD_TUNING_TOKENS,
-        #     offload_after_training=False,
         # )
-        # new_thresholds = {
-        #     layer: tuple(a.threshold.item() for a in sae.encoder.activation)
-        #     for layer, sae in saes.items()
-        #     if layer >= start_layer
-        # }
 
         validations = run_validations(
             model,

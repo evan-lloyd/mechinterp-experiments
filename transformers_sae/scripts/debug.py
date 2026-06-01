@@ -34,7 +34,7 @@ class DebugUtils:
     def max_feature(f: torch.Tensor, batch: DataBatch | None = None):
         if batch is None:
             batch: DataBatch = DebugUtils.locals()["batch"]
-        return f[batch.token_mask.bool()].max()
+        return f[batch.token_mask].max()
 
     @staticmethod
     def features_over_thresh(f: torch.Tensor, t: float):
@@ -48,9 +48,9 @@ class DebugUtils:
             batch: DataBatch = DebugUtils.locals()["batch"]
         if tokenizer is None:
             tokenizer = DebugUtils.locals()["tokenizer"]
-        over_thresh = DebugUtils.features_over_thresh(f, t)[batch.token_mask.bool()]
+        over_thresh = DebugUtils.features_over_thresh(f, t)[batch.token_mask]
         return tokenizer.batch_decode(
-            batch.input_ids[batch.token_mask.bool()][over_thresh].unsqueeze(-1)
+            batch.input_ids[batch.token_mask][over_thresh].unsqueeze(-1)
         )
 
 
@@ -94,7 +94,8 @@ def _breakpoint_hook(*args, **kwargs):
 sys.breakpointhook = _breakpoint_hook
 
 try:
-    runpy.run_path(f"scripts/{sys.argv[1]}", run_name="__main__")
+    sys.argv = sys.argv[1:]
+    runpy.run_path(f"scripts/{sys.argv[0]}", run_name="__main__")
 except (SystemExit, bdb.BdbQuit):
     raise
 except Exception:
