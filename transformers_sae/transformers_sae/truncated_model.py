@@ -67,8 +67,8 @@ def truncated_model(
     patched_layers = torch.nn.ModuleList(
         model.get_submodule(model.layer_path)[max(start_layer, 0) : end_layer]
         + (
-            [_StopLayer(model.get_layer(end_layer))]
-            if end_layer < model.num_layers
+            [_StopLayer(model.get_layer(end_layer - 1))]
+            if end_layer <= model.num_layers
             else []
         )
     )
@@ -113,36 +113,44 @@ def truncated_model(
 
     try:
         orig_layers = model.get_submodule(model.layer_path)
+        orig_num_layers = None
 
-        # If starting from embedding, we need to handle early stopping and injecting
-        # additional arguments into the call to each SAE layer.
-        if start_layer == -1:
+        # Quirk of gemma2: it slices the layers ModuleList to self.config.num_hidden_layers, so
+        # in order to actually early stop, we need to bump that up so we hit the EarlyStopping.
+        if hasattr(model.config, "num_hidden_layers"):
+            orig_num_layers = model.config.num_hidden_layers
 
-            def _set_layer_kwargs(layer_idx, module, args, kwargs):
-                kwargs = {
-                    **kwargs,
-                    **sae_kwargs,
-                    "bypass_sae": (layer_idx == end_layer - 1) and stop_before_sae,
-                }
-                return args, kwargs
+        with ExitStack() as yield_context:
+            # If starting from embedding, we need to handle early stopping and injecting
+            # additional arguments into the call to each SAE layer.
+            if start_layer == -1:
 
-            yield_context = ExitStack()
-            for i, layer in enumerate(patched_layers):
-                if isinstance(layer, SAEReplacementLayer):
-                    yield_context.enter_context(
-                        layer.register_forward_pre_hook(
-                            partial(_set_layer_kwargs, i), with_kwargs=True
+                def _set_layer_kwargs(layer_idx, module, args, kwargs):
+                    kwargs = {
+                        **kwargs,
+                        **sae_kwargs,
+                        "bypass_sae": (layer_idx == end_layer - 1) and stop_before_sae,
+                    }
+                    return args, kwargs
+
+                for i, layer in enumerate(patched_layers):
+                    if isinstance(layer, SAEReplacementLayer):
+                        yield_context.enter_context(
+                            layer.register_forward_pre_hook(
+                                partial(_set_layer_kwargs, i), with_kwargs=True
+                            )
                         )
-                    )
-            model.set_submodule(model.layer_path, patched_layers)
-            truncated_model = model
-        else:
-            truncated_model = _TruncatedTransformer()
-            yield_context = nullcontext()
-        try:
-            with yield_context:
+                model.set_submodule(model.layer_path, patched_layers)
+                if hasattr(model.config, "num_hidden_layers"):
+                    model.config.num_hidden_layers = len(patched_layers)
+                truncated_model = model
+            else:
+                truncated_model = _TruncatedTransformer()
+            try:
                 yield truncated_model
-        except _EarlyStopping:
-            pass
+            except _EarlyStopping:
+                pass
     finally:
         model.set_submodule(model.layer_path, orig_layers)
+        if hasattr(model.config, "num_hidden_layers"):
+            model.config.num_hidden_layers = orig_num_layers

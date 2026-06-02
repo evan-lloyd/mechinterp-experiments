@@ -1,7 +1,7 @@
 import multiprocessing
 from dataclasses import dataclass, field
 from math import inf
-from typing import Dict, Iterator, List, Optional, Tuple, Generator
+from typing import Dict, Generator, Iterator, List, Optional, Tuple
 
 import torch
 from datasets import IterableDataset
@@ -9,37 +9,46 @@ from torch.utils.data import DataLoader
 from torch.utils.data import IterableDataset as TorchIterableDataset
 from transformers import AutoTokenizer
 
-from .data_batch import DataBatch
+from .data_batch import DataBatch, TokenizedExample, ExampleInfo
 from .replacement_model import ReplacementModel
+
+_DATASET_INPUT_COLUMN = "text"
 
 
 def _ensure_tokenized(
-    inputs: List[str | torch.Tensor],
+    inputs: List[dict | TokenizedExample],
     tokenizer: AutoTokenizer,
     context_length: int,
-) -> Dict[int, torch.Tensor]:
+    include_example_info: bool = False,
+) -> Dict[int, TokenizedExample]:
     needed_tokenizations = {
-        i: _in for i, _in in enumerate(inputs) if isinstance(_in, str)
+        i: _in[_DATASET_INPUT_COLUMN]
+        for i, _in in enumerate(inputs)
+        if isinstance(_in, dict)
+    }
+    examples = {
+        i: _in for i, _in in enumerate(inputs) if isinstance(_in, TokenizedExample)
     }
     if needed_tokenizations:
         new_tokenizations = tokenizer(
             list(needed_tokenizations.values()), return_attention_mask=False
         )["input_ids"]
         for idx, i in enumerate(needed_tokenizations):
-            needed_tokenizations[i] = new_tokenizations[idx]
-    token_ids = {i: needed_tokenizations.get(i, inputs[i]) for i in range(len(inputs))}
-    for i, t in token_ids.items():
-        if len(t) > context_length:
-            token_ids[i] = t[:context_length]
-    return token_ids
+            examples[i] = TokenizedExample(
+                new_tokenizations[idx][:context_length], info=ExampleInfo()
+            )
+            if include_example_info:
+                examples[i].info.original_example = inputs[i]
+    return examples
 
 
 def _fill_context(
-    token_ids: Dict[int, torch.Tensor],
+    examples: Dict[int, TokenizedExample],
     max_tokens: Optional[int | float],
     max_batch_size: Optional[int | float],
     context_length: int,
-) -> Iterator[Tuple[List[torch.Tensor], int]]:
+    include_example_info: bool = False,
+) -> Iterator[Tuple[List[TokenizedExample], int]]:
     if max_tokens is None:
         max_tokens = inf
     if max_batch_size is None:
@@ -49,7 +58,7 @@ def _fill_context(
     batch_size = 0
     need_new_row = False
     used_inputs = []
-    while token_ids and total_tokens < max_tokens:
+    while examples and total_tokens < max_tokens:
         if need_new_row:
             batch_size += 1
             yield used_inputs, row_len
@@ -61,12 +70,18 @@ def _fill_context(
 
         # Greedily consume entire inputs until we fill each CONTEXT_LENGTH row of stack
         need_new_row = True
-        for i, cur_input in token_ids.items():
-            if len(cur_input) + row_len <= context_length:
-                total_tokens += len(cur_input)
-                used_inputs.append(cur_input)
-                row_len += len(cur_input)
-                del token_ids[i]
+        for i, cur_example in examples.items():
+            if len(cur_example.token_ids) + row_len <= context_length:
+                total_tokens += len(cur_example.token_ids)
+                used_inputs.append(cur_example)
+                if include_example_info:
+                    cur_example.info.batch_index = batch_size
+                    cur_example.info.token_range = (
+                        row_len,
+                        row_len + len(cur_example.token_ids),
+                    )
+                row_len += len(cur_example.token_ids)
+                del examples[i]
                 need_new_row = False
                 break
 
@@ -76,7 +91,7 @@ def _fill_context(
 
 
 def tokenize_strings(
-    inputs: List[str | torch.Tensor],
+    inputs: List[dict | TokenizedExample],
     dtype: torch.dtype,
     tokenizer: AutoTokenizer,
     context_length: int,
@@ -85,8 +100,11 @@ def tokenize_strings(
     max_tokens: Optional[int] = None,
     max_batch_size: Optional[int] = None,
     token_offset: int = 0,
-) -> Tuple[DataBatch, List[torch.Tensor]]:
-    token_ids = _ensure_tokenized(inputs, tokenizer, context_length)
+    include_example_info: bool = False,
+) -> Tuple[DataBatch, List[TokenizedExample]]:
+    examples = _ensure_tokenized(
+        inputs, tokenizer, context_length, include_example_info
+    )
 
     input_id_stack = []
     position_id_stack = []
@@ -96,17 +114,20 @@ def tokenize_strings(
     num_rows = 0
     input_batches = []
     row_lens = []
+    example_info = []
 
     # Minimize the amount of work we do in case we need to seek to token_offset. If we haven't generated
     # enough tokens then we will be skipping this batch anyway, so no need to make tensors for it.
     for input_batch, row_len in _fill_context(
-        token_ids, max_tokens, max_batch_size, context_length
+        examples, max_tokens, max_batch_size, context_length, include_example_info
     ):
         num_tokens += row_len
         batch_size += 1
         num_rows += len(input_batch)
         input_batches.append(input_batch)
         row_lens.append(row_len)
+        if include_example_info:
+            example_info.extend(e.info for e in input_batch)
 
     if num_tokens <= token_offset:
         return DataBatch(
@@ -119,14 +140,16 @@ def tokenize_strings(
             row_lens,
             torch.empty((0,)),
             torch.empty((0,)),
-        ), list(token_ids.values())
+        ), list(examples.values())
 
     special_ids = torch.tensor(tokenizer.all_special_ids)
     special_token_indices = torch.empty((0,), dtype=torch.long)
 
     for input_batch, row_len in zip(input_batches, row_lens):
         input_id_stack.append(
-            torch.cat([torch.tensor(in_, dtype=torch.int64) for in_ in input_batch])
+            torch.cat(
+                [torch.tensor(in_.token_ids, dtype=torch.int64) for in_ in input_batch]
+            )
         )
         special_token_indices = torch.cat(
             (
@@ -143,7 +166,7 @@ def tokenize_strings(
         position_id_stack.append(
             torch.cat(
                 [
-                    torch.arange(len(cur_input), dtype=torch.int64)
+                    torch.arange(len(cur_input.token_ids), dtype=torch.int64)
                     for cur_input in input_batch
                 ]
             )
@@ -187,7 +210,9 @@ def tokenize_strings(
         #           [1., 1., 1., 1., 1., 1., 1., 1., 1., 0., 0., 1., 1.],
         #           [1., 1., 1., 1., 1., 1., 1., 1., 1., 0., 0., 0., 1.],
         #           [1., 1., 1., 1., 1., 1., 1., 1., 1., 0., 0., 0., 0.]])
-        mask_blocks = [ones[0 : len(i), 0 : len(i)].tril() for i in input_batch]
+        mask_blocks = [
+            ones[0 : len(i.token_ids), 0 : len(i.token_ids)].tril() for i in input_batch
+        ]
         # Pad?
         if row_len < context_length:
             mask_blocks.append(
@@ -202,7 +227,7 @@ def tokenize_strings(
             )
         )
 
-    unused_inputs = list(token_ids.values())
+    unused_inputs = list(examples.values())
     position_ids = torch.stack(position_id_stack)
     token_mask = position_ids >= 0
     # Make sure these don't show up in evals/loss calculations
@@ -221,12 +246,13 @@ def tokenize_strings(
         row_lens,
         token_mask,
         special_token_indices,
+        example_info=example_info,
     ), unused_inputs
 
 
 @dataclass
 class _IterState:
-    batch_inputs: List[str | torch.Tensor] = field(default_factory=list)
+    batch_inputs: List[dict | TokenizedExample] = field(default_factory=list)
     num_tokens_generated: int = 0
     num_rows_consumed: int = 0
     num_batches: int = 0
@@ -252,7 +278,12 @@ def _iter_dataset(
             break
         while len(state.batch_inputs) < tokenizer_batch_size:
             try:
-                state.batch_inputs.extend(next(dataset_iterable)["text"])
+                batch = next(dataset_iterable)
+                # Convert from column-based to row-based
+                num_rows = len(batch[next(iter(batch.keys()))])
+                state.batch_inputs.extend(
+                    [{k: batch[k][i] for k in batch.keys()} for i in range(num_rows)]
+                )
             except StopIteration:
                 break
         if state.batch_inputs:
@@ -285,6 +316,7 @@ def _input_generator(
     tokenizer_batch_size: int = 1,
     inference_batch_size: int = 1,
     offset: int = 0,
+    include_example_info: bool = False,
 ) -> Generator[DataBatch]:
     zeros = torch.zeros((context_length, context_length), dtype=dtype)
     ones = torch.ones((context_length, context_length), dtype=dtype)
@@ -307,6 +339,7 @@ def _input_generator(
             state.tokens_to_generate,
             inference_batch_size,
             offset - state.num_tokens_generated,
+            include_example_info=include_example_info,
         )
         # TODO: we should find a way to not have to tokenize everything up until this point. Unfortunately
         # we can't really just skip to a particular row of the dataset because of the way we pack into
@@ -371,6 +404,7 @@ def make_dataloader(
     inference_batch_size: int,
     offset: int = 0,
     max_batches: int | None = None,
+    include_example_info: bool = False,
 ) -> DataLoader | Generator[DataBatch]:
     # If we're in fake tensor mode, mock out reading from the dataset
     if torch._guards.detect_fake_mode():
@@ -383,24 +417,7 @@ def make_dataloader(
             offset,
         )
 
-    class InputGeneratorDataset(TorchIterableDataset):
-        def __iter__(self) -> Iterator[DataBatch]:
-            return iter(
-                _input_generator(
-                    model.context_length,
-                    model.dtype,
-                    tokenizer,
-                    dataset,
-                    max_tokens=max_tokens,
-                    max_batches=max_batches,
-                    tokenizer_batch_size=tokenizer_batch_size,
-                    inference_batch_size=inference_batch_size,
-                    offset=offset,
-                )
-            )
-
-    # Can't/don't want to serialize process args if we're on MacOS, so just return a regular iterator
-    if multiprocessing.get_start_method() == "spawn":
+    def _make_iter():
         return iter(
             _input_generator(
                 model.context_length,
@@ -412,8 +429,17 @@ def make_dataloader(
                 tokenizer_batch_size=tokenizer_batch_size,
                 inference_batch_size=inference_batch_size,
                 offset=offset,
+                include_example_info=include_example_info,
             )
         )
+
+    class InputGeneratorDataset(TorchIterableDataset):
+        def __iter__(self) -> Iterator[DataBatch]:
+            return _make_iter()
+
+    # Can't/don't want to serialize process args if we're on MacOS, so just return a regular iterator
+    if True or multiprocessing.get_start_method() == "spawn":
+        return _make_iter()
 
     return DataLoader(
         InputGeneratorDataset(),

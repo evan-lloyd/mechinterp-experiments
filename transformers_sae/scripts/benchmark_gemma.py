@@ -10,10 +10,13 @@ import yaml
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from transformers_sae.benchmark import (
-    BenchmarkModel,
-    BoolQBenchmark,
-    MMLUBenchmark,
-    MMLUTask,
+    BenchmarkKind,
+    # BenchmarkModel,
+    BenchmarkSpec,
+    # BoolQBenchmark,
+    # MMLUBenchmark,
+    # MMLUTask,
+    run_benchmark,
 )
 from transformers_sae.ops import (
     MemoryTrackingMode,
@@ -22,10 +25,6 @@ from transformers_sae.ops import (
     load_saes,
 )
 from transformers_sae.replacement_model import GemmaReplacement, make_replacement_model
-from transformers_sae.sae_lens_wrapper import (
-    SAELensSAEWrapper,
-    wrap_sae_lens_pretrained,
-)
 
 # Tweak TRAINING_BATCH_SIZE for your hardware if necessary
 if torch.cuda.is_available():
@@ -46,21 +45,22 @@ VALIDATION_BASE_PATH = f"{HF_BUCKET_LOCAL}/validations/gemma_2_2b"
 CHECKPOINT_BASE_PATH = f"{HF_BUCKET_LOCAL}/gemma_2_2b"
 BENCHMARK_BASE_PATH = f"{HF_BUCKET_LOCAL}/gemma_2_2b/benchmarks"
 NUM_TRAINING_TOKENS = int(1e8)
+TOKENIZER_BATCH_SIZE = 256
 
 # Somewhat arbitrary list of tasks; these are the first 10 from the DeepEval enum that
 # result in tokenizations that are short enough for our SAE's context window.
-MMLU_TASKS = [
-    MMLUTask.BUSINESS_ETHICS,
-    MMLUTask.CLINICAL_KNOWLEDGE,
-    MMLUTask.MEDICAL_GENETICS,
-    MMLUTask.HIGH_SCHOOL_PHYSICS,
-    MMLUTask.VIROLOGY,
-    MMLUTask.HIGH_SCHOOL_MICROECONOMICS,
-    MMLUTask.ECONOMETRICS,
-    MMLUTask.COLLEGE_COMPUTER_SCIENCE,
-    MMLUTask.HIGH_SCHOOL_BIOLOGY,
-    MMLUTask.ABSTRACT_ALGEBRA,
-]
+# MMLU_TASKS = [
+#     MMLUTask.BUSINESS_ETHICS,
+#     MMLUTask.CLINICAL_KNOWLEDGE,
+#     MMLUTask.MEDICAL_GENETICS,
+#     MMLUTask.HIGH_SCHOOL_PHYSICS,
+#     MMLUTask.VIROLOGY,
+#     MMLUTask.HIGH_SCHOOL_MICROECONOMICS,
+#     MMLUTask.ECONOMETRICS,
+#     MMLUTask.COLLEGE_COMPUTER_SCIENCE,
+#     MMLUTask.HIGH_SCHOOL_BIOLOGY,
+#     MMLUTask.ABSTRACT_ALGEBRA,
+# ]
 
 BENCHMARK_BATCH_SIZE = 16
 # Validations are saved per start_layer; benchmarks use full replacement (all layers).
@@ -163,19 +163,41 @@ def load_activation_thresholds(training_method: str):
         return cloudpickle.load(f)
 
 
-def run_baseline_benchmark():
+def run_benchmarks(training_method: str):
+    if training_method == "baseline":
+        replacement_model = model
+    elif "gemma_scope" in training_method:
+        pass
+    else:
+        saes = load_saes(
+            f"{CHECKPOINT_BASE_PATH}/{training_method}",
+            model.num_layers,
+            START_LAYER,
+        )
+        for sae in saes.values():
+            sae.eval()
+            sae.onload()
+        replacement_model = make_replacement_model(model, saes)
+
+    run_benchmark(
+        replacement_model,
+        tokenizer,
+        BenchmarkSpec(BenchmarkKind.mmlu, n_shots=5, subsets=["abstract_algebra"]),
+        tokenizer_batch_size=TOKENIZER_BATCH_SIZE,
+        inference_batch_size=BENCHMARK_BATCH_SIZE,
+    )
     # out_path = f"{BENCHMARK_BASE_PATH}/baseline"
     # if os.path.isfile(out_path):
     #     print("Skipping baseline, benchmark file already exists")
     #     return
 
-    os.makedirs(BENCHMARK_BASE_PATH, exist_ok=True)
-    mmlu = MMLUBenchmark(
-        tokenizer,
-        model.context_length,
-        tasks=MMLU_TASKS,
-    )
-    mmlu.evaluate(model=BenchmarkModel(model, tokenizer), batch_size=BENCHMARK_BATCH_SIZE)
+    # os.makedirs(BENCHMARK_BASE_PATH, exist_ok=True)
+    # mmlu = MMLUBenchmark(
+    #     tokenizer,
+    #     model.context_length,
+    #     tasks=MMLU_TASKS,
+    # )
+    # mmlu.evaluate(model=BenchmarkModel(model, tokenizer), batch_size=BENCHMARK_BATCH_SIZE)
     # boolq = BoolQBenchmark(tokenizer, model.context_length, n_shots=0)
     # boolq.evaluate(
     #     model=BenchmarkModel(model, tokenizer, is_multiple_choice=False),
@@ -230,8 +252,8 @@ def run_sae_benchmark(training_method: str, saes):
     # print(f"Wrote {out_path}")
 
 
-# run_baseline_benchmark()
-# sys.exit(0)
+run_benchmarks("next_layer_finetuned_lista_unit_scale")
+sys.exit(0)
 
 gemma_scope_saes = None
 for training_method in CHECKPOINT_TRAINING_METHODS:
