@@ -1,41 +1,25 @@
+import argparse
 import os
-import re
-import sys
-from concurrent.futures import ThreadPoolExecutor
-from importlib.resources import files
 
 import cloudpickle
 import torch
-import yaml
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from transformers_sae.benchmark import (
     BenchmarkKind,
-    # BenchmarkModel,
     BenchmarkSpec,
-    # BoolQBenchmark,
-    # MMLUBenchmark,
-    # MMLUTask,
     run_benchmark,
 )
-from transformers_sae.ops import (
-    MemoryTrackingMode,
-    find_latest_checkpoint,
-    load_checkpoint,
-    load_saes,
-)
+from transformers_sae.ops import MemoryTrackingMode, method_to_saes
 from transformers_sae.replacement_model import GemmaReplacement, make_replacement_model
 
 # Tweak TRAINING_BATCH_SIZE for your hardware if necessary
 if torch.cuda.is_available():
-    TRAINING_DEVICE = "cuda:0"
-    TRAINING_BATCH_SIZE = 2
+    TRAINING_DEVICE = torch.device("cuda:0")
 elif torch.mps.is_available():
-    TRAINING_DEVICE = "mps:0"
-    TRAINING_BATCH_SIZE = 2
+    TRAINING_DEVICE = torch.device("mps:0")
 else:
-    TRAINING_DEVICE = "cpu"
-    TRAINING_BATCH_SIZE = 2
+    TRAINING_DEVICE = torch.device("cpu")
 
 model_id = "google/gemma-2-2b"
 tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -43,48 +27,10 @@ tokenizer = AutoTokenizer.from_pretrained(model_id)
 HF_BUCKET_LOCAL = os.environ.get("HF_BUCKET_LOCAL")
 VALIDATION_BASE_PATH = f"{HF_BUCKET_LOCAL}/validations/gemma_2_2b"
 CHECKPOINT_BASE_PATH = f"{HF_BUCKET_LOCAL}/gemma_2_2b"
-BENCHMARK_BASE_PATH = f"{HF_BUCKET_LOCAL}/gemma_2_2b/benchmarks"
-NUM_TRAINING_TOKENS = int(1e8)
+BENCHMARK_BASE_PATH = f"{HF_BUCKET_LOCAL}/benchmarks/gemma_2_2b"
 TOKENIZER_BATCH_SIZE = 256
-
-# Somewhat arbitrary list of tasks; these are the first 10 from the DeepEval enum that
-# result in tokenizations that are short enough for our SAE's context window.
-# MMLU_TASKS = [
-#     MMLUTask.BUSINESS_ETHICS,
-#     MMLUTask.CLINICAL_KNOWLEDGE,
-#     MMLUTask.MEDICAL_GENETICS,
-#     MMLUTask.HIGH_SCHOOL_PHYSICS,
-#     MMLUTask.VIROLOGY,
-#     MMLUTask.HIGH_SCHOOL_MICROECONOMICS,
-#     MMLUTask.ECONOMETRICS,
-#     MMLUTask.COLLEGE_COMPUTER_SCIENCE,
-#     MMLUTask.HIGH_SCHOOL_BIOLOGY,
-#     MMLUTask.ABSTRACT_ALGEBRA,
-# ]
-
-BENCHMARK_BATCH_SIZE = 16
-# Validations are saved per start_layer; benchmarks use full replacement (all layers).
+INFERENCE_BATCH_SIZE = 16
 START_LAYER = 0
-
-CHECKPOINT_TRAINING_METHODS = (
-    # "next_layer_full_replacement_interaction_k_200",
-    # "next_layer_full_replacement_interaction",
-    # "next_layer_finetuned_interaction",
-    # "next_layer",
-    # "next_layer_interaction",
-    # "next_layer_finetuned",
-    # "next_layer_finetuned_lista",
-    # "next_layer_in_place_finetuned",
-    # "next_layer_lista_onsager_tuned_encoder_0",
-    "next_layer_finetuned_lista_onsager",
-    # "next_layer_finetuned_lista_tuned_encoder_0",
-)
-
-GEMMA_SCOPE_TRAINING_METHODS = (
-    # "gemma_scope",
-    # "gemma_scope_canonical_l0",
-    # "gemma_scope_100_l0",
-)
 
 gemma_release = "gemma-scope-2b-pt-res-canonical"
 
@@ -111,169 +57,121 @@ print(model)
 print(mtm.memory_max)
 print(mtm.memory_cur)
 
-with files("sae_lens").joinpath("pretrained_saes.yaml").open("r") as yaml_file:
-    yaml_data = yaml.safe_load(yaml_file)
-yaml_rows = [
-    row for row in yaml_data[gemma_release]["saes"] if "width_16k" in row["id"]
-]
-gemma_scope_sae_target_l0 = {
-    layer: int(re.match(r".+?average_l0_(\d+)", yd["path"]).group(1))
-    for layer in range(model.num_layers)
-    for yd in yaml_rows
-    if yd["id"] == f"layer_{layer}/width_16k/canonical"
-}
-
-
-def load_saes_gemma_scope():
-    saes = {}
-
-    def load_gemma_scope(layer):
-        sae = wrap_sae_lens_pretrained(
-            gemma_scope_sae_target_l0[layer],
-            release=gemma_release,
-            sae_id=f"layer_{layer}/width_16k/canonical",
-            device=TRAINING_DEVICE,
-        )
-        return layer, sae
-
-    with ThreadPoolExecutor() as executor:
-        results = executor.map(load_gemma_scope, range(model.num_layers - 1, -1, -1))
-        for layer, sae in results:
-            if sae is not None:
-                saes[layer] = sae
-
-    return saes
-
-
-def apply_replacement_thresholds(saes, replacement_thresholds):
-    for layer, sae in saes.items():
-        th = replacement_thresholds[layer]
-        if isinstance(sae, SAELensSAEWrapper):
-            sae.threshold_offset.fill_(th)
-        else:
-            for i, a in enumerate(sae.encoder.activation):
-                a.threshold.fill_(th[i])
-
-
-def load_activation_thresholds(training_method: str):
-    path = (
-        f"{VALIDATION_BASE_PATH}/{training_method}/{START_LAYER}.activation_thresholds"
-    )
-    with open(path, "rb") as f:
-        return cloudpickle.load(f)
-
 
 def run_benchmarks(training_method: str):
-    if training_method == "baseline":
-        replacement_model = model
-    elif "gemma_scope" in training_method:
-        pass
-    else:
-        saes = load_saes(
-            f"{CHECKPOINT_BASE_PATH}/{training_method}",
-            model.num_layers,
-            START_LAYER,
-        )
-        for sae in saes.values():
-            sae.eval()
-            sae.onload()
-        replacement_model = make_replacement_model(model, saes)
+    saes = method_to_saes(
+        CHECKPOINT_BASE_PATH,
+        training_method,
+        range(START_LAYER, model.num_layers),
+        TRAINING_DEVICE,
+    )
+    replacement_model = make_replacement_model(model, saes)
+    for sae in saes.values():
+        sae.eval()
+        sae.onload()
 
-    run_benchmark(
+    mmlu_result = run_benchmark(
         replacement_model,
         tokenizer,
-        BenchmarkSpec(BenchmarkKind.mmlu, n_shots=5, subsets=["abstract_algebra"]),
+        BenchmarkSpec(
+            BenchmarkKind.mmlu,
+            n_shots=5,
+            # subsets=["abstract_algebra"],
+            # subsets=[
+            #     "business_ethics",
+            #     "clinical_knowledge",
+            #     "medical_genetics",
+            #     "high_school_physics",
+            #     "virology",
+            #     "high_school_microeconomics",
+            #     "econometrics",
+            #     "college_computer_science",
+            #     "high_school_biology",
+            #     "abstract_algebra",
+            # ],
+            subsets=[
+                "abstract_algebra",
+                "anatomy",
+                "astronomy",
+                "business_ethics",
+                "clinical_knowledge",
+                "college_biology",
+                "college_chemistry",
+                "college_computer_science",
+                "college_mathematics",
+                "college_medicine",
+                "college_physics",
+                "computer_security",
+                "conceptual_physics",
+                "econometrics",
+                "electrical_engineering",
+                "elementary_mathematics",
+                "formal_logic",
+                "global_facts",
+                "high_school_biology",
+                "high_school_chemistry",
+                "high_school_computer_science",
+                "high_school_european_history",
+                "high_school_geography",
+                "high_school_government_and_politics",
+                "high_school_macroeconomics",
+                "high_school_mathematics",
+                "high_school_microeconomics",
+                "high_school_physics",
+                "high_school_psychology",
+                "high_school_statistics",
+                "high_school_us_history",
+                "high_school_world_history",
+                "human_aging",
+                "human_sexuality",
+                "international_law",
+                "jurisprudence",
+                "logical_fallacies",
+                "machine_learning",
+                "management",
+                "marketing",
+                "medical_genetics",
+                "miscellaneous",
+                "moral_disputes",
+                "moral_scenarios",
+                "nutrition",
+                "philosophy",
+                "prehistory",
+                "professional_accounting",
+                "professional_law",
+                "professional_medicine",
+                "professional_psychology",
+                "public_relations",
+                "security_studies",
+                "sociology",
+                "us_foreign_policy",
+                "virology",
+                "world_religions",
+            ],
+        ),
         tokenizer_batch_size=TOKENIZER_BATCH_SIZE,
-        inference_batch_size=BENCHMARK_BATCH_SIZE,
-    )
-    # out_path = f"{BENCHMARK_BASE_PATH}/baseline"
-    # if os.path.isfile(out_path):
-    #     print("Skipping baseline, benchmark file already exists")
-    #     return
-
-    # os.makedirs(BENCHMARK_BASE_PATH, exist_ok=True)
-    # mmlu = MMLUBenchmark(
-    #     tokenizer,
-    #     model.context_length,
-    #     tasks=MMLU_TASKS,
-    # )
-    # mmlu.evaluate(model=BenchmarkModel(model, tokenizer), batch_size=BENCHMARK_BATCH_SIZE)
-    # boolq = BoolQBenchmark(tokenizer, model.context_length, n_shots=0)
-    # boolq.evaluate(
-    #     model=BenchmarkModel(model, tokenizer, is_multiple_choice=False),
-    #     batch_size=BENCHMARK_BATCH_SIZE,
-    # )
-
-    # with open(out_path, "wb") as f:
-    #     cloudpickle.dump(
-    #         {"answer_stats": mmlu.answer_stats, "predictions": mmlu.predictions}, f
-    #     )
-    # print(f"Wrote {out_path}")
-
-
-def run_sae_benchmark(training_method: str, saes):
-    out_path = f"{BENCHMARK_BASE_PATH}/{training_method}"
-
-    assert len(saes) == model.num_layers, (
-        f"Missing SAEs for {training_method}, only had {set(saes.keys())}"
+        inference_batch_size=INFERENCE_BATCH_SIZE,
     )
 
-    # Try a variant with no threshold replacement
-    # if training_method != "gemma_scope":
-    #     replacement_thresholds = load_activation_thresholds(training_method)
-    #     apply_replacement_thresholds(saes, replacement_thresholds)
-
-    replacement_model = make_replacement_model(model, saes)
-
+    out_path = f"{BENCHMARK_BASE_PATH}/{training_method}_mmlu.parquet"
     os.makedirs(BENCHMARK_BASE_PATH, exist_ok=True)
-    mmlu = MMLUBenchmark(
-        tokenizer,
-        model.context_length,
-        tasks=MMLU_TASKS,
+    mmlu_result.to_parquet(out_path, index=True)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Run benchmarks for specified training method(s)"
     )
-    mmlu.evaluate(
-        model=BenchmarkModel(replacement_model, tokenizer),
-        batch_size=BENCHMARK_BATCH_SIZE,
+    parser.add_argument(
+        "-m",
+        "--method",
+        dest="training_methods",
+        action="append",
+        required=True,
+        help="Training method to use (may be specified multiple times, e.g. -m next_layer_lista_onsager -m next_layer)",
     )
-    boolq = BoolQBenchmark(
-        tokenizer,
-        model.context_length,
-        n_shots=0,
-        # n_problems=64,
-    )
-    boolq.evaluate(
-        model=BenchmarkModel(replacement_model, tokenizer, is_multiple_choice=False),
-        batch_size=BENCHMARK_BATCH_SIZE,
-    )
-    # with open(out_path, "wb") as f:
-    #     cloudpickle.dump(
-    #         {"answer_stats": mmlu.answer_stats, "predictions": mmlu.predictions}, f
-    #     )
-    # print(f"Wrote {out_path}")
+    args = parser.parse_args()
 
-
-run_benchmarks("next_layer_finetuned_lista_unit_scale")
-sys.exit(0)
-
-gemma_scope_saes = None
-for training_method in CHECKPOINT_TRAINING_METHODS:
-    out_path = f"{BENCHMARK_BASE_PATH}/{training_method}"
-    # if os.path.isfile(out_path):
-    #     print(f"Skipping {training_method}, benchmark file already exists")
-    #     continue
-
-    print(f"Running benchmarks for {training_method}")
-    saes = load_saes(f"{CHECKPOINT_BASE_PATH}/{training_method}", model.num_layers)
-    for sae in saes.values():
-        sae.onload()
-        sae.eval()
-    run_sae_benchmark(training_method, saes)
-
-for training_method in GEMMA_SCOPE_TRAINING_METHODS:
-    out_path = f"{BENCHMARK_BASE_PATH}/{training_method}"
-    if os.path.isfile(out_path):
-        print(f"Skipping {training_method}, benchmark file already exists")
-        continue
-    print(f"Running benchmarks for {training_method}")
-    saes = load_saes_gemma_scope()
-    run_sae_benchmark(training_method, saes)
+    for training_method in args.training_methods:
+        print(f"Running benchmarks for {training_method}...")
+        run_benchmarks(training_method)

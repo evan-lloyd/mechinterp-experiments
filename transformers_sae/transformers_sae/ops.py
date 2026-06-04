@@ -9,6 +9,7 @@ import weakref
 import zipfile
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from importlib.resources import files
 from io import StringIO
 from typing import (
     TYPE_CHECKING,
@@ -27,6 +28,7 @@ import cloudpickle
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import yaml
 from IPython.display import HTML, SVG, display
 from ml_dtypes import bfloat16
 from safetensors import safe_open
@@ -473,9 +475,7 @@ def save_validations(validations: Dict[int, "ValidationResult"], out_dir: str) -
             cloudpickle.dump(result, f)
 
 
-def load_saes(
-    checkpoint_dir: str, num_layers: int, start_layer: int = 0
-) -> Dict[int, "SAE"]:
+def load_saes(checkpoint_dir: str, layers: Iterable[int]) -> Dict[int, "SAE"]:
     saes = {}
     loaded_thresholds = {}
 
@@ -496,7 +496,7 @@ def load_saes(
             m = re.match(r"train_thresholds_(\d+)$", fname)
             if m:
                 idx = int(m.group(1))
-                if idx < start_layer:
+                if idx < min(layers):
                     continue
                 if min_idx is None or idx < min_idx:
                     min_idx = idx
@@ -526,9 +526,7 @@ def load_saes(
 
     # Load the latest checkpoints for each layer in parallel
     with ThreadPoolExecutor() as executor:
-        results = executor.map(
-            load_layer_checkpoint, range(num_layers - 1, start_layer - 1, -1)
-        )
+        results = executor.map(load_layer_checkpoint, layers)
         for layer, sae in results:
             if sae is not None:
                 saes[layer] = sae
@@ -867,3 +865,75 @@ def tensor_to_numpy(t: torch.Tensor) -> np.ndarray:
         # https://github.com/pytorch/pytorch/blob/60dc00dcd74dd7e22533b81eeb0e6382fbf9dea2/torch/onnx/_internal/exporter/_core.py#L140
         return t.view(torch.uint16).numpy().view(bfloat16)
     return t.numpy()
+
+
+GEMMA_SCOPE_RELEASE = "gemma-scope-2b-pt-res-canonical"
+
+
+def load_gemma_scope_saes(
+    layers: Iterable[int],
+    target_l0: int | None,
+    device: torch.device,
+):
+    from .sae_lens_wrapper import convert_sae_lens_pretrained
+
+    saes = {}
+
+    if target_l0 is None:
+        with files("sae_lens").joinpath("pretrained_saes.yaml").open("r") as yaml_file:
+            yaml_data = yaml.safe_load(yaml_file)
+        yaml_data = [
+            row
+            for row in yaml_data[GEMMA_SCOPE_RELEASE]["saes"]
+            if "width_16k" in row["id"]
+        ]
+        l0_by_layer = {
+            layer: int(re.match(r".+?average_l0_(\d+)", yd["path"]).group(1))
+            for layer in layers
+            for yd in yaml_data
+            if yd["id"] == f"layer_{layer}/width_16k/canonical"
+        }
+    else:
+        l0_by_layer = {layer: target_l0 for layer in layers}
+
+    def load_gemma_scope(layer):
+        sae = convert_sae_lens_pretrained(
+            l0_by_layer[layer],
+            release=GEMMA_SCOPE_RELEASE,
+            sae_id=f"layer_{layer}/width_16k/canonical",
+            device=device,
+        )
+        print(f"Loaded gemma scope {layer} with target L0={l0_by_layer[layer]}")
+        return layer, sae
+
+    # Load the latest checkpoints for each layer in parallel
+    with ThreadPoolExecutor() as executor:
+        results = executor.map(load_gemma_scope, layers)
+        for layer, sae in results:
+            if sae is not None:
+                saes[layer] = sae
+
+    return saes
+
+
+def method_to_saes(
+    base_path: str,
+    training_method: str,
+    layers: Iterable[int],
+    device: torch.device,
+) -> dict[int, "SAE"]:
+    if "gemma_scope" in training_method and "tuned_encoder" not in training_method:
+        if "canonical" in training_method or "l0" not in training_method:
+            target_l0 = None
+        else:
+            # gemma_scope_{target_l0}_l0
+            target_l0 = int(training_method.split("_")[2])
+        saes = load_gemma_scope_saes(layers, target_l0, device)
+    elif training_method != "baseline":
+        saes = load_saes(
+            f"{base_path}/{training_method}",
+            layers,
+        )
+    else:
+        saes = {}
+    return saes

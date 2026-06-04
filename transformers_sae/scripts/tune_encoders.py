@@ -1,15 +1,8 @@
 import os
-from concurrent.futures import ThreadPoolExecutor
-from importlib.resources import files
-
-import yaml
-
-from transformers_sae.sae_lens_wrapper import convert_sae_lens_pretrained
 
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 import argparse
-import re
 
 import numpy as np
 import torch
@@ -18,7 +11,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from transformers_sae.ops import (
     MemoryTrackingMode,
-    load_saes,
+    method_to_saes,
 )
 from transformers_sae.replacement_model import GemmaReplacement, make_replacement_model
 from transformers_sae.training import TrainingConfig, TrainingMethod, tune_encoder
@@ -26,13 +19,13 @@ from transformers_sae.validation import generate_with_replacement, run_validatio
 
 # Tweak TRAINING_BATCH_SIZE for your hardware if necessary
 if torch.cuda.is_available():
-    TRAINING_DEVICE = "cuda:0"
+    TRAINING_DEVICE = torch.device("cuda:0")
     TRAINING_BATCH_SIZE = 2
 elif torch.mps.is_available():
-    TRAINING_DEVICE = "mps:0"
+    TRAINING_DEVICE = torch.device("mps:0")
     TRAINING_BATCH_SIZE = 2
 else:
-    TRAINING_DEVICE = "cpu"
+    TRAINING_DEVICE = torch.device("cpu")
     TRAINING_BATCH_SIZE = 2
 
 model_id = "google/gemma-2-2b"
@@ -81,7 +74,6 @@ NUM_VALIDATION_TOKENS = int(1e6)
 NUM_ENCODER_TUNING_TOKENS = int(1e6)
 NUM_THRESHOLD_TUNING_TOKENS = int(1e6)
 NUM_TRAINING_TOKENS = int(5e7)
-# NUM_TRAINING_TOKENS = 0
 NUM_WARMUP_STEPS = 100
 
 FINETUNE_FRACTION = 0.2
@@ -134,64 +126,16 @@ parser.add_argument(
 args = parser.parse_args()
 
 
-GEMMA_SCOPE_RELEASE = "gemma-scope-2b-pt-res-canonical"
-def load_gemma_scope_saes(start_layer: int, end_layer: int, target_l0: int | None = None):
-    saes = {}
-
-    if target_l0 is None:
-        with files("sae_lens").joinpath("pretrained_saes.yaml").open("r") as yaml_file:
-            yaml_data = yaml.safe_load(yaml_file)
-        yaml_data = [
-            row for row in yaml_data[GEMMA_SCOPE_RELEASE]["saes"] if "width_16k" in row["id"]
-        ]
-        l0_by_layer = {
-            layer: int(re.match(r".+?average_l0_(\d+)", yd["path"]).group(1))
-            for layer in range(model.num_layers)
-            for yd in yaml_data
-            if yd["id"] == f"layer_{layer}/width_16k/canonical"
-        }
-    else:
-        l0_by_layer = {layer: target_l0 for layer in range(start_layer, end_layer + 1)}
-
-    def load_gemma_scope(layer):
-        sae = convert_sae_lens_pretrained(
-            l0_by_layer[layer],
-            release=GEMMA_SCOPE_RELEASE,
-            sae_id=f"layer_{layer}/width_16k/canonical",
-            device=TRAINING_DEVICE,
-        )
-        print(f"Loaded gemma scope {layer} with target L0={l0_by_layer[layer]}")
-        return layer, sae
-
-    # Load the latest checkpoints for each layer in parallel
-    with ThreadPoolExecutor() as executor:
-        results = executor.map(
-            load_gemma_scope, range(start_layer, end_layer + 1)
-        )
-        for layer, sae in results:
-            if sae is not None:
-                saes[layer] = sae
-
-    return saes
-
-
 for training_method in args.training_methods:
     results_path = f"{VALIDATION_BASE_PATH}/{training_method}"
 
-    if "gemma_scope" in training_method:
-        if "canonical" in training_method:
-            target_l0 = None
-        else:
-            # gemma_scope_{target_l0}_l0
-            target_l0 = int(training_method.split("_")[2])
-       
-        saes = load_gemma_scope_saes(START_LAYER, END_LAYER, target_l0)
-    else:
-        saes = load_saes(
-            f"{CHECKPOINT_BASE_PATH}/{training_method}",
-            END_LAYER + 1,
-            START_LAYER,
-        )
+    saes = method_to_saes(
+        CHECKPOINT_BASE_PATH,
+        training_method,
+        range(START_LAYER, END_LAYER + 1),
+        TRAINING_DEVICE,
+    )
+
     for start_layer in (START_LAYER,):
         print(
             f"Tuning encoders for {training_method} replacement starting at {start_layer}"

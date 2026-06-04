@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data import IterableDataset as TorchIterableDataset
 from transformers import AutoTokenizer
 
-from .data_batch import DataBatch, TokenizedExample, ExampleInfo
+from .data_batch import DataBatch, ExampleInfo, TokenizedExample
 from .replacement_model import ReplacementModel
 
 _DATASET_INPUT_COLUMN = "text"
@@ -20,6 +20,7 @@ def _ensure_tokenized(
     tokenizer: AutoTokenizer,
     context_length: int,
     include_example_info: bool = False,
+    skip_long_examples: bool = False,
 ) -> Dict[int, TokenizedExample]:
     needed_tokenizations = {
         i: _in[_DATASET_INPUT_COLUMN]
@@ -34,9 +35,10 @@ def _ensure_tokenized(
             list(needed_tokenizations.values()), return_attention_mask=False
         )["input_ids"]
         for idx, i in enumerate(needed_tokenizations):
-            examples[i] = TokenizedExample(
-                new_tokenizations[idx][:context_length], info=ExampleInfo()
-            )
+            tok_ids = new_tokenizations[idx]
+            if skip_long_examples and len(tok_ids) > context_length:
+                continue  # skip this example
+            examples[i] = TokenizedExample(tok_ids[:context_length], info=ExampleInfo())
             if include_example_info:
                 examples[i].info.original_example = inputs[i]
     return examples
@@ -101,9 +103,10 @@ def tokenize_strings(
     max_batch_size: Optional[int] = None,
     token_offset: int = 0,
     include_example_info: bool = False,
+    skip_long_examples: bool = False,
 ) -> Tuple[DataBatch, List[TokenizedExample]]:
     examples = _ensure_tokenized(
-        inputs, tokenizer, context_length, include_example_info
+        inputs, tokenizer, context_length, include_example_info, skip_long_examples
     )
 
     input_id_stack = []
@@ -317,6 +320,7 @@ def _input_generator(
     inference_batch_size: int = 1,
     offset: int = 0,
     include_example_info: bool = False,
+    skip_long_examples: bool = False,
 ) -> Generator[DataBatch]:
     zeros = torch.zeros((context_length, context_length), dtype=dtype)
     ones = torch.ones((context_length, context_length), dtype=dtype)
@@ -340,6 +344,7 @@ def _input_generator(
             inference_batch_size,
             offset - state.num_tokens_generated,
             include_example_info=include_example_info,
+            skip_long_examples=skip_long_examples,
         )
         # TODO: we should find a way to not have to tokenize everything up until this point. Unfortunately
         # we can't really just skip to a particular row of the dataset because of the way we pack into
@@ -405,6 +410,7 @@ def make_dataloader(
     offset: int = 0,
     max_batches: int | None = None,
     include_example_info: bool = False,
+    skip_long_examples: bool = False,
 ) -> DataLoader | Generator[DataBatch]:
     # If we're in fake tensor mode, mock out reading from the dataset
     if torch._guards.detect_fake_mode():
@@ -430,6 +436,7 @@ def make_dataloader(
                 inference_batch_size=inference_batch_size,
                 offset=offset,
                 include_example_info=include_example_info,
+                skip_long_examples=skip_long_examples,
             )
         )
 
@@ -438,7 +445,7 @@ def make_dataloader(
             return _make_iter()
 
     # Can't/don't want to serialize process args if we're on MacOS, so just return a regular iterator
-    if True or multiprocessing.get_start_method() == "spawn":
+    if multiprocessing.get_start_method() == "spawn":
         return _make_iter()
 
     return DataLoader(

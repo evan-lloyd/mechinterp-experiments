@@ -326,6 +326,30 @@ def kl_loss(
         return result.item()
 
 
+def ce_eval(
+    actual: torch.Tensor, batch: DataBatch, return_type: _ReturnType = "tensor"
+):
+    # We're predicting the next token, so shift the actual input ids to the left, and ignore final token
+    shifted_target = torch.concat(
+        (batch.input_ids[:, 1:], torch.full_like(batch.input_ids[:, -1:], -100)),
+        dim=1,
+    )
+    # Using nll_loss because we already have converted to log-probs
+    result = torch.nn.functional.nll_loss(
+        actual.view(actual.shape[0] * actual.shape[1], -1),
+        shifted_target.view(-1),
+        ignore_index=-100,
+        reduction="none",
+    ).view(actual.shape[0], actual.shape[1])[batch.token_mask]
+    if return_type == "np":
+        return tensor_to_numpy(result.flatten().cpu())
+    else:
+        result = result.mean()
+        if return_type == "tensor":
+            return result
+        return result.item()
+
+
 kl_eval = partial(kl_loss, overwrite_inputs=True)
 
 

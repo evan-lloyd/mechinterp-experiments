@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, overload
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch
@@ -17,7 +17,7 @@ from .activation_data import (
     make_activation_batch,
     make_batch_for_evals,
 )
-from .metrics import kl_eval, l0_eval, live_features_eval, rre_eval
+from .metrics import ce_eval, kl_eval, l0_eval, live_features_eval, rre_eval
 from .ops import generate
 from .replacement_model import ReplacementModel, make_replacement_model
 from .sae import SAE
@@ -31,6 +31,7 @@ class LayerEval:
     kl: np.ndarray | float | None = None
     l0: np.ndarray | float | None = None
     live_features: bitarray | float | None = None
+    ce: np.ndarray | float | None = None
 
     def update(self, other: "LayerEval"):
         for attr in self.__class__.__dataclass_fields__:
@@ -72,6 +73,7 @@ def run_validations(
     end_layer: Optional[int] = None,
     offload: bool = True,
     eval_layers: Optional[List[int]] = None,
+    use_train_activations: bool = False,
 ):
     if end_layer is None:
         end_layer = model.num_layers + 1
@@ -98,6 +100,8 @@ def run_validations(
         for layer in range(start_layer, end_layer):
             if layer in saes:
                 saes[layer].eval()
+                if use_train_activations:
+                    saes[layer].encoder.train_activations()
                 saes[layer].onload()
 
         for step, batch in enumerate(
@@ -302,8 +306,10 @@ def run_evals(
     layers: List[int],
     aggregate: bool = True,
 ) -> Dict[int, LayerEval]:
-    assert set(batch.baseline_activations.keys()) == set(
-        batch.replacement_activations.keys()
+    assert (
+        set(batch.baseline_activations.keys())
+        == set(batch.replacement_activations.keys())
+        or not batch.replacement_activations
     ), (
         f"Missing activations for evaluation: {batch.baseline_activations.keys()} != {batch.replacement_activations.keys()}"
     )
@@ -315,18 +321,28 @@ def run_evals(
 
     result = {}
     for layer in layers:
-        replacement = batch.replacement_activations[layer]
         baseline = batch.baseline_activations[layer]
         if baseline.log_probs is not None:
-            result[layer] = LayerEval(
-                kl=kl_eval(
-                    replacement.log_probs,
-                    baseline.log_probs,
-                    batch.input_data,
-                    eval_type,
+            # Non-baseline model, do full eval
+            if batch.replacement_layers:
+                replacement = batch.replacement_activations[layer]
+                result[layer] = LayerEval(
+                    # NB: putting CE first, because KL eval overwrites inputs by default
+                    ce=ce_eval(replacement.log_probs, batch.input_data, eval_type),
+                    kl=kl_eval(
+                        replacement.log_probs,
+                        baseline.log_probs,
+                        batch.input_data,
+                        eval_type,
+                    ),
                 )
-            )
-        else:
+            else:
+                # For baseline model, only CE makes sense
+                result[layer] = LayerEval(
+                    ce=ce_eval(baseline.log_probs, batch.input_data, eval_type)
+                )
+        elif batch.replacement_layers:
+            replacement = batch.replacement_activations[layer]
             result[layer] = LayerEval(
                 rre=rre_eval(
                     replacement.sae_output,
@@ -343,6 +359,9 @@ def run_evals(
                     eval_type,
                 ),
             )
+        else:
+            # These evals don't make sense for full baseline model
+            result[layer] = LayerEval()
 
     return result
 

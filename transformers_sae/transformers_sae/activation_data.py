@@ -189,6 +189,15 @@ def make_batch_for_evals(
                     layer_output=new_baseline_run[layer]
                 )
 
+    # For full baseline model, we don't need to run again
+    if not replacement_model.sae_layers:
+        return TrainingBatch(
+            training_batch.input_data,
+            {},
+            baseline_activations,
+            replacement_layers=[],
+        )
+
     # The existing batch may have not used a full replacement model. We can still shave off time
     # by starting at the first layer that wasn't replaced.
     missing_replacement_model_layers = sorted(

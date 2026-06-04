@@ -30,18 +30,7 @@ class MMLU(BenchmarkRunner):
     def prepare_dataset(self) -> IterableDataset:
         self.num_examples = 0
         datasets = []
-        for subject in (
-            "business_ethics",
-            "clinical_knowledge",
-            "medical_genetics",
-            "high_school_physics",
-            "virology",
-            "high_school_microeconomics",
-            "econometrics",
-            "college_computer_science",
-            "high_school_biology",
-            "abstract_algebra",
-        ):
+        for subject in self.subsets:
             base_dataset = load_dataset(
                 "cais/mmlu",
                 subject,
