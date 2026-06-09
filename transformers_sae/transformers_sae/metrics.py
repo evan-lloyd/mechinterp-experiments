@@ -360,6 +360,13 @@ def rre_eval(actual: torch.Tensor, target: torch.Tensor):
     )
 
 
+@_batch_gmean
+def geom_rre_eval(actual: torch.Tensor, target: torch.Tensor):
+    return torch.linalg.vector_norm(actual - target, dim=-1, dtype=torch.float32) / (
+        torch.linalg.vector_norm(target, dim=-1, dtype=torch.float32) + 1e-8
+    )
+
+
 def _target_only(
     fn: Callable[[torch.Tensor], torch.Tensor],
 ) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -32,6 +33,7 @@ class LayerEval:
     l0: np.ndarray | float | None = None
     live_features: bitarray | float | None = None
     ce: np.ndarray | float | None = None
+    idm_rre: np.ndarray | float | None = None
 
     def update(self, other: "LayerEval"):
         for attr in self.__class__.__dataclass_fields__:
@@ -48,7 +50,9 @@ class LayerEval:
                     getattr(other, attr), np.ndarray
                 ), "Trying to combine non-aggregated LayerEval"
                 setattr(
-                    self, attr, np.concat((getattr(self, attr), getattr(other, attr)))
+                    self,
+                    attr,
+                    np.concat((getattr(self, attr), getattr(other, attr)), axis=-1),
                 )
 
 
@@ -193,6 +197,174 @@ def run_validations(
 
 
 @torch.no_grad()
+def run_single_layer_rre(
+    model: ReplacementModel,
+    tokenizer: AutoTokenizer,
+    saes: Dict[int, SAE],
+    dataset: IterableDataset,
+    tokenizer_batch_size: int,
+    inference_batch_size: int,
+    num_tokens: Optional[int] = None,
+    num_batches: Optional[int] = None,
+    cache_dir: Optional[str] = None,
+    start_layer: int = 0,
+    end_layer: Optional[int] = None,
+    offload: bool = True,
+    eval_layers: Optional[List[int]] = None,
+    use_train_activations: bool = False,
+    idempotency_iterations: int = 0,
+):
+    if end_layer is None:
+        end_layer = model.num_layers
+    if eval_layers is None:
+        eval_layers = list(range(start_layer, end_layer))
+    try:
+        model.eval()
+        num_tokens_consumed = 0
+        results = ValidationResult(
+            layer_results={
+                layer: LayerEval() for layer in range(start_layer, end_layer)
+            },
+            position_ids=np.empty((0,)),
+        )
+
+        for layer in range(start_layer, end_layer):
+            if layer in saes:
+                saes[layer].eval()
+                if use_train_activations:
+                    saes[layer].encoder.train_activations()
+                saes[layer].onload()
+
+        for step, batch in enumerate(
+            make_dataloader(
+                model,
+                tokenizer,
+                dataset,
+                max_tokens=num_tokens,
+                tokenizer_batch_size=tokenizer_batch_size,
+                inference_batch_size=inference_batch_size,
+                max_batches=num_batches,
+            )
+        ):
+            if "progress" not in locals():
+                progress = tqdm(
+                    total=num_tokens
+                    or num_batches * inference_batch_size * batch.position_ids.shape[1],
+                    desc="Running SAE evals",
+                )
+            results.position_ids = np.concatenate(
+                (
+                    results.position_ids,
+                    batch.position_ids[batch.token_mask].flatten().cpu().numpy(),
+                ),
+                axis=0,
+            )
+
+            batch.to(model.device)
+
+            with torch.autocast(
+                device_type="cuda" if model.device.type == "cuda" else "cpu",
+                dtype=torch.bfloat16,
+            ):
+                if cache_dir is not None:
+                    baseline_run = load_cache(
+                        model.num_layers,
+                        cache_dir,
+                        step * inference_batch_size,
+                        batch,
+                    )
+                    baseline_activations = {}
+                    for k, v in baseline_run.items():
+                        if k in range(start_layer, end_layer):
+                            baseline_activations[k] = ActivationBatch(
+                                layer_output=v.to(model.device)
+                            )
+                else:
+                    baseline_activations = make_activation_batch(
+                        model,
+                        [(layer, "layer") for layer in eval_layers],
+                        batch,
+                        start_layer=-1,  # not cached, so we start from raw input
+                        end_layer=end_layer,
+                    )
+
+                replacement_activations = {}
+                idm_rre: dict[int, list[np.ndarray]] = {}
+                for layer in eval_layers:
+                    replacement_activations[layer] = ActivationBatch(
+                        sae_features=None, sae_output=None
+                    )
+
+                    def _capture_features(
+                        replacement_layer: int, _module, _args, out: torch.Tensor
+                    ):
+                        replacement_activations[replacement_layer].sae_features = out
+
+                    with saes[layer].encoder.register_forward_hook(
+                        partial(_capture_features, layer)
+                    ):
+                        replacement_activations[layer].sae_output = saes[layer](
+                            baseline_activations[layer].layer_output,
+                            token_mask=batch.token_mask,
+                        )
+
+                    idm_rre[layer] = []
+                    idm_input = replacement_activations[layer].sae_output
+                    for _ in range(idempotency_iterations):
+                        idm_input = saes[layer](idm_input, token_mask=batch.token_mask)
+                        idm_rre[layer].append(
+                            rre_eval(
+                                idm_input,
+                                baseline_activations[layer].layer_output,
+                                batch,
+                                "np",
+                            )
+                        )
+
+                eval_batch = TrainingBatch(
+                    batch,
+                    replacement_activations,
+                    baseline_activations,
+                    # Technically not true (it's a mix of replacement layers), but we only need it to be non-empty
+                    replacement_layers=eval_layers,
+                )
+                evals = run_evals(
+                    eval_batch,
+                    eval_layers,
+                    aggregate=False,
+                )
+                if idempotency_iterations > 0:
+                    for layer, eval in evals.items():
+                        assert eval.rre is not None
+
+                        # Aggregate for geometric mean, rather than storing every token's value
+                        eval.idm_rre = np.log(
+                            np.stack([eval.rre, *idm_rre[layer]]).clip(min=1e-9)
+                        ).sum(axis=-1, keepdims=True)
+
+            for layer in evals.keys():
+                results.layer_results[layer].update(evals[layer])
+
+            num_tokens_consumed += batch.num_tokens
+            progress.update(batch.num_tokens)
+
+        progress.total = num_tokens_consumed
+        progress.refresh()
+        progress.close()
+
+        return results
+
+    finally:
+        if offload:
+            try:
+                for layer in range(start_layer, end_layer):
+                    if layer in saes:
+                        saes[layer].offload()
+            except Exception:
+                pass
+
+
+@torch.no_grad()
 def run_single_layer_replacements(
     model: ReplacementModel,
     tokenizer: AutoTokenizer,
@@ -220,6 +392,7 @@ def run_single_layer_replacements(
 
         for layer in range(start_layer, end_layer):
             if layer in saes:
+                saes[layer].eval()
                 saes[layer].onload()
 
         for layer in range(start_layer, end_layer):

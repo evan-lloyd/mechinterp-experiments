@@ -459,7 +459,7 @@ def load_training_result(
     return result
 
 
-def save_validations(validations: Dict[int, "ValidationResult"], out_dir: str) -> None:
+def save_validations(validations: Dict[int | str, "ValidationResult"], out_dir: str) -> None:
     """Save a Dict[int, ValidationResult] to the given directory.
 
     Each ValidationResult is saved as {out_dir}/{key}.validation.cloudpickle.
@@ -534,7 +534,7 @@ def load_saes(checkpoint_dir: str, layers: Iterable[int]) -> Dict[int, "SAE"]:
     return saes
 
 
-def load_validations(from_dir: str) -> Dict[int, "ValidationResult"]:
+def load_validations(from_dir: str) -> Dict[int | str, "ValidationResult"]:
     """Load a Dict[int, ValidationResult] from the given directory.
 
     Loads all .validation.cloudpickle files and reconstructs the dictionary.
@@ -545,7 +545,10 @@ def load_validations(from_dir: str) -> Dict[int, "ValidationResult"]:
     def load_single(filename: str):
         if not filename.endswith(".validation.cloudpickle"):
             return
-        key = int(filename[: -len(".validation.cloudpickle")])
+        if filename.startswith("single_layer_rre"):
+            key = "single_layer_rre"
+        else:
+            key = int(filename[: -len(".validation.cloudpickle")])
         filepath = os.path.join(from_dir, filename)
         with open(filepath, "rb") as f:
             result = cloudpickle.load(f)
@@ -662,6 +665,28 @@ def current_plot_to_svg(filename: str | None = None, plot_dir: str = ".plots"):
         open(f"{plot_dir}/{filename}.svg", "w").write(plot_svg.read())
 
     return svg
+
+
+def df_to_markdown(df, filename=None, plot_dir: str = ".plots"):
+    """
+    Save a Pandas DataFrame as a markdown table and display it.
+
+    Args:
+        df (pd.DataFrame): The DataFrame to save and display.
+        filename (str, optional): If provided, saves the markdown table to the specified file.
+    """
+    import pandas as pd
+    from IPython.display import Markdown
+
+    if not isinstance(df, pd.DataFrame):
+        raise ValueError("Input must be a pandas DataFrame.")
+
+    markdown_str = df.round(4).fillna("-").to_markdown()
+    if filename is not None:
+        with open(f"{plot_dir}/{filename}.md", "w") as f:
+            f.write(markdown_str)
+
+    return Markdown(markdown_str)
 
 
 def ensure_tensor(

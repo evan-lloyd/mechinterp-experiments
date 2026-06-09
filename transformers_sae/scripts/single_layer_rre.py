@@ -10,7 +10,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from transformers_sae.ops import MemoryTrackingMode, method_to_saes, save_validations
 from transformers_sae.replacement_model import GemmaReplacement, make_replacement_model
-from transformers_sae.validation import generate_with_replacement, run_validations
+from transformers_sae.validation import run_single_layer_rre
 
 # Tweak TRAINING_BATCH_SIZE for your hardware if necessary
 if torch.cuda.is_available():
@@ -70,7 +70,6 @@ NUM_THRESHOLD_TUNING_TOKENS = int(1e6)
 NUM_TRAINING_TOKENS = int(5e7)
 FINETUNE_FRACTION = 0.2
 START_LAYER = 0
-END_LAYER = model.num_layers
 
 parser = argparse.ArgumentParser(
     description="Validate SAEs for specified training method(s)"
@@ -89,7 +88,7 @@ for training_method in args.training_methods:
     train_activations = "_train_activations" in training_method
     results_path = f"{VALIDATION_BASE_PATH}/{training_method}"
     validation_file = os.path.join(
-        results_path, f"{START_LAYER}.validation.cloudpickle"
+        results_path, "single_layer_rre.validation.cloudpickle"
     )
     if os.path.exists(validation_file):
         print(
@@ -103,60 +102,34 @@ for training_method in args.training_methods:
         range(START_LAYER, model.num_layers),
         TRAINING_DEVICE,
     )
-    if set(saes.keys()) != set(range(START_LAYER, END_LAYER)):
-        raise ValueError(f"Didn't find full range of SAEs for {training_method}")
+    if not saes:
+        raise ValueError("SAEs not found")
+    print(f"Running single-layer RRE for {training_method}")
 
-    for start_layer in (START_LAYER,):
-        print(
-            f"Running validations for {training_method} replacement starting at {start_layer}"
-        )
+    validations = run_single_layer_rre(
+        model,
+        tokenizer,
+        saes,
+        validation_dataset,
+        TOKENIZER_BATCH_SIZE,
+        TRAINING_BATCH_SIZE,
+        NUM_VALIDATION_TOKENS,
+        offload=False,
+        eval_layers=list(saes.keys()),
+        use_train_activations=train_activations,
+        idempotency_iterations=30,
+    )
+    save_validations({"single_layer_rre": validations}, results_path)
+    print(
+        f"mean rre={ {k: np.mean(v.rre).item() for k, v in validations.layer_results.items() if v.rre is not None} }"
+    )
+    print(
+        f"geom mean rre={ {k: np.exp(np.mean(np.log(np.clip(v.rre, a_min=1e-9, a_max=None)))).item() for k, v in validations.layer_results.items() if v.rre is not None} }"
+    )
 
-        validations = run_validations(
-            model,
-            tokenizer,
-            saes,
-            validation_dataset,
-            TOKENIZER_BATCH_SIZE,
-            TRAINING_BATCH_SIZE,
-            NUM_VALIDATION_TOKENS,
-            start_layer=start_layer,
-            offload=True,
-            eval_layers=list(saes.keys()) + [model.num_layers],
-            use_train_activations=train_activations,
-        )
-        save_validations({start_layer: validations}, results_path)
-
-        print(
-            f"{training_method} start layer {start_layer} metrics",
-        )
-        print(
-            f"mean rre={ {k: np.mean(v.rre).item() for k, v in validations.layer_results.items() if v.rre is not None} }"
-        )
-        print(
-            f"geom mean rre={ {k: np.exp(np.mean(np.log(np.clip(v.rre, a_min=1e-9, a_max=None)))).item() for k, v in validations.layer_results.items() if v.rre is not None} }"
-        )
-
-        print(
-            f"mean l0={ {k: np.mean(v.l0).item() for k, v in validations.layer_results.items() if v.l0 is not None} }"
-        )
-        print(
-            f"geom mean kl={ {k: np.exp(np.mean(np.log(np.clip(v.kl, min=1e-9)))).item() for k, v in validations.layer_results.items() if v.kl is not None} }"
-        )
-        print(
-            f"arith mean kl={ {k: np.mean(v.kl).item() for k, v in validations.layer_results.items() if v.kl is not None} }"
-        )
-        print(
-            f"live features={ {k: sum(v.live_features) / saes[k].config.d_sae for k, v in validations.layer_results.items() if v.live_features is not None} }"
-        )
-        # TODO: figure out why this breaks for train_activations gemma scope
-        # with torch.autocast(
-        #     device_type="cuda" if model.device.type == "cuda" else "cpu",
-        #     dtype=torch.bfloat16,
-        # ):
-        #     generate_with_replacement(
-        #         model,
-        #         tokenizer,
-        #         "The capital of France,",
-        #         saes,
-        #         offload=False,
-        #     )
+    print(
+        f"mean l0={ {k: np.mean(v.l0).item() for k, v in validations.layer_results.items() if v.l0 is not None} }"
+    )
+    print(
+        f"live features={ {k: sum(v.live_features) / saes[k].config.d_sae for k, v in validations.layer_results.items() if v.live_features is not None} }"
+    )

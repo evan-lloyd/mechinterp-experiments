@@ -63,17 +63,17 @@ print(model)
 print(mtm.memory_max)
 print(mtm.memory_cur)
 
-TRAINING_CACHE_DIR = None if torch.cuda.is_available() else ".training_cache"
-VALIDATION_CACHE_DIR = None if torch.cuda.is_available() else ".validation_cache"
-NUM_TRAINING_TOKENS = int(1e8) if torch.cuda.is_available() else int(1e6)
-EVAL_INTERVAL = int(1e6)
-NUM_VALIDATION_TOKENS = int(1e6) if torch.cuda.is_available() else int(1e5)
+TRAINING_CACHE_DIR = None
+VALIDATION_CACHE_DIR = None
+NUM_TRAINING_TOKENS = int(5e7)
+EVAL_INTERVAL = int(1e5)
+NUM_VALIDATION_TOKENS = int(1e6)
 # to match Gemma Scope
 D_SAE = 16384
 # D_SAE = model.d_model * 8
 TOPK = 100
 TOKENIZER_BATCH_SIZE = 256
-FINETUNE_FRACTION = 0.1
+FINETUNE_FRACTION = 0.2
 
 empty_saes = {
     layer: SAE(
@@ -91,7 +91,7 @@ empty_saes = {
 }
 
 
-def linear_decay_during_finetune(frac_trained: float):
+def linear_decay_during_finetune(frac_trained: float, **kwargs):
     if frac_trained < (1 - FINETUNE_FRACTION):
         return 1.0
     return 1.0 - (frac_trained - (1 - FINETUNE_FRACTION)) / FINETUNE_FRACTION
@@ -102,14 +102,14 @@ training_config = TrainingConfig(
     training_batch_size=TRAINING_BATCH_SIZE,
     num_train_tokens=NUM_TRAINING_TOKENS,
     eval_interval=EVAL_INTERVAL,
-    train_layers=[12],
-    # train_layers=list(range(model.num_layers)),
+    train_layers=list(range(model.num_layers)),
     betas=(
         0.0,
         0.999,
     ),  # TODO: is this actually good for our training method? not for tinystories anyway
     lr=1e-4,
     interaction_lr=1e-4,
+    threshold_lr=1e-2,
     lr_schedule=linear_decay_during_finetune,  # per Karvonen (2025)
     downstream_reconstruction_weight=1.0,
     reconstruction_weight=1.0,
@@ -131,8 +131,9 @@ training_results = train(
             int(1e7),
         )
     ),
-    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/standard/",
+    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/standard_fresh_init/",
     force_retrain=False,
+    fresh_init=True,
 )
 
 validations = run_validations(

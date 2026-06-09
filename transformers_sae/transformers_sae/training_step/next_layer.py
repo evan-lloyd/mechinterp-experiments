@@ -87,7 +87,6 @@ class NextLayerTrainingStepper(SingleSAEStepper):
                     self.target_layer + 1
                 ].sae_features,
                 training_batch.baseline_activations[self.target_layer + 1].sae_features,
-                training_batch.input_data,
             )
 
         reconstruction_loss = mse_loss(

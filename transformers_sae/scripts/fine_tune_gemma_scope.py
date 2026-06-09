@@ -1,11 +1,12 @@
+import os
+
 import numpy as np
 import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from transformers_sae.ops import MemoryTrackingMode
+from transformers_sae.ops import MemoryTrackingMode, load_saes
 from transformers_sae.replacement_model import GemmaReplacement, make_replacement_model
-from transformers_sae.sae import SAE, make_sae_config
 from transformers_sae.training import (
     TrainingConfig,
     TrainingMethod,
@@ -64,43 +65,25 @@ print(model)
 print(mtm.memory_max)
 print(mtm.memory_cur)
 
-TRAINING_CACHE_DIR = None
-VALIDATION_CACHE_DIR = None
 NUM_TRAINING_TOKENS = int(5e7)
+NUM_FINETUNE_TOKENS = int(1e7)
+TOTAL_TOKENS = NUM_TRAINING_TOKENS + NUM_FINETUNE_TOKENS
+FINETUNE_FRACTION = NUM_FINETUNE_TOKENS / TOTAL_TOKENS
 EVAL_INTERVAL = int(1e5)
 NUM_VALIDATION_TOKENS = int(1e6)
-# to match Gemma Scope
-D_SAE = 16384
-# D_SAE = model.d_model * 16  # 36,864
-D_MODEL = model.d_model
-TOPK = 100
 TOKENIZER_BATCH_SIZE = 256
-FINETUNE_FRACTION = 0.2
-N_ITERATIONS = 5
+CHECKPOINT_BASE_PATH = f"{os.getenv('HF_BUCKET_LOCAL')}/gemma_2_2b/"
 
-empty_saes = {
-    layer: SAE(
-        make_sae_config(
-            d_model=model.d_model,
-            d_sae=D_SAE,
-            device=TRAINING_DEVICE,
-            train_dtype=torch.float32,
-            inference_dtype=torch.bfloat16,
-            activation_kind="batch_topk",
-            top_k=list(range(TOPK // N_ITERATIONS, TOPK + 1, TOPK // N_ITERATIONS)),
-            encoder_kind="lista",
-            n_iterations=N_ITERATIONS,
-            extra_encoder_config_kwargs={
-                "use_onsager_correction": True,
-                "force_unit_scale": True,
-            },
-        )
-    )
-    for layer in range(model.num_layers)
-}
+FINE_TUNE_SOURCE_DIR = (
+    f"{CHECKPOINT_BASE_PATH}/gemma_scope_100_l0_tuned_encoder_0"
+)
 
-print(empty_saes[0])
-print([a.config.k for a in empty_saes[0].encoder.activation if hasattr(a.config, "k")])
+saes = load_saes(
+    FINE_TUNE_SOURCE_DIR,
+    range(model.num_layers),
+)
+for sae in saes.values():
+    sae.onload()
 
 
 def linear_decay_during_finetune(frac_trained: float, **kwargs):
@@ -112,10 +95,10 @@ def linear_decay_during_finetune(frac_trained: float, **kwargs):
 training_config = TrainingConfig(
     tokenizer_batch_size=TOKENIZER_BATCH_SIZE,
     training_batch_size=TRAINING_BATCH_SIZE,
-    num_train_tokens=NUM_TRAINING_TOKENS,
+    num_train_tokens=TOTAL_TOKENS,
     eval_interval=EVAL_INTERVAL,
-    # train_layers=list(range(10, model.num_layers)),
     train_layers=list(range(0, model.num_layers)),
+    # train_layers=list(range(model.num_layers - 2, model.num_layers)),
     betas=(
         0.0,
         0.999,
@@ -127,29 +110,22 @@ training_config = TrainingConfig(
     downstream_reconstruction_weight=1.0,
     reconstruction_weight=1.0,
     balance_reconstruction_losses=True,
-    method=TrainingMethod.standard,
+    method=TrainingMethod.in_place_finetuned,
+    finetune_fraction=FINETUNE_FRACTION,
 )
-
-training_results = {}
-validation_results = {}
 
 training_results = train(
     model,
     tokenizer,
-    empty_saes,
+    saes,
     training_dataset,
     training_config,
-    cache_dir=TRAINING_CACHE_DIR,
-    checkpoints_at=list(
-        range(
-            int(1e7),
-            training_config.num_train_tokens,
-            int(1e7),
-        )
-    ),
-    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/standard_lista_unit_scale/",
+    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/gemma_scope_100_l0_in_place_finetuned",
+    fine_tune_source_dir=FINE_TUNE_SOURCE_DIR,
     force_retrain=False,
     offload_after_training=False,
+    fine_tune_in_place=True,
+    override_token_offset=NUM_TRAINING_TOKENS,
 )
 
 validations = run_validations(
@@ -160,13 +136,15 @@ validations = run_validations(
     TOKENIZER_BATCH_SIZE,
     TRAINING_BATCH_SIZE,
     NUM_VALIDATION_TOKENS,
-    cache_dir=VALIDATION_CACHE_DIR,
     start_layer=training_config.train_layers[0],
     offload=False,
 )
 
 print(
     f"mean rre={ {k: np.mean(v.rre).item() for k, v in validations.layer_results.items() if v.rre is not None} }"
+)
+print(
+    f"geom mean rre={ {k: np.exp(np.mean(np.log(np.clip(v.rre, a_min=1e-9, a_max=None)))).item() for k, v in validations.layer_results.items() if v.rre is not None} }"
 )
 print(
     f"mean l0={ {k: np.mean(v.l0).item() for k, v in validations.layer_results.items() if v.l0 is not None} }"
@@ -178,9 +156,8 @@ print(
     f"arith mean kl={ {k: np.mean(v.kl).item() for k, v in validations.layer_results.items() if v.kl is not None} }"
 )
 print(
-    f"live features={ {k: sum(v.live_features) / D_SAE for k, v in validations.layer_results.items() if v.live_features is not None} }"
+    f"live features={ {k: sum(v.live_features) / saes[k].config.d_sae for k, v in validations.layer_results.items() if v.live_features is not None} }"
 )
-
 
 with torch.autocast(
     device_type="cuda" if model.device.type == "cuda" else "cpu",

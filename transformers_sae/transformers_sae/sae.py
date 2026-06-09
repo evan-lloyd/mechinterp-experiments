@@ -284,7 +284,6 @@ class SAE(torch.nn.Module):
         self,
         x: torch.Tensor,
         *args,
-        pass_through_positions: torch.Tensor,
         token_mask: torch.Tensor,
         feature_soft_cap: Optional[torch.Tensor] = None,
         **kwargs,

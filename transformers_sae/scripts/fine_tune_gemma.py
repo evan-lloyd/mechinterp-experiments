@@ -17,7 +17,7 @@ from transformers_sae.validation import generate_with_replacement, run_validatio
 # Tweak TRAINING_BATCH_SIZE for your hardware if necessary
 if torch.cuda.is_available():
     TRAINING_DEVICE = "cuda:0"
-    TRAINING_BATCH_SIZE = 1
+    TRAINING_BATCH_SIZE = 2
 elif torch.mps.is_available():
     TRAINING_DEVICE = "mps:0"
     TRAINING_BATCH_SIZE = 2
@@ -65,21 +65,16 @@ print(model)
 print(mtm.memory_max)
 print(mtm.memory_cur)
 
-NUM_TRAINING_TOKENS = int(1e8)
+NUM_TRAINING_TOKENS = int(5e7)
 NUM_FINETUNE_TOKENS = int(1e7)
 TOTAL_TOKENS = NUM_TRAINING_TOKENS + NUM_FINETUNE_TOKENS
 FINETUNE_FRACTION = NUM_FINETUNE_TOKENS / TOTAL_TOKENS
 EVAL_INTERVAL = int(1e5)
 NUM_VALIDATION_TOKENS = int(1e6)
 TOKENIZER_BATCH_SIZE = 256
-
 CHECKPOINT_BASE_PATH = f"{os.getenv('HF_BUCKET_LOCAL')}/gemma_2_2b/"
-saes = load_saes(
-    f"{CHECKPOINT_BASE_PATH}/next_layer_tuned_encoder_0",
-    model.num_layers,
-)
-for sae in saes.values():
-    sae.onload()
+
+FINE_TUNE_SOURCE_DIR = f"{CHECKPOINT_BASE_PATH}/standard"
 
 
 def linear_decay_during_finetune(frac_trained: float, **kwargs):
@@ -106,21 +101,22 @@ training_config = TrainingConfig(
     downstream_reconstruction_weight=1.0,
     reconstruction_weight=1.0,
     balance_reconstruction_losses=True,
-    method=TrainingMethod.in_place_finetuned,
+    method=TrainingMethod.finetuned,
     finetune_fraction=FINETUNE_FRACTION,
 )
 
 training_results = train(
     model,
     tokenizer,
-    saes,
+    {},
     training_dataset,
     training_config,
-    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_in_place_finetuned/",
+    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/standard_finetuned",
+    fine_tune_source_dir=FINE_TUNE_SOURCE_DIR,
     force_retrain=False,
     offload_after_training=False,
-    fine_tune_in_place=True,
-    override_token_offset=NUM_TRAINING_TOKENS,
+    fine_tune_in_place=False,
+    # override_token_offset=NUM_TRAINING_TOKENS,
 )
 
 validations = run_validations(
@@ -151,20 +147,20 @@ print(
     f"arith mean kl={ {k: np.mean(v.kl).item() for k, v in validations.layer_results.items() if v.kl is not None} }"
 )
 print(
-    f"live features={ {k: sum(v.live_features) / saes[k].config.d_sae for k, v in validations.layer_results.items() if v.live_features is not None} }"
+    f"live features={ {k: sum(v.live_features) / training_results.final_saes[k].config.d_sae for k, v in validations.layer_results.items() if v.live_features is not None} }"
 )
 
-with torch.autocast(
-    device_type="cuda" if model.device.type == "cuda" else "cpu",
-    dtype=torch.bfloat16,
-):
-    generate_with_replacement(
-        model,
-        tokenizer,
-        "The capital of France,",
-        {
-            layer: sae
-            for layer, sae in training_results.final_saes.items()
-            if layer >= training_config.train_layers[0]
-        },
-    )
+# with torch.autocast(
+#     device_type="cuda" if model.device.type == "cuda" else "cpu",
+#     dtype=torch.bfloat16,
+# ):
+#     generate_with_replacement(
+#         model,
+#         tokenizer,
+#         "The capital of France,",
+#         {
+#             layer: sae
+#             for layer, sae in training_results.final_saes.items()
+#             if layer >= training_config.train_layers[0]
+#         },
+#     )

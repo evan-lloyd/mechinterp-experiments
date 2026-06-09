@@ -102,7 +102,6 @@ class FullReplacementTrainingStepper(MultiSAEStepper):
             feature_loss += cos_dist_loss(
                 training_batch.replacement_activations[layer].sae_features,
                 training_batch.baseline_activations[layer].sae_features,
-                training_batch.input_data,
             ) / (self.base_model.num_layers - 1)
 
         downstream_kl_loss = kl_loss(

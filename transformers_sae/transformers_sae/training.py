@@ -826,7 +826,7 @@ def tune_encoder(
                             for save_layer, sae in training_saes.items()
                         },
                         f,
-                    )            
+                    )
             training_sae.eval()
             training_sae.encoder.train_activations()
             # end for each layer
@@ -1264,6 +1264,7 @@ def train(
     skip_kl_eval: bool = False,
     fine_tune_in_place: bool = False,
     override_token_offset: Optional[int] = None,
+    fresh_init: bool = False,
 ) -> TrainingResult:
     try:
         model.eval()
@@ -1274,11 +1275,13 @@ def train(
 
         if fine_tune_in_place:
             training_saes = initial_saes
-        else:
+        elif fine_tune_source_dir is None:
             training_saes = {
                 layer: SAE(deepcopy(initial_saes[layer].config))
                 for layer in config.train_layers
             }
+        else:
+            training_saes = {}
         train_result = TrainingResult(training_saes)
 
         for layer in sorted(config.train_layers, reverse=True):
@@ -1328,11 +1331,11 @@ def train(
                     token_offset = override_token_offset
                 print(f"Loading {source_checkpoint} for finetuning")
                 sae = load_checkpoint(source_checkpoint).sae
+                assert sae is not None and token_offset is not None
                 training_saes[layer] = sae
-                train_result._layer_results[layer][-1].sae = sae
-                train_result._layer_results[layer][
-                    -1
-                ].total_tokens_trained = token_offset
+                train_result._layer_results[layer] = [
+                    SAECheckpoint(sae=sae, total_tokens_trained=token_offset)
+                ]
                 sae.onload()
                 if fine_tune_in_place:
                     try:
@@ -1352,7 +1355,10 @@ def train(
             else:
                 # Init weights from next layer, if it exists
                 sae = training_saes[layer]
-                sae.init_weights(training_saes.get(layer + 1))
+                if fresh_init:
+                    sae.init_weights(None)
+                else:
+                    sae.init_weights(training_saes.get(layer + 1))
                 token_offset = 0
 
             sae.set_activation_threshold_lr(config.threshold_lr[layer])

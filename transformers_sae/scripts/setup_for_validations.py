@@ -41,7 +41,7 @@ def _discover_latest_checkpoints(bucket_id: str):
         if getattr(item, "type", None) == "directory":
             continue
         path = getattr(item, "path", None) or str(item)
-        if not path.endswith(".checkpoint"):
+        if not path.endswith(".checkpoint") or "_old" in path:
             continue
         parts = path.split("/")
         if len(parts) < 3:
