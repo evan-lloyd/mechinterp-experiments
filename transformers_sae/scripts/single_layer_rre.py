@@ -117,7 +117,7 @@ for training_method in args.training_methods:
         offload=False,
         eval_layers=list(saes.keys()),
         use_train_activations=train_activations,
-        idempotency_iterations=30,
+        idempotency_iterations=0,
     )
     save_validations({"single_layer_rre": validations}, results_path)
     print(

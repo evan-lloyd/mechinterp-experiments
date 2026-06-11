@@ -445,7 +445,7 @@ def make_dataloader(
             return _make_iter()
 
     # Can't/don't want to serialize process args if we're on MacOS, so just return a regular iterator
-    if multiprocessing.get_start_method() == "spawn":
+    if True or multiprocessing.get_start_method() == "spawn":
         return _make_iter()
 
     return DataLoader(

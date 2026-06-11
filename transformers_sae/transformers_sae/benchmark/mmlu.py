@@ -11,6 +11,12 @@ class MMLU(BenchmarkRunner):
     def valid_answers(self):
         return [" A", " B", " C", " D"]
 
+    def get_answer_index(self, example: dict[str, Any]) -> str:
+        return example["answer"]
+
+    def get_subset(self, example: dict[str, Any]) -> str:
+        return example["subject"]
+
     def format_example(self, example: dict[str, Any], with_answer: bool) -> str:
         prompt = example["question"]
         for i, a in enumerate(self.valid_answers):
@@ -21,10 +27,7 @@ class MMLU(BenchmarkRunner):
         return prompt
 
     def make_prompt(self, prelude: str, example: dict[str, Any]) -> dict[str, Any]:
-        prompt = prelude + "\n\n" + example["question"]
-        prompt += self.format_example(example, False)
-
-        example["text"] = prompt
+        example["text"] = prelude + "\n\n" + self.format_example(example, False)
         return example
 
     def prepare_dataset(self) -> IterableDataset:

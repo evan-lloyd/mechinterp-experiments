@@ -1,7 +1,6 @@
 import argparse
 import os
 
-import cloudpickle
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -58,104 +57,129 @@ print(mtm.memory_max)
 print(mtm.memory_cur)
 
 
+BENCHMARK_SPECS = {
+    "mmlu": BenchmarkSpec(
+        BenchmarkKind.mmlu,
+        n_shots=5,
+        # subsets=["abstract_algebra"],
+        # subsets=[
+        #     "business_ethics",
+        #     "clinical_knowledge",
+        #     "medical_genetics",
+        #     "high_school_physics",
+        #     "virology",
+        #     "high_school_microeconomics",
+        #     "econometrics",
+        #     "college_computer_science",
+        #     "high_school_biology",
+        #     "abstract_algebra",
+        # ],
+        subsets=[
+            "abstract_algebra",
+            "anatomy",
+            "astronomy",
+            "business_ethics",
+            "clinical_knowledge",
+            "college_biology",
+            "college_chemistry",
+            "college_computer_science",
+            "college_mathematics",
+            "college_medicine",
+            "college_physics",
+            "computer_security",
+            "conceptual_physics",
+            "econometrics",
+            "electrical_engineering",
+            "elementary_mathematics",
+            "formal_logic",
+            "global_facts",
+            "high_school_biology",
+            "high_school_chemistry",
+            "high_school_computer_science",
+            "high_school_european_history",
+            "high_school_geography",
+            "high_school_government_and_politics",
+            "high_school_macroeconomics",
+            "high_school_mathematics",
+            "high_school_microeconomics",
+            "high_school_physics",
+            "high_school_psychology",
+            "high_school_statistics",
+            "high_school_us_history",
+            "high_school_world_history",
+            "human_aging",
+            "human_sexuality",
+            "international_law",
+            "jurisprudence",
+            "logical_fallacies",
+            "machine_learning",
+            "management",
+            "marketing",
+            "medical_genetics",
+            "miscellaneous",
+            "moral_disputes",
+            "moral_scenarios",
+            "nutrition",
+            "philosophy",
+            "prehistory",
+            "professional_accounting",
+            "professional_law",
+            "professional_medicine",
+            "professional_psychology",
+            "public_relations",
+            "security_studies",
+            "sociology",
+            "us_foreign_policy",
+            "virology",
+            "world_religions",
+        ],
+    ),
+    "arc-e": BenchmarkSpec(BenchmarkKind.arc_e, 0, []),
+}
+
+# For dev purposes, allow forcing re-run of specific benchmarks
+OVERRIDE_EXISTING_BENCHMARKS = {"mmlu"}
+
+
 def run_benchmarks(training_method: str):
+    def _out_path(name: str):
+        return f"{BENCHMARK_BASE_PATH}/{training_method}_{name}.parquet"
+
+    specs_to_run = {
+        k: v
+        for k, v in BENCHMARK_SPECS.items()
+        if not os.path.exists(_out_path(k)) or k in OVERRIDE_EXISTING_BENCHMARKS
+    }
+    if not specs_to_run:
+        print(f"Skipping benchmarks for {training_method}; all already exist")
+        return
+
+    print(f"Running benchmarks for {training_method}: {list(specs_to_run.keys())}")
     saes = method_to_saes(
         CHECKPOINT_BASE_PATH,
         training_method,
         range(START_LAYER, model.num_layers),
         TRAINING_DEVICE,
     )
+    if len(saes) != model.num_layers - START_LAYER and training_method != "baseline":
+        raise RuntimeError(f"Missing SAEs for {training_method}, aborting run")
+
     replacement_model = make_replacement_model(model, saes)
     for sae in saes.values():
         sae.eval()
         sae.onload()
 
-    mmlu_result = run_benchmark(
-        replacement_model,
-        tokenizer,
-        BenchmarkSpec(
-            BenchmarkKind.mmlu,
-            n_shots=5,
-            # subsets=["abstract_algebra"],
-            # subsets=[
-            #     "business_ethics",
-            #     "clinical_knowledge",
-            #     "medical_genetics",
-            #     "high_school_physics",
-            #     "virology",
-            #     "high_school_microeconomics",
-            #     "econometrics",
-            #     "college_computer_science",
-            #     "high_school_biology",
-            #     "abstract_algebra",
-            # ],
-            subsets=[
-                "abstract_algebra",
-                "anatomy",
-                "astronomy",
-                "business_ethics",
-                "clinical_knowledge",
-                "college_biology",
-                "college_chemistry",
-                "college_computer_science",
-                "college_mathematics",
-                "college_medicine",
-                "college_physics",
-                "computer_security",
-                "conceptual_physics",
-                "econometrics",
-                "electrical_engineering",
-                "elementary_mathematics",
-                "formal_logic",
-                "global_facts",
-                "high_school_biology",
-                "high_school_chemistry",
-                "high_school_computer_science",
-                "high_school_european_history",
-                "high_school_geography",
-                "high_school_government_and_politics",
-                "high_school_macroeconomics",
-                "high_school_mathematics",
-                "high_school_microeconomics",
-                "high_school_physics",
-                "high_school_psychology",
-                "high_school_statistics",
-                "high_school_us_history",
-                "high_school_world_history",
-                "human_aging",
-                "human_sexuality",
-                "international_law",
-                "jurisprudence",
-                "logical_fallacies",
-                "machine_learning",
-                "management",
-                "marketing",
-                "medical_genetics",
-                "miscellaneous",
-                "moral_disputes",
-                "moral_scenarios",
-                "nutrition",
-                "philosophy",
-                "prehistory",
-                "professional_accounting",
-                "professional_law",
-                "professional_medicine",
-                "professional_psychology",
-                "public_relations",
-                "security_studies",
-                "sociology",
-                "us_foreign_policy",
-                "virology",
-                "world_religions",
-            ],
-        ),
-        tokenizer_batch_size=TOKENIZER_BATCH_SIZE,
-        inference_batch_size=INFERENCE_BATCH_SIZE,
-    )
+    for name, spec in specs_to_run.items():
+        result = run_benchmark(
+            replacement_model,
+            tokenizer,
+            spec,
+            tokenizer_batch_size=TOKENIZER_BATCH_SIZE,
+            inference_batch_size=INFERENCE_BATCH_SIZE,
+        )
 
-    out_path = f"{BENCHMARK_BASE_PATH}/{training_method}_mmlu.parquet"
-    os.makedirs(BENCHMARK_BASE_PATH, exist_ok=True)
-    mmlu_result.to_parquet(out_path, index=True)
+        os.makedirs(BENCHMARK_BASE_PATH, exist_ok=True)
+        result.to_parquet(_out_path(name), index=True)
 
 
 if __name__ == "__main__":
@@ -173,5 +197,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     for training_method in args.training_methods:
-        print(f"Running benchmarks for {training_method}...")
         run_benchmarks(training_method)

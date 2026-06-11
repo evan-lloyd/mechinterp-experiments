@@ -19,7 +19,6 @@ dependencies = [
     "transformers[mistral-common]>=4.57.3",
     "zarr>=3.1.5",
     "sae-bench>=0.5.1",
-    "deepeval>=3.9.3",
     "deepspeed>=0.18.9",
     "mpi4py>=4.1.1",
     "mpich>=5.0.0",

@@ -1,4 +1,3 @@
-from torch.nn.functional import cross_entropy
 from dataclasses import dataclass
 from enum import Enum
 
@@ -10,16 +9,19 @@ from ..activation_data import make_activation_batch
 from ..multiline_progress import MultilineProgress
 from ..replacement_model import ReplacementModel
 from ..tokenization import make_dataloader
+from .arc_e import ArcE
 from .benchmark_runner import BenchmarkRunner
 from .mmlu import MMLU
 
 
 class BenchmarkKind(Enum):
     mmlu = "MMLU"
+    arc_e = "Arc-E"
 
 
 _BENCHMARK_RUNNER: dict[BenchmarkKind, type[BenchmarkRunner]] = {
-    BenchmarkKind.mmlu: MMLU
+    BenchmarkKind.mmlu: MMLU,
+    BenchmarkKind.arc_e: ArcE,
 }
 
 
@@ -124,7 +126,10 @@ def run_benchmark(
             correct_answer_probs = valid_answer_logprobs.gather(
                 1,
                 torch.tensor(
-                    [ex.original_example["answer"] for ex in batch.example_info],
+                    [
+                        runner.get_answer_index(ex.original_example)
+                        for ex in batch.example_info
+                    ],
                     device=model.device,
                 ).unsqueeze(-1),
             ).exp()
@@ -150,9 +155,9 @@ def run_benchmark(
                 example_results.append(
                     BenchmarkExampleResult(
                         prompt=ex.original_example["text"],
-                        subset=ex.original_example["subject"],
+                        subset=runner.get_subset(ex.original_example),
                         correct_answer=runner.valid_answers[
-                            ex.original_example["answer"]
+                            runner.get_answer_index(ex.original_example)
                         ],
                         actual_answer=top_logit_answers[i],
                         forced_valid_answer=forced_valid_answers[i],
@@ -163,14 +168,16 @@ def run_benchmark(
                         / (any_valid_answer_probs[i].item() + 1e-8),
                     )
                 )
-            progress.update(batch.num_dataset_rows)
             progress.set_postfix(
                 {
                     "subjects": set(
-                        ex.original_example["subject"] for ex in batch.example_info
+                        runner.get_subset(ex.original_example)
+                        for ex in batch.example_info
                     )
-                }
+                },
+                refresh=False,
             )
+            progress.update(batch.num_dataset_rows)
     progress.close()
 
     df = pd.DataFrame([vars(er) for er in example_results])
