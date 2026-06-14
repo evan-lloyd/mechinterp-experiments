@@ -476,7 +476,6 @@ def tune_encoder(
                 for k in ("total_loss", "cur_layer_loss", "next_layer_loss")
                 + tuple(f"rre_{metric_layer}" for metric_layer in layers_to_tune)
             }
-            metrics["num_skipped_batches"] = 0
             num_used_tokens = 0
             num_used_encoder_tokens = None
             optimizer = make_optimizer(
@@ -601,23 +600,12 @@ def tune_encoder(
                         ].layer_output
                         del replacement_activations
 
-                        # max_feature_scale = 10 * cur_layer_expected_features.max()
-                        # tokens_to_skip = (
-                        #     cur_layer_actual_features > max_feature_scale
-                        # ).any(dim=-1)
-
-                        # if features_to_clip.any():
-                        #     # breakpoint()
-                        #     print(f"skipped {features_to_clip.sum()} tokens")
-
                         cur_layer_loss = feature_mse_loss(
                             cur_layer_actual_features,
                             cur_layer_expected_features,
-                            # batch,
-                            # 0.1,
                         )
-                        # del cur_layer_actual_features
-                        # del cur_layer_expected_features
+                        del cur_layer_actual_features
+                        del cur_layer_expected_features
 
                         if layer + 1 in training_saes:
                             with torch.no_grad():
@@ -627,36 +615,16 @@ def tune_encoder(
                                 batch.token_mask,
                                 feature_soft_cap=max_feature_scale,
                             )
-                            # actual_features, _ = hook_input(
-                            #     training_saes[layer + 1].encoder.activation[-1],
-                            #     lambda: training_saes[layer + 1].encode(
-                            #         next_layer_input,
-                            #         batch.token_mask,
-                            #     ),
-                            # )
                             del next_layer_input
-
-                            # tokens_to_skip = (actual_features > max_feature_scale).any(
-                            #     dim=-1
-                            # )
-                            # batch.token_mask[tokens_to_skip] = False
-                            # batch.num_tokens = int(
-                            #     batch.token_mask.to(torch.float32).sum().item()
-                            # )
-                            # batch.special_token_indices = (
-                            #     batch.token_mask.flatten() == 0
-                            # ).nonzero()
 
                             # Using MSE loss on features here (rather than cosdist as we do elsewhere) because ideally
                             # our tuned SAE matches the original features *exactly* on the distorted input.
                             next_layer_loss = feature_mse_loss(
                                 actual_features,
                                 expected_features,
-                                # batch,
-                                # 0.1,
                             )
-                            # del actual_features
-                            # del expected_features
+                            del actual_features
+                            del expected_features
                         elif layer + 1 == model.num_layers:
                             next_layer_loss = kl_loss(
                                 actual_log_probs,
@@ -669,46 +637,32 @@ def tune_encoder(
                                 next_layer_loss.item() + 1e-8
                             )
                             next_layer_loss = kl_scale * next_layer_loss
-                            if not next_layer_loss.isfinite():
-                                breakpoint()
                         else:
                             next_layer_loss = cur_layer_loss.item()
                     loss = (cur_layer_loss + next_layer_loss) / 2
 
-                    # Because features are sparse, loss is generally pretty small, except for
-                    # some inputs where it blows up. Attempt to skip those steps to keep training
-                    # from going off the rails.
-                    if loss.isfinite():
-                        loss.backward()
-                        torch.nn.utils.clip_grad_norm_(
-                            [
-                                p
-                                for pg in optimizer.param_groups
-                                for p in pg["params"]
-                                if p.requires_grad
-                            ],
-                            max_norm=1.0,
-                            error_if_nonfinite=True,
-                        )
-                        optimizer.step()
-                        num_used_tokens += batch.num_tokens
-                        metrics["total_loss"].append(loss.item())
-                        metrics["cur_layer_loss"].append(cur_layer_loss.item())
-                        metrics["next_layer_loss"].append(
-                            next_layer_loss.item()
-                            if isinstance(next_layer_loss, torch.Tensor)
-                            else next_layer_loss
-                        )
-                        # metrics["num_tokens_skipped"].append(tokens_to_skip.sum())
-                        progress.total = max(num_tokens_for_layer, num_used_tokens)
-                        progress.update(batch.num_tokens)
-                    else:
-                        breakpoint()
-                        # batch.skipped = True
-                        # metrics["num_skipped_batches"] += 1
-                        # print("skipped batch")
-                        # if metrics["num_skipped_batches"] > 5:
-                        #     breakpoint()
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        [
+                            p
+                            for pg in optimizer.param_groups
+                            for p in pg["params"]
+                            if p.requires_grad
+                        ],
+                        max_norm=1.0,
+                        error_if_nonfinite=True,
+                    )
+                    optimizer.step()
+                    num_used_tokens += batch.num_tokens
+                    metrics["total_loss"].append(loss.item())
+                    metrics["cur_layer_loss"].append(cur_layer_loss.item())
+                    metrics["next_layer_loss"].append(
+                        next_layer_loss.item()
+                        if isinstance(next_layer_loss, torch.Tensor)
+                        else next_layer_loss
+                    )
+                    progress.total = max(num_tokens_for_layer, num_used_tokens)
+                    progress.update(batch.num_tokens)
 
                     if run_full_evals:
                         with torch.autocast(
@@ -806,7 +760,6 @@ def tune_encoder(
             if checkpoint_dir:
                 checkpoint = SAECheckpoint(
                     sae=training_sae,
-                    # sae=None,
                     total_tokens_trained=num_used_tokens
                     if num_used_encoder_tokens is None
                     else num_used_encoder_tokens,  # Don't count activation tuning tokens

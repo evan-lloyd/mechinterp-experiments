@@ -1,3 +1,5 @@
+import math
+from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
 
@@ -39,8 +41,11 @@ class BenchmarkExampleResult:
     correct_answer: str
     actual_answer: str
     forced_valid_answer: str
+    debiased_answer: str
     answer_probs: tuple[float]
+    debiased_answer_probs: tuple[float]
     correct_answer_prob: float
+    debiased_correct_answer_prob: float
     valid_answer_prob: float
     conditional_correct_answer_prob: float
 
@@ -52,9 +57,13 @@ def run_benchmark(
     spec: BenchmarkSpec,
     tokenizer_batch_size: int,
     inference_batch_size: int,
+    debiasing_sample_fraction: float = 0.0,
 ) -> pd.DataFrame:
     runner = _BENCHMARK_RUNNER[spec.kind](
-        n_shots=spec.n_shots, subsets=spec.subsets, max_context=model.context_length
+        n_shots=spec.n_shots,
+        subsets=spec.subsets,
+        max_context=model.context_length,
+        debiasing_sample_fraction=debiasing_sample_fraction,
     )
 
     answer_token_ids = (
@@ -63,17 +72,98 @@ def run_benchmark(
         .flatten()
         .to(model.device)
     )
-
-    progress = MultilineProgress(
-        total=runner.num_examples,
-        desc=[f"Running benchmark: {spec.kind.value}"],
-        num_header_lines=1,
-    )
     example_results = []
     with torch.autocast(
         device_type="cuda" if model.device.type == "cuda" else "cpu",
         dtype=torch.bfloat16,
     ):
+        if runner.debiasing_dataset is not None:
+            # If we're computing PriDe, we need to group the label probabilities by example id
+            answer_logits_by_example_id = defaultdict(list)
+            # Calculate debiasing stats?
+            progress = MultilineProgress(
+                total=runner.num_debiasing_samples * runner.num_valid_answers,
+                desc=[f"Running debiasing samples: {spec.kind.value}"],
+                num_header_lines=1,
+            )
+            num_debiasing_samples = 0
+            for batch in make_dataloader(
+                model,
+                tokenizer,
+                runner.debiasing_dataset,
+                None,  # Run until dataset is exhausted
+                tokenizer_batch_size=tokenizer_batch_size,
+                inference_batch_size=inference_batch_size,
+                include_example_info=True,
+                skip_long_examples=True,
+            ):
+                batch.to(model.device)
+                ab = make_activation_batch(
+                    model,
+                    [
+                        (
+                            model.num_layers - 1,
+                            "sae"
+                            if model.num_layers - 1 in model.sae_layers
+                            else "layer",
+                        )
+                    ],
+                    batch,
+                    end_layer=model.num_layers,
+                )[model.num_layers - 1]
+                if (model.num_layers - 1) in model.sae_layers:
+                    final_residual = ab.sae_output
+                else:
+                    final_residual = ab.layer_output
+                assert final_residual is not None
+
+                # We may have multiple inputs per "batch" row, so find the indices of the final tokens for
+                # each individual example and compute their logits in parallel.
+                batch_indices = torch.tensor(
+                    [ex.batch_index for ex in batch.example_info],
+                    device=final_residual.device,
+                )
+                token_indices = torch.tensor(
+                    [ex.token_range[1] - 1 for ex in batch.example_info],
+                    device=final_residual.device,
+                )
+                selected_residuals = (
+                    final_residual[batch_indices, token_indices, :]
+                    .flatten()
+                    .view(1, len(batch.example_info), -1)
+                )
+                answer_logits = model.get_logits(
+                    selected_residuals, for_token_ids=answer_token_ids
+                ).squeeze(0)
+                num_debiasing_samples += len(batch.example_info)
+                for i, ex in enumerate(batch.example_info):
+                    answer_logits_by_example_id[
+                        ex.original_example["_benchmark_runner_example_index"]
+                    ].append(answer_logits[i, :])
+
+                progress.update(batch.num_dataset_rows)
+
+            progress.close()
+            prior_log_probs = (
+                torch.stack(
+                    [torch.stack(v) for v in answer_logits_by_example_id.values()]
+                )  # n_samples x n_labels (permutation) x n_labels (label_id)
+                .log_softmax(dim=-1)  # log_probs per sample
+                .view(num_debiasing_samples, runner.num_valid_answers)
+                .logsumexp(dim=0)  # sum over permutations and samples
+                - math.log(num_debiasing_samples)  # renormalize
+            )
+            # end if computing debiasing priors
+        else:
+            prior_log_probs = torch.zeros(
+                (runner.num_valid_answers,), device=model.device
+            )
+
+        progress = MultilineProgress(
+            total=runner.num_examples,
+            desc=[f"Running benchmark: {spec.kind.value}"],
+            num_header_lines=1,
+        )
         for batch in make_dataloader(
             model,
             tokenizer,
@@ -123,6 +213,9 @@ def run_benchmark(
                 model.get_logits(selected_residuals).log_softmax(-1).squeeze(0)
             )
             valid_answer_logprobs = answer_logprobs[:, answer_token_ids]
+            debiased_logprobs = (valid_answer_logprobs - prior_log_probs).log_softmax(
+                -1
+            )
             correct_answer_probs = valid_answer_logprobs.gather(
                 1,
                 torch.tensor(
@@ -133,6 +226,17 @@ def run_benchmark(
                     device=model.device,
                 ).unsqueeze(-1),
             ).exp()
+            debiased_correct_answer_probs = debiased_logprobs.gather(
+                1,
+                torch.tensor(
+                    [
+                        runner.get_answer_index(ex.original_example)
+                        for ex in batch.example_info
+                    ],
+                    device=model.device,
+                ).unsqueeze(-1),
+            ).exp()
+
             valid_answer_probs = valid_answer_logprobs.exp()
             any_valid_answer_probs = valid_answer_probs.sum(dim=-1)
 
@@ -150,6 +254,10 @@ def run_benchmark(
                 else top_logit_answers[i]
                 for i, idx in enumerate(forced_valid_indices)
             ]
+            debiased_answers = [
+                tokenizer.decode(answer_token_ids[idx])
+                for idx in debiased_logprobs.argmax(-1)
+            ]
 
             for i, ex in enumerate(batch.example_info):
                 example_results.append(
@@ -166,6 +274,11 @@ def run_benchmark(
                         valid_answer_prob=any_valid_answer_probs[i].item(),
                         conditional_correct_answer_prob=correct_answer_probs[i].item()
                         / (any_valid_answer_probs[i].item() + 1e-8),
+                        debiased_answer=debiased_answers[i],
+                        debiased_correct_answer_prob=debiased_correct_answer_probs[
+                            i
+                        ].item(),
+                        debiased_answer_probs=tuple(debiased_logprobs.exp().tolist()),
                     )
                 )
             progress.set_postfix(
@@ -181,17 +294,22 @@ def run_benchmark(
     progress.close()
 
     df = pd.DataFrame([vars(er) for er in example_results])
+    df.attrs["prior_log_probs"] = tuple(prior_log_probs.tolist())
 
     overall_accuracy = (df["actual_answer"] == df["correct_answer"]).mean()
     forced_valid_accuracy = (df["forced_valid_answer"] == df["correct_answer"]).mean()
+    debiased_accuracy = (df["debiased_answer"] == df["correct_answer"]).mean()
 
     mean_correct_answer_prob = df["correct_answer_prob"].mean()
     mean_valid_answer_prob = df["valid_answer_prob"].mean()
     mean_conditional_correct_prob = df["conditional_correct_answer_prob"].mean()
+    mean_debiased_correct_answer_prob = df["debiased_correct_answer_prob"].mean()
 
     print(f"Overall accuracy (top logit): {overall_accuracy}")
     print(f"Forced valid answer accuracy: {forced_valid_accuracy}")
+    print(f"Debiased accuracy: {debiased_accuracy}")
     print(f"Mean correct answer prob: {mean_correct_answer_prob}")
+    print(f"Mean debiased correct answer prob: {mean_debiased_correct_answer_prob}")
     print(f"Mean valid answer prob (any valid): {mean_valid_answer_prob}")
     print(f"Mean conditional correct answer prob: {mean_conditional_correct_prob}")
 

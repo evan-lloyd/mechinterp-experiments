@@ -130,9 +130,10 @@ class GemmaReplacement(ReplacementModel):
 
         return input_args, input_kwargs
 
-    def get_logits(self, residual, **kwargs):
+    def get_logits(self, residual, for_token_ids=slice(None), **kwargs):
         residual = self.model.norm(residual)
-        logits = self.lm_head(residual)
+        # logits = self.lm_head(residual)
+        logits = residual @ self.lm_head.weight[for_token_ids, :].T
         # logits = torch.utils.checkpoint.checkpoint(
         #     self.lm_head, residual, use_reentrant=False
         # )

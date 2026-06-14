@@ -134,11 +134,14 @@ BENCHMARK_SPECS = {
             "world_religions",
         ],
     ),
-    "arc-e": BenchmarkSpec(BenchmarkKind.arc_e, 0, []),
+    "arc-e": BenchmarkSpec(BenchmarkKind.arc_e, 10, []),
 }
 
 # For dev purposes, allow forcing re-run of specific benchmarks
 OVERRIDE_EXISTING_BENCHMARKS = {"mmlu"}
+SKIP_BENCHMARKS = {"arc-e"}
+# DEBIASING_SAMPLE_FRACTION = 0.0
+DEBIASING_SAMPLE_FRACTION = 0.05
 
 
 def run_benchmarks(training_method: str):
@@ -148,7 +151,8 @@ def run_benchmarks(training_method: str):
     specs_to_run = {
         k: v
         for k, v in BENCHMARK_SPECS.items()
-        if not os.path.exists(_out_path(k)) or k in OVERRIDE_EXISTING_BENCHMARKS
+        if (not os.path.exists(_out_path(k)) or k in OVERRIDE_EXISTING_BENCHMARKS)
+        and k not in SKIP_BENCHMARKS
     }
     if not specs_to_run:
         print(f"Skipping benchmarks for {training_method}; all already exist")
@@ -176,6 +180,7 @@ def run_benchmarks(training_method: str):
             spec,
             tokenizer_batch_size=TOKENIZER_BATCH_SIZE,
             inference_batch_size=INFERENCE_BATCH_SIZE,
+            debiasing_sample_fraction=DEBIASING_SAMPLE_FRACTION,
         )
 
         os.makedirs(BENCHMARK_BASE_PATH, exist_ok=True)

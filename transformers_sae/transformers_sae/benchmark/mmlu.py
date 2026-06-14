@@ -1,9 +1,8 @@
-from functools import partial
 from typing import Any
 
-from datasets import IterableDataset, concatenate_datasets, load_dataset
+from datasets import load_dataset
 
-from .benchmark_runner import BenchmarkRunner
+from .benchmark_runner import BenchmarkRunner, DatasetInfo
 
 
 class MMLU(BenchmarkRunner):
@@ -11,27 +10,29 @@ class MMLU(BenchmarkRunner):
     def valid_answers(self):
         return [" A", " B", " C", " D"]
 
-    def get_answer_index(self, example: dict[str, Any]) -> str:
+    def get_answer_index(self, example: dict[str, Any]) -> int:
         return example["answer"]
 
     def get_subset(self, example: dict[str, Any]) -> str:
         return example["subject"]
 
-    def format_example(self, example: dict[str, Any], with_answer: bool) -> str:
-        prompt = example["question"]
+    def format_example(
+        self,
+        example: dict[str, Any],
+        permutation_offset: int = 0,
+        with_answer: bool = False,
+    ) -> str:
+        prompt = "Question: " + example["question"] + "\n"
         for i, a in enumerate(self.valid_answers):
-            prompt += f"\n{a.strip()}. {example['choices'][i]}"
+            prompt += f"\n{a.strip()}. {example['choices'][(i + permutation_offset) % self.num_valid_answers]}"
         prompt += "\nAnswer:"
         if with_answer:
-            prompt += self.valid_answers[example["answer"]] + "\n\n"
+            prompt += self.valid_answers[
+                (example["answer"] + permutation_offset) % self.num_valid_answers
+            ]
         return prompt
 
-    def make_prompt(self, prelude: str, example: dict[str, Any]) -> dict[str, Any]:
-        example["text"] = prelude + "\n\n" + self.format_example(example, False)
-        return example
-
-    def prepare_dataset(self) -> IterableDataset:
-        self.num_examples = 0
+    def prepare_dataset(self) -> list[DatasetInfo]:
         datasets = []
         for subject in self.subsets:
             base_dataset = load_dataset(
@@ -40,10 +41,23 @@ class MMLU(BenchmarkRunner):
                 streaming=True,
             )["test"]
             dev_dataset = load_dataset("cais/mmlu", subject, streaming=False)["dev"]
-            prelude = f"The following are multiple choice questions (with answers) about {subject.replace('_', ' ')}.\n\n"
-            for i in range(self.n_shots):
-                prelude += self.format_example(dev_dataset[i], True)
-            datasets.append(base_dataset.map(partial(self.make_prompt, prelude)))
-            self.num_examples += base_dataset.info.splits["test"].num_examples
+            preamble = (
+                "The following are multiple choice questions (with answers)"
+                f" about {subject.replace('_', ' ')}.\n\n"
+            )
+            preamble += (
+                "\n\n".join(
+                    self.format_example(e, with_answer=True)
+                    for e in dev_dataset.to_list()
+                )
+                + "\n\n"
+            )
+            datasets.append(
+                DatasetInfo(
+                    base_dataset,
+                    preamble,
+                    base_dataset.info.splits["test"].num_examples,
+                )
+            )
 
-        return concatenate_datasets(datasets)
+        return datasets
