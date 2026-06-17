@@ -13,17 +13,20 @@ from ..replacement_model import ReplacementModel
 from ..tokenization import make_dataloader
 from .arc_e import ArcE
 from .benchmark_runner import BenchmarkRunner
+from .cqa import CQA
 from .mmlu import MMLU
 
 
 class BenchmarkKind(Enum):
     mmlu = "MMLU"
     arc_e = "Arc-E"
+    cqa = "CQA"
 
 
 _BENCHMARK_RUNNER: dict[BenchmarkKind, type[BenchmarkRunner]] = {
     BenchmarkKind.mmlu: MMLU,
     BenchmarkKind.arc_e: ArcE,
+    BenchmarkKind.cqa: CQA,
 }
 
 
@@ -58,12 +61,14 @@ def run_benchmark(
     tokenizer_batch_size: int,
     inference_batch_size: int,
     debiasing_sample_fraction: float = 0.0,
+    max_samples: int | None = None,
 ) -> pd.DataFrame:
     runner = _BENCHMARK_RUNNER[spec.kind](
         n_shots=spec.n_shots,
         subsets=spec.subsets,
         max_context=model.context_length,
         debiasing_sample_fraction=debiasing_sample_fraction,
+        max_samples=max_samples,
     )
 
     answer_token_ids = (

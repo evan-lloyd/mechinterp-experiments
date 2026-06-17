@@ -135,11 +135,17 @@ BENCHMARK_SPECS = {
         ],
     ),
     "arc-e": BenchmarkSpec(BenchmarkKind.arc_e, 10, []),
+    "cqa": BenchmarkSpec(BenchmarkKind.cqa, 10, []),
 }
 
 # For dev purposes, allow forcing re-run of specific benchmarks
-OVERRIDE_EXISTING_BENCHMARKS = {"mmlu"}
-SKIP_BENCHMARKS = {"arc-e"}
+OVERRIDE_EXISTING_BENCHMARKS = {"cqa"}
+# BENCHMARK_SUBSET = set(BENCHMARK_SPECS.keys())
+BENCHMARK_SUBSET = {"cqa"}
+# For dev, allow running truncated dataset
+MAX_SAMPLES = 1000
+# MAX_SAMPLES = None
+
 # DEBIASING_SAMPLE_FRACTION = 0.0
 DEBIASING_SAMPLE_FRACTION = 0.05
 
@@ -152,7 +158,7 @@ def run_benchmarks(training_method: str):
         k: v
         for k, v in BENCHMARK_SPECS.items()
         if (not os.path.exists(_out_path(k)) or k in OVERRIDE_EXISTING_BENCHMARKS)
-        and k not in SKIP_BENCHMARKS
+        and k in BENCHMARK_SUBSET
     }
     if not specs_to_run:
         print(f"Skipping benchmarks for {training_method}; all already exist")
@@ -181,6 +187,7 @@ def run_benchmarks(training_method: str):
             tokenizer_batch_size=TOKENIZER_BATCH_SIZE,
             inference_batch_size=INFERENCE_BATCH_SIZE,
             debiasing_sample_fraction=DEBIASING_SAMPLE_FRACTION,
+            max_samples=MAX_SAMPLES,
         )
 
         os.makedirs(BENCHMARK_BASE_PATH, exist_ok=True)

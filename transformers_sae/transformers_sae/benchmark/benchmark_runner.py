@@ -33,6 +33,7 @@ class BenchmarkRunner:
         subsets: list[str],
         max_context: int,
         debiasing_sample_fraction: float,
+        max_samples: int | None,
     ):
         self.n_shots = n_shots
         self.subsets = copy(subsets)
@@ -41,6 +42,8 @@ class BenchmarkRunner:
 
         datasets = self.prepare_dataset()
         self.num_examples = sum([d.num_examples for d in datasets])
+        if max_samples is not None:
+            self.num_examples = min(self.num_examples, max_samples)
         self.num_debiasing_samples = int(
             self.debiasing_sample_fraction * self.num_examples
         )
@@ -80,6 +83,9 @@ class BenchmarkRunner:
         self.dataset = concatenate_datasets(
             [d.dataset.map(partial(self.format_dataset, d.preamble)) for d in datasets]
         )
+
+        if max_samples is not None:
+            self.dataset = self.dataset.take(max_samples)
 
     def add_label_permutations(
         self, index_offset: int, examples: dict[str, list[Any]]
