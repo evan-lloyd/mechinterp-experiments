@@ -1,6 +1,6 @@
 from copy import copy
 from dataclasses import dataclass
-from functools import partial, cached_property
+from functools import cached_property, partial
 from typing import Any
 
 from datasets import IterableDataset, concatenate_datasets
@@ -21,6 +21,8 @@ class BenchmarkRunner:
     num_examples: int
     num_debiasing_samples: int
     debiasing_sample_fraction: float
+    max_samples: int | None
+    run_permutations: bool
 
     @cached_property
     def num_valid_answers(self):
@@ -34,7 +36,10 @@ class BenchmarkRunner:
         max_context: int,
         debiasing_sample_fraction: float,
         max_samples: int | None,
+        run_permutations: bool,
     ):
+        self.run_permutations = run_permutations
+        self.max_samples = max_samples
         self.n_shots = n_shots
         self.subsets = copy(subsets)
         self.max_context = max_context
@@ -80,9 +85,24 @@ class BenchmarkRunner:
         else:
             self.debiasing_dataset = None
 
-        self.dataset = concatenate_datasets(
-            [d.dataset.map(partial(self.format_dataset, d.preamble)) for d in datasets]
-        )
+        if self.run_permutations:
+            self.dataset = concatenate_datasets(
+                [
+                    d.dataset.map(
+                        partial(self.add_label_permutations, 0),
+                        batched=True,
+                        batch_size=d.num_examples,
+                    ).map(partial(self.format_dataset, d.preamble))
+                    for d in datasets
+                ]
+            )
+        else:
+            self.dataset = concatenate_datasets(
+                [
+                    d.dataset.map(partial(self.format_dataset, d.preamble))
+                    for d in datasets
+                ]
+            )
 
         if max_samples is not None:
             self.dataset = self.dataset.take(max_samples)

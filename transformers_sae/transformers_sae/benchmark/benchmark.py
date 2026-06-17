@@ -62,13 +62,20 @@ def run_benchmark(
     inference_batch_size: int,
     debiasing_sample_fraction: float = 0.0,
     max_samples: int | None = None,
+    run_permutations: bool = False,
 ) -> pd.DataFrame:
+
+    # If we're running all cyclic permutations, we don't need to debias
+    if run_permutations:
+        debiasing_sample_fraction = 0.0
+
     runner = _BENCHMARK_RUNNER[spec.kind](
         n_shots=spec.n_shots,
         subsets=spec.subsets,
         max_context=model.context_length,
         debiasing_sample_fraction=debiasing_sample_fraction,
         max_samples=max_samples,
+        run_permutations=run_permutations,
     )
 
     answer_token_ids = (

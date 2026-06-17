@@ -143,7 +143,7 @@ OVERRIDE_EXISTING_BENCHMARKS = {"cqa"}
 # BENCHMARK_SUBSET = set(BENCHMARK_SPECS.keys())
 BENCHMARK_SUBSET = {"cqa"}
 # For dev, allow running truncated dataset
-MAX_SAMPLES = 1000
+MAX_SAMPLES = 400
 # MAX_SAMPLES = None
 
 # DEBIASING_SAMPLE_FRACTION = 0.0
@@ -188,6 +188,7 @@ def run_benchmarks(training_method: str):
             inference_batch_size=INFERENCE_BATCH_SIZE,
             debiasing_sample_fraction=DEBIASING_SAMPLE_FRACTION,
             max_samples=MAX_SAMPLES,
+            run_permutations=True,
         )
 
         os.makedirs(BENCHMARK_BASE_PATH, exist_ok=True)
