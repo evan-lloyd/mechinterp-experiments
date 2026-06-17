@@ -24,7 +24,7 @@ class InPlaceFinetunedTrainingStepper(NextLayerFinetunedTrainingStepper):
         )
 
     def run_replacement(
-        self, batch: DataBatch, baseline_activations: ActivationBatch
+        self, batch: DataBatch, baseline_activations: dict[int, ActivationBatch]
     ) -> Dict[int, ActivationBatch]:
         activation_requests = [
             (self.target_layer, "sae"),
@@ -41,6 +41,11 @@ class InPlaceFinetunedTrainingStepper(NextLayerFinetunedTrainingStepper):
                 batch,
                 end_layer=self.target_layer + 1,
                 stop_before_sae=True,
+                # Bit of a hack to prevent loss from exploding on rare, extreme outliers. Unlike in
+                # tune_encoders, we don't have a "sensible" baseline based on what our SAE would output
+                # on base model activations, because our starting point was already encoder tuned, so
+                # instead put an arbitrary constant. TODO: we probably should just bake this in for LISTA.
+                additional_sae_kwargs={"feature_soft_cap": 1000.0},
             )[self.target_layer].layer_output
         return make_activation_batch(
             self.replacement_model,
@@ -50,4 +55,5 @@ class InPlaceFinetunedTrainingStepper(NextLayerFinetunedTrainingStepper):
             start_layer=self.target_layer,
             end_layer=self.replacement_model.num_layers + 1,
             start_at_sae=True,
+            additional_sae_kwargs={"feature_soft_cap": 1000.0},
         )

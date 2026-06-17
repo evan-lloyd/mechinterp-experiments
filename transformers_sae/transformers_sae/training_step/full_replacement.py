@@ -50,7 +50,7 @@ class FullReplacementTrainingStepper(MultiSAEStepper):
         return baseline_activations
 
     def run_replacement(
-        self, batch: DataBatch, baseline_activations: ActivationBatch
+        self, batch: DataBatch, baseline_activations: dict[int, ActivationBatch]
     ) -> Dict[int, ActivationBatch]:
         return make_activation_batch(
             self.replacement_model,

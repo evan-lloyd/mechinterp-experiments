@@ -55,7 +55,7 @@ class Stepper(ABC):
 
     @abstractmethod
     def run_replacement(
-        self, batch: DataBatch, baseline_activations: ActivationBatch
+        self, batch: DataBatch, baseline_activations: dict[int, ActivationBatch]
     ) -> Dict[int, ActivationBatch]: ...
 
     def autocast(self):

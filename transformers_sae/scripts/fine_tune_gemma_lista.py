@@ -68,7 +68,7 @@ print(mtm.memory_max)
 print(mtm.memory_cur)
 
 NUM_TRAINING_TOKENS = int(5e7)
-NUM_FINETUNE_TOKENS = int(2e7)
+NUM_FINETUNE_TOKENS = int(1e7)
 TOTAL_TOKENS = NUM_TRAINING_TOKENS + NUM_FINETUNE_TOKENS
 FINETUNE_FRACTION = NUM_FINETUNE_TOKENS / TOTAL_TOKENS
 EVAL_INTERVAL = int(1e5)
@@ -76,15 +76,13 @@ NUM_VALIDATION_TOKENS = int(1e6)
 TOKENIZER_BATCH_SIZE = 256
 CHECKPOINT_BASE_PATH = f"{os.getenv('HF_BUCKET_LOCAL')}/gemma_2_2b/"
 
-FINE_TUNE_SOURCE_DIR = (
-    f"{CHECKPOINT_BASE_PATH}/next_layer_lista_unit_scale_tuned_encoder_0_2e6"
-)
+FINE_TUNE_SOURCE_DIR = f"{CHECKPOINT_BASE_PATH}/next_layer_lista_iters_10_tuned_encoder_0"
 
+# only for in-place fine-tune
 saes = load_saes(
     FINE_TUNE_SOURCE_DIR,
-    model.num_layers,
+    list(range(model.num_layers)),
 )
-
 # TODO: we should refactor the fine tune logic in training.py to handle this
 for sae in saes.values():
     sae.onload()
@@ -117,19 +115,22 @@ training_config = TrainingConfig(
     reconstruction_weight=1.0,
     balance_reconstruction_losses=True,
     method=TrainingMethod.in_place_finetuned,
+    # method=TrainingMethod.next_layer_finetuned,
     finetune_fraction=FINETUNE_FRACTION,
 )
 
 training_results = train(
     model,
     tokenizer,
+    # {}, 
     saes,
     training_dataset,
     training_config,
-    checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/next_layer_finetuned_lista_unit_scale",
+    checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/next_layer_in_place_finetuned_lista_iters_10",
     fine_tune_source_dir=FINE_TUNE_SOURCE_DIR,
     force_retrain=False,
     offload_after_training=False,
+    # fine_tune_in_place=False,
     fine_tune_in_place=True,
     override_token_offset=NUM_TRAINING_TOKENS,
 )
