@@ -69,7 +69,6 @@ NUM_VALIDATION_TOKENS = int(1e6)
 NUM_THRESHOLD_TUNING_TOKENS = int(1e6)
 NUM_TRAINING_TOKENS = int(5e7)
 FINETUNE_FRACTION = 0.2
-START_LAYER = 0
 END_LAYER = model.num_layers
 
 parser = argparse.ArgumentParser(
@@ -83,30 +82,39 @@ parser.add_argument(
     required=True,
     help="Training method to validate (may be specified multiple times, e.g. -m next_layer_lista_onsager -m next_layer)",
 )
+parser.add_argument(
+    "-l",
+    "--start-layer",
+    type=int,
+    default=0,
+    help="Starting layer for SAE replacement (default: 0)",
+)
 args = parser.parse_args()
+
+start_layer = args.start_layer
 
 for training_method in args.training_methods:
     train_activations = "_train_activations" in training_method
     results_path = f"{VALIDATION_BASE_PATH}/{training_method}"
     validation_file = os.path.join(
-        results_path, f"{START_LAYER}.validation.cloudpickle"
+        results_path, f"{start_layer}.validation.cloudpickle"
     )
     if os.path.exists(validation_file):
         print(
-            f"Validation for start layer {START_LAYER} already exists at {validation_file}, skipping."
+            f"Validation for start layer {start_layer} already exists at {validation_file}, skipping."
         )
         continue
 
     saes = method_to_saes(
         CHECKPOINT_BASE_PATH,
         training_method.replace("_train_activations", ""),
-        range(START_LAYER, model.num_layers),
+        range(start_layer, model.num_layers),
         TRAINING_DEVICE,
     )
-    if set(saes.keys()) != set(range(START_LAYER, END_LAYER)):
+    if set(saes.keys()) != set(range(start_layer, END_LAYER)):
         raise ValueError(f"Didn't find full range of SAEs for {training_method}")
 
-    for start_layer in (START_LAYER,):
+    for start_layer in (start_layer,):
         print(
             f"Running validations for {training_method} replacement starting at {start_layer}"
         )

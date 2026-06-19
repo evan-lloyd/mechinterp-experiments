@@ -10,7 +10,10 @@ from .sae import SAE
 
 
 class SAEReplacementLayer(torch.nn.Module):
-    def __init__(self, original_layer: torch.nn.Module, sae: torch.nn.Module):
+    sae: SAE
+    original_layer: torch.nn.Module
+
+    def __init__(self, original_layer: torch.nn.Module, sae: SAE):
         super().__init__()
         self.original_layer = original_layer
         self.sae = sae
@@ -48,7 +51,7 @@ class SAEReplacementLayer(torch.nn.Module):
 
 
 class ReplacementModel:
-    sae_layers: Dict[int, SAE]
+    sae_layers: Dict[int, SAEReplacementLayer]
     num_layers: int
     context_length: int
     d_model: int
@@ -156,7 +159,9 @@ class GemmaReplacement(ReplacementModel):
 def make_replacement_model(
     original: ReplacementModel,
     sae_layers: Dict[int, SAE],
+    *,
     layer_path: str = "transformer.h",
+    override_replacement_layers: bool = False,
 ) -> ReplacementModel: ...
 
 
@@ -164,6 +169,7 @@ def make_replacement_model(
 def make_replacement_model(
     original: torch.nn.Module,
     sae_layers: Dict[int, SAE],
+    *,
     num_layers: int,
     context_length: int,
     d_model: int,
@@ -177,12 +183,14 @@ def make_replacement_model(
 def make_replacement_model(
     original: torch.nn.Module | ReplacementModel,
     sae_layers: Dict[int, SAE],
+    *,
     num_layers: Optional[int] = None,
     context_length: Optional[int] = None,
     d_model: Optional[int] = None,
     layer_path: str = "transformer.h",
     replacement_class: Type[ReplacementModel] = ReplacementModel,
     layer_class: Type[SAEReplacementLayer] = SAEReplacementLayer,
+    override_replacement_layers: bool = False,
 ) -> ReplacementModel:
     # Shallow copy into a new module instance, adding ReplacementModel as a mixin
     new_instance = _shallow_copy_model(original)
@@ -191,13 +199,32 @@ def make_replacement_model(
     if isinstance(original, ReplacementModel):
         layer_path = original.layer_path
         layer_class = original.layer_class
+        layer_range = range(original.num_layers)
+    else:
+        layer_range = sae_layers.keys()
 
-    for target_layer, sae in sae_layers.items():
+    for target_layer in layer_range:
         module_path = f"{layer_path}.{target_layer}"
-        original_layer = original.get_submodule(module_path)
-        replacement_layer = layer_class(original_layer, sae)
+        original_submodule = original.get_submodule(module_path)
+
+        if isinstance(original_submodule, SAEReplacementLayer):
+            original_layer = original_submodule.original_layer
+        else:
+            original_layer = original_submodule
+
+        if target_layer in sae_layers:
+            # Always make a fresh SAEReplacementLayer for SAEs we explicitly wanted
+            replacement_layer = layer_class(original_layer, sae_layers[target_layer])
+        elif override_replacement_layers:
+            replacement_layer = original_layer
+        else:
+            # Otherwise, we may or may not be inheriting an existing replacement layer from original
+            replacement_layer = original_submodule
+
+        if isinstance(replacement_layer, SAEReplacementLayer):
+            replacement_layers[target_layer] = replacement_layer
+
         new_instance.set_submodule(module_path, replacement_layer)
-        replacement_layers[target_layer] = replacement_layer
 
     if not isinstance(original, ReplacementModel):
         new_instance.__class__ = type(
@@ -216,9 +243,6 @@ def make_replacement_model(
         object.__setattr__(
             new_instance, "transformers_class", original.transformers_class
         )
-        for layer, sae in original.sae_layers.items():
-            if layer not in replacement_layers:
-                replacement_layers[layer] = sae
 
     object.__setattr__(new_instance, "sae_layers", replacement_layers)
     object.__setattr__(new_instance, "layer_path", layer_path)

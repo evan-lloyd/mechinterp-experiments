@@ -66,7 +66,7 @@ print(mtm.memory_cur)
 
 TRAINING_CACHE_DIR = None
 VALIDATION_CACHE_DIR = None
-NUM_TRAINING_TOKENS = int(5e7)
+NUM_TRAINING_TOKENS = int(1e8)
 EVAL_INTERVAL = int(1e5)
 NUM_VALIDATION_TOKENS = int(1e6)
 # to match Gemma Scope
@@ -115,7 +115,8 @@ training_config = TrainingConfig(
     num_train_tokens=NUM_TRAINING_TOKENS,
     eval_interval=EVAL_INTERVAL,
     # train_layers=list(range(10, model.num_layers)),
-    train_layers=list(range(0, model.num_layers)),
+    # train_layers=list(range(0, model.num_layers)),
+    train_layers=[0],
     betas=(
         0.0,
         0.999,
@@ -147,9 +148,10 @@ training_results = train(
             int(1e7),
         )
     ),
-    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/standard_lista_unit_scale/",
+    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/standard_lista_1e8_tokens/",
     force_retrain=False,
     offload_after_training=False,
+    skip_kl_eval=True,
 )
 
 validations = run_validations(
@@ -162,6 +164,7 @@ validations = run_validations(
     NUM_VALIDATION_TOKENS,
     cache_dir=VALIDATION_CACHE_DIR,
     start_layer=training_config.train_layers[0],
+    end_layer=1,
     offload=False,
 )
 

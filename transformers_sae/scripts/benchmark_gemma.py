@@ -29,7 +29,6 @@ CHECKPOINT_BASE_PATH = f"{HF_BUCKET_LOCAL}/gemma_2_2b"
 BENCHMARK_BASE_PATH = f"{HF_BUCKET_LOCAL}/benchmarks/gemma_2_2b"
 TOKENIZER_BATCH_SIZE = 256
 INFERENCE_BATCH_SIZE = 16
-START_LAYER = 0
 
 gemma_release = "gemma-scope-2b-pt-res-canonical"
 
@@ -150,9 +149,9 @@ MAX_SAMPLES = 400
 DEBIASING_SAMPLE_FRACTION = 0.05
 
 
-def run_benchmarks(training_method: str):
+def run_benchmarks(training_method: str, start_layer: int):
     def _out_path(name: str):
-        return f"{BENCHMARK_BASE_PATH}/{training_method}_{name}.parquet"
+        return f"{BENCHMARK_BASE_PATH}/{training_method}_{name}_{start_layer}.parquet"
 
     specs_to_run = {
         k: v
@@ -168,10 +167,10 @@ def run_benchmarks(training_method: str):
     saes = method_to_saes(
         CHECKPOINT_BASE_PATH,
         training_method,
-        range(START_LAYER, model.num_layers),
+        range(start_layer, model.num_layers),
         TRAINING_DEVICE,
     )
-    if len(saes) != model.num_layers - START_LAYER and training_method != "baseline":
+    if len(saes) != model.num_layers - start_layer and training_method != "baseline":
         raise RuntimeError(f"Missing SAEs for {training_method}, aborting run")
 
     replacement_model = make_replacement_model(model, saes)
@@ -188,7 +187,7 @@ def run_benchmarks(training_method: str):
             inference_batch_size=INFERENCE_BATCH_SIZE,
             debiasing_sample_fraction=DEBIASING_SAMPLE_FRACTION,
             max_samples=MAX_SAMPLES,
-            run_permutations=True,
+            # run_permutations=True,
         )
 
         os.makedirs(BENCHMARK_BASE_PATH, exist_ok=True)
@@ -207,7 +206,14 @@ if __name__ == "__main__":
         required=True,
         help="Training method to use (may be specified multiple times, e.g. -m next_layer_lista_onsager -m next_layer)",
     )
+    parser.add_argument(
+        "-l",
+        "--start-layer",
+        type=int,
+        default=0,
+        help="Starting layer for SAE usage in benchmarking (default: 0)",
+    )
     args = parser.parse_args()
 
     for training_method in args.training_methods:
-        run_benchmarks(training_method)
+        run_benchmarks(training_method, start_layer=args.start_layer)

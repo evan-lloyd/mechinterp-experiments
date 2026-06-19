@@ -109,7 +109,6 @@ training_config = TrainingConfig(
     method=TrainingMethod.next_layer,
 )
 
-START_LAYER = 0
 END_LAYER = model.num_layers - 1
 
 parser = argparse.ArgumentParser(
@@ -123,26 +122,56 @@ parser.add_argument(
     required=True,
     help="Training method to use (may be specified multiple times, e.g. -m next_layer_lista_onsager -m next_layer)",
 )
+parser.add_argument(
+    "-l",
+    "--start-layer",
+    type=int,
+    default=0,
+    help="Starting layer for SAE replacement in the tuned model (default: 0)",
+)
+parser.add_argument(
+    "-rl",
+    "--reference-start-layer",
+    type=int,
+    help="Starting layer for SAE replacement in the reference model (default: None)",
+)
 args = parser.parse_args()
 
 
 for training_method in args.training_methods:
     results_path = f"{VALIDATION_BASE_PATH}/{training_method}"
 
+    if args.reference_start_layer is None:
+        load_start_layer = args.start_layer
+    else:
+        load_start_layer = min(args.reference_start_layer, args.start_layer)
+
     saes = method_to_saes(
         CHECKPOINT_BASE_PATH,
         training_method,
-        range(START_LAYER, END_LAYER + 1),
+        range(load_start_layer, END_LAYER + 1),
         TRAINING_DEVICE,
     )
 
-    for start_layer in (START_LAYER,):
+    if args.reference_start_layer is not None:
+        reference_model = make_replacement_model(
+            model,
+            {
+                layer: sae
+                for layer, sae in saes.items()
+                if layer >= args.reference_start_layer and layer <= END_LAYER
+            },
+        )
+    else:
+        reference_model = model
+
+    for start_layer in (args.start_layer,):
         print(
             f"Tuning encoders for {training_method} replacement starting at {start_layer}"
         )
 
         tr = tune_encoder(
-            model,
+            reference_model,
             tokenizer,
             {
                 layer: sae
@@ -153,13 +182,17 @@ for training_method in args.training_methods:
             training_config,
             num_encoder_tuning_tokens=NUM_ENCODER_TUNING_TOKENS,
             num_threshold_tuning_tokens=NUM_THRESHOLD_TUNING_TOKENS,
-            checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{START_LAYER}",
+            checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{start_layer}",
             force_retrain=False,
             train_encoders_from_scratch=False,
             # run_full_evals=True,
             # num_previous_replacement_layers=2,
         )
-        saes = tr.final_saes
+        saes = {
+            layer: sae
+            for layer, sae in tr.final_saes.items()
+            if layer >= start_layer and layer <= END_LAYER
+        }
 
         validations = run_validations(
             model,
