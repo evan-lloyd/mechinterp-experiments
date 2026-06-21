@@ -71,7 +71,7 @@ VALIDATION_BASE_PATH = "/workspace/sae_checkpoints/validations/gemma_2_2b"
 CHECKPOINT_BASE_PATH = "/workspace/sae_checkpoints/gemma_2_2b"
 TOKENIZER_BATCH_SIZE = 256
 NUM_VALIDATION_TOKENS = int(1e6)
-NUM_ENCODER_TUNING_TOKENS = int(1e6)
+NUM_ENCODER_TUNING_TOKENS = int(1e5)
 NUM_THRESHOLD_TUNING_TOKENS = int(1e6)
 NUM_TRAINING_TOKENS = int(5e7)
 NUM_WARMUP_STEPS = 100
@@ -182,7 +182,7 @@ for training_method in args.training_methods:
             training_config,
             num_encoder_tuning_tokens=NUM_ENCODER_TUNING_TOKENS,
             num_threshold_tuning_tokens=NUM_THRESHOLD_TUNING_TOKENS,
-            checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{start_layer}",
+            checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{start_layer}_1e5",
             force_retrain=False,
             train_encoders_from_scratch=False,
             # run_full_evals=True,

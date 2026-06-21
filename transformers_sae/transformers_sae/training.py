@@ -1031,6 +1031,7 @@ def train(
     fine_tune_in_place: bool = False,
     override_token_offset: Optional[int] = None,
     fresh_init: bool = False,
+    extend_training_run: bool = False,
 ) -> TrainingResult:
     try:
         model.eval()
@@ -1039,9 +1040,16 @@ def train(
             "override_token_offset only valid option if fine_tune_in_place"
         )
 
+        if extend_training_run:
+            assert checkpoint_dir is not None, "Must specify checkpoint_dir to extend_training_run"
+            assert not fine_tune_in_place, "Can't fine_tune_in_place with extend_training_run"
+            final_checkpoint_dir = checkpoint_dir + f"_extended_{config.num_train_tokens}_tokens"
+        else:
+            final_checkpoint_dir = checkpoint_dir
+
         if fine_tune_in_place:
             training_saes = initial_saes
-        elif fine_tune_source_dir is None:
+        elif fine_tune_source_dir is None and not extend_training_run:
             training_saes = {
                 layer: SAE(deepcopy(initial_saes[layer].config))
                 for layer in config.train_layers
@@ -1051,8 +1059,11 @@ def train(
         train_result = TrainingResult(training_saes)
 
         for layer in sorted(config.train_layers, reverse=True):
-            if checkpoint_dir and not force_retrain:
-                latest_checkpoint = find_latest_checkpoint(checkpoint_dir, layer)
+            if final_checkpoint_dir and not force_retrain:
+                latest_checkpoint = find_latest_checkpoint(final_checkpoint_dir, layer)
+                if extend_training_run and latest_checkpoint is None:
+                    latest_checkpoint = find_latest_checkpoint(checkpoint_dir, layer)
+                    assert latest_checkpoint is not None, f"Couldn't find checkpoint for layer {layer}"
             else:
                 latest_checkpoint = None
 
@@ -1063,7 +1074,6 @@ def train(
                 assert sae is not None, (
                     f"Checkpoint {latest_checkpoint} was missing SAE data"
                 )
-                sae.onload()
                 checkpoint.sae = None
 
                 train_result._layer_results[layer] = [
@@ -1076,7 +1086,7 @@ def train(
                 training_saes[layer] = sae
                 token_offset = checkpoint.total_tokens_trained
                 if fine_tune_in_place:
-                    with open(f"{checkpoint_dir}/train_thresholds_{layer}", "rb") as f:
+                    with open(f"{final_checkpoint_dir}/train_thresholds_{layer}", "rb") as f:
                         loaded_thresholds = cloudpickle.load(f)
                     for update_layer, sae in training_saes.items():
                         sae.set_activation_thresholds(loaded_thresholds[update_layer])
@@ -1102,7 +1112,6 @@ def train(
                 train_result._layer_results[layer] = [
                     SAECheckpoint(sae=sae, total_tokens_trained=token_offset)
                 ]
-                sae.onload()
                 if fine_tune_in_place:
                     try:
                         with open(
@@ -1177,12 +1186,15 @@ def train(
                     # Unused layers should be in eval mode.
                     for other_layer in range(layer, model.num_layers):
                         if other_layer in stepper.replacement_model.sae_layers:
+                            training_saes[other_layer].onload()
                             training_saes[other_layer].train()
                             training_saes[other_layer].requires_grad_(
                                 layer == other_layer
                             )
                         elif other_layer in training_saes:
                             training_saes[other_layer].eval()
+                            if offload_after_training and skip_kl_eval:
+                                training_saes[other_layer].offload()
                 # backward_fn = None
                 optimizer = make_optimizer(training_saes, [layer], config)
 
@@ -1210,10 +1222,10 @@ def train(
                 f"Layer {layer}",
                 previous_trained_tokens=token_offset,
                 make_checkpoints_at=make_checkpoints_at,
-                checkpoint_dir=checkpoint_dir,
+                checkpoint_dir=final_checkpoint_dir,
                 # backward_fn=backward_fn,
             )
-            if checkpoint_dir:
+            if final_checkpoint_dir:
                 save_training_result(
                     {
                         result_layer: [train_result[result_layer][-1]]
@@ -1223,12 +1235,12 @@ def train(
                             else [layer]
                         )
                     },
-                    checkpoint_dir,
+                    final_checkpoint_dir,
                     keep_in_ram=True,
                     blocking=True,
                 )
                 if fine_tune_in_place:
-                    with open(f"{checkpoint_dir}/train_thresholds_{layer}", "wb") as f:
+                    with open(f"{final_checkpoint_dir}/train_thresholds_{layer}", "wb") as f:
                         cloudpickle.dump(
                             {
                                 save_layer: sae.activation_thresholds()
