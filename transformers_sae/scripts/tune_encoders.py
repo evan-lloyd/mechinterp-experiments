@@ -33,6 +33,12 @@ else:
 model_id = "google/gemma-2-2b"
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 
+# training_dataset = load_dataset(
+#     "monology/pile-uncopyrighted-parquet",
+#     split="train",
+#     streaming=True,
+#     columns=["text"],
+# )
 validation_dataset = load_dataset(
     "monology/pile-test-val",
     split="validation",
@@ -60,12 +66,6 @@ with MemoryTrackingMode() as mtm:
     model.eval()
     model.requires_grad_(False)
 
-# training_dataset = load_dataset(
-#     "monology/pile-uncopyrighted-parquet",
-#     split="train",
-#     streaming=True,
-#     columns=["text"],
-# )
 cqa = CQA(
     n_shots=10,
     subsets=["all"],
