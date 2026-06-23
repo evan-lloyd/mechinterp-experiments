@@ -153,6 +153,8 @@ def run_benchmarks(training_method: str, start_layer: int):
     def _out_path(name: str):
         return f"{BENCHMARK_BASE_PATH}/{training_method}_{name}_{start_layer}.parquet"
 
+    train_activations = "_train_activations" in training_method
+
     specs_to_run = {
         k: v
         for k, v in BENCHMARK_SPECS.items()
@@ -166,16 +168,19 @@ def run_benchmarks(training_method: str, start_layer: int):
     print(f"Running benchmarks for {training_method}: {list(specs_to_run.keys())}")
     saes = method_to_saes(
         CHECKPOINT_BASE_PATH,
-        training_method,
+        training_method.replace("_train_activations", ""),
         range(start_layer, model.num_layers),
         TRAINING_DEVICE,
     )
     if len(saes) != model.num_layers - start_layer and training_method != "baseline":
         raise RuntimeError(f"Missing SAEs for {training_method}, aborting run")
 
+
     replacement_model = make_replacement_model(model, saes)
     for sae in saes.values():
         sae.eval()
+        if train_activations:
+            sae.encoder.train_activations()
         sae.onload()
 
     for name, spec in specs_to_run.items():

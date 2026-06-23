@@ -9,6 +9,7 @@ import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from transformers_sae.benchmark.cqa import CQA
 from transformers_sae.ops import (
     MemoryTrackingMode,
     method_to_saes,
@@ -28,14 +29,10 @@ else:
     TRAINING_DEVICE = torch.device("cpu")
     TRAINING_BATCH_SIZE = 2
 
+
 model_id = "google/gemma-2-2b"
 tokenizer = AutoTokenizer.from_pretrained(model_id)
-training_dataset = load_dataset(
-    "monology/pile-uncopyrighted-parquet",
-    split="train",
-    streaming=True,
-    columns=["text"],
-)
+
 validation_dataset = load_dataset(
     "monology/pile-test-val",
     split="validation",
@@ -63,6 +60,24 @@ with MemoryTrackingMode() as mtm:
     model.eval()
     model.requires_grad_(False)
 
+# training_dataset = load_dataset(
+#     "monology/pile-uncopyrighted-parquet",
+#     split="train",
+#     streaming=True,
+#     columns=["text"],
+# )
+cqa = CQA(
+    n_shots=10,
+    subsets=["all"],
+    max_context=model.context_length,
+    debiasing_sample_fraction=0.0,
+    max_samples=None,
+    run_permutations=False,
+    split="train",
+)
+training_dataset = cqa.dataset
+
+
 print(model)
 print(mtm.memory_max)
 print(mtm.memory_cur)
@@ -71,7 +86,7 @@ VALIDATION_BASE_PATH = "/workspace/sae_checkpoints/validations/gemma_2_2b"
 CHECKPOINT_BASE_PATH = "/workspace/sae_checkpoints/gemma_2_2b"
 TOKENIZER_BATCH_SIZE = 256
 NUM_VALIDATION_TOKENS = int(1e6)
-NUM_ENCODER_TUNING_TOKENS = int(1e5)
+NUM_ENCODER_TUNING_TOKENS = int(1e6)
 NUM_THRESHOLD_TUNING_TOKENS = int(1e6)
 NUM_TRAINING_TOKENS = int(5e7)
 NUM_WARMUP_STEPS = 100
@@ -80,9 +95,6 @@ FINETUNE_FRACTION = 0.2
 
 
 def linear_decay_during_finetune(frac_trained: float, **kwargs):
-    # num_steps = frac_trained * NUM_ENCODER_TUNING_TOKENS
-    # if num_steps < NUM_WARMUP_STEPS:
-    #     return num_steps / NUM_WARMUP_STEPS
     if frac_trained < (1 - FINETUNE_FRACTION):
         return 1.0
     return 1.0 - (frac_trained - (1 - FINETUNE_FRACTION)) / FINETUNE_FRACTION
@@ -93,7 +105,6 @@ training_config = TrainingConfig(
     training_batch_size=TRAINING_BATCH_SIZE,
     num_train_tokens=NUM_TRAINING_TOKENS,
     eval_interval=int(1e5),
-    # train_layers=list(range(10, model.num_layers)),
     train_layers=list(range(0, model.num_layers)),
     betas=(
         0.0,
@@ -182,7 +193,7 @@ for training_method in args.training_methods:
             training_config,
             num_encoder_tuning_tokens=NUM_ENCODER_TUNING_TOKENS,
             num_threshold_tuning_tokens=NUM_THRESHOLD_TUNING_TOKENS,
-            checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{start_layer}_1e5",
+            checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{start_layer}_cqa",
             force_retrain=False,
             train_encoders_from_scratch=False,
             # run_full_evals=True,

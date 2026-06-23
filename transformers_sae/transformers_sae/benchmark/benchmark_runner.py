@@ -23,6 +23,7 @@ class BenchmarkRunner:
     debiasing_sample_fraction: float
     max_samples: int | None
     run_permutations: bool
+    split: str | None
 
     @cached_property
     def num_valid_answers(self):
@@ -37,6 +38,7 @@ class BenchmarkRunner:
         debiasing_sample_fraction: float,
         max_samples: int | None,
         run_permutations: bool,
+        split: str | None = None,
     ):
         self.run_permutations = run_permutations
         self.max_samples = max_samples
@@ -44,6 +46,7 @@ class BenchmarkRunner:
         self.subsets = copy(subsets)
         self.max_context = max_context
         self.debiasing_sample_fraction = debiasing_sample_fraction
+        self.split = split
 
         datasets = self.prepare_dataset()
         self.num_examples = sum([d.num_examples for d in datasets])

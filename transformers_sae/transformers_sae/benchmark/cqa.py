@@ -34,19 +34,26 @@ class CQA(BenchmarkRunner):
         return prompt
 
     def prepare_dataset(self) -> list[DatasetInfo]:
+        split = self.split or "validation"
         base_dataset = load_dataset(
             "tau/commonsense_qa",
             streaming=True,
-        )["train"]
-        num_examples = base_dataset.info.splits["train"].num_examples - self.n_shots
-        shot_dataset = base_dataset.take(self.n_shots)
-        preamble = (
-            "\n\n".join(
-                self.format_example(e, with_answer=True) for e in shot_dataset.to_list()
+        )[split]
+
+        num_examples = base_dataset.info.splits[split].num_examples - self.n_shots
+        if self.n_shots > 0:
+            shot_dataset = base_dataset.take(self.n_shots)
+            preamble = (
+                "\n\n".join(
+                    self.format_example(e, with_answer=True)
+                    for e in shot_dataset.to_list()
+                )
+                + "\n\n"
             )
-            + "\n\n"
-        )
-        dataset = base_dataset.skip(self.n_shots)
+            dataset = base_dataset.skip(self.n_shots)
+        else:
+            preamble = ""
+            dataset = base_dataset
         return [
             DatasetInfo(
                 dataset,

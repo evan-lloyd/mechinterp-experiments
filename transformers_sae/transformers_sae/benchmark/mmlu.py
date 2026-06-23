@@ -41,11 +41,11 @@ class MMLU(BenchmarkRunner):
                 streaming=True,
             )["test"]
             dev_dataset = load_dataset("cais/mmlu", subject, streaming=False)["dev"]
+            # preamble = (
+            #     "The following are multiple choice questions (with answers)"
+            #     f" about {subject.replace('_', ' ')}.\n\n"
+            # )
             preamble = (
-                "The following are multiple choice questions (with answers)"
-                f" about {subject.replace('_', ' ')}.\n\n"
-            )
-            preamble += (
                 "\n\n".join(
                     self.format_example(e, with_answer=True)
                     for e in dev_dataset.to_list()
