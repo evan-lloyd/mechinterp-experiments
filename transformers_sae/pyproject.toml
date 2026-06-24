@@ -28,7 +28,7 @@ dependencies = [
 version = "0.0.0"
 
 [tool.setuptools]
-packages = ["transformers_sae"]
+packages = ["transformers_sae", "transformers_sae.training_step"]
 
 [dependency-groups]
 dev = [
