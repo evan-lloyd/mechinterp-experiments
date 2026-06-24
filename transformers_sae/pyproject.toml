@@ -1,6 +1,7 @@
 [project]
 name = "transformers-sae"
 requires-python = ">=3.13,<3.14"
+packages = ["transformers_sae"]
 dependencies = [
     "accelerate>=1.12.0",
     "bitarray>=3.8.0",
