@@ -47,22 +47,22 @@ name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
+# [[tool.uv.index]]
+# name = "pytorch-cpu"
+# url = "https://download.pytorch.org/whl/cpu"
+# explicit = true
 
-[tool.uv.sources]
-torch = [
-    { index = "pytorch-cpu", marker = "platform_system == 'Darwin'" },
-    { index = "pytorch-cu128", marker = "platform_system != 'Darwin'" },
-    # { index = "pytorch-cu130", marker = "platform_system != 'Darwin'" },
-]
-torchvision = [
-    { index = "pytorch-cpu", marker = "platform_system == 'Darwin'" },
-    { index = "pytorch-cu128", marker = "platform_system != 'Darwin'" },
-    # { index = "pytorch-cu130", marker = "platform_system != 'Darwin'" },
-]
+# [tool.uv.sources]
+# torch = [
+#     { index = "pytorch-cpu", marker = "platform_system == 'Darwin'" },
+#     { index = "pytorch-cu128", marker = "platform_system != 'Darwin'" },
+#     # { index = "pytorch-cu130", marker = "platform_system != 'Darwin'" },
+# ]
+# torchvision = [
+#     { index = "pytorch-cpu", marker = "platform_system == 'Darwin'" },
+#     { index = "pytorch-cu128", marker = "platform_system != 'Darwin'" },
+#     # { index = "pytorch-cu130", marker = "platform_system != 'Darwin'" },
+# ]
 
 [tool.uv]
 # Force compatibility with sae-bench
