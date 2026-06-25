@@ -222,9 +222,9 @@ class SAE(torch.nn.Module):
         thresholds = []
         for a in self.encoder.activation:
             if hasattr(a, "threshold_offset"):
-                thresholds.append(a.threshold_offset)
+                thresholds.append(a.threshold_offset.item())
             elif hasattr(a, "threshold"):
-                thresholds.append(a.threshold)
+                thresholds.append(a.threshold.item())
         return tuple(thresholds)
 
     def set_activation_thresholds(self, thresholds: Tuple[float]):
