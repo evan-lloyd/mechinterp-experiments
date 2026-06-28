@@ -149,4 +149,4 @@ if [[ "$data_type" == "benchmark" ]]; then
   echo "  include: $include_pattern"
 fi
 
-uv run hf buckets $cmd "${extra_args[@]}" "$from_dir" "$to_dir"
+hf buckets $cmd "${extra_args[@]}" "$from_dir" "$to_dir"

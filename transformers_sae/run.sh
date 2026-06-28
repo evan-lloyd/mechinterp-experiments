@@ -27,6 +27,7 @@ _run_completions() {
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
     complete -F _run_completions run.sh
     complete -F _run_completions ./run.sh
+    source .venv/bin/activate
     return 0
 fi
 
@@ -57,9 +58,9 @@ fi
 # Check for Python script
 if [[ -f "$SCRIPTS_DIR/$SCRIPT_NAME.py" ]]; then
     if [[ $USE_PDB -eq 1 ]]; then
-        exec uv run python -m "scripts.debug" $SCRIPT_NAME.py "$@"
+        exec python -m "scripts.debug" $SCRIPT_NAME.py "$@"
     else
-        exec uv run -m "scripts.$SCRIPT_NAME" "$@"
+        exec python -m "scripts.$SCRIPT_NAME" "$@"
     fi
 # Check for shell script
 elif [[ -f "$SCRIPTS_DIR/$SCRIPT_NAME.sh" ]]; then
