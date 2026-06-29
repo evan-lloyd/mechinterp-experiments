@@ -59,6 +59,9 @@ class ReplacementModel:
     transformers_class: type
     layer_class: type
 
+    def post_init(self):
+        pass
+
     def __init__(self):
         raise NotImplementedError(
             "ReplacementModel should not be instantiated directly; use make_replacement_model instead"
@@ -117,6 +120,11 @@ class ReplacementModel:
 
 
 class GemmaReplacement(ReplacementModel):
+    def post_init(self):
+        # So we don't crash on virtual logits layer
+        if hasattr(self.config, "layer_types"):
+            self.config.layer_types.append(self.config.layer_types[-1])
+
     def get_base_model_args(self, batch, model_input, start_at_embedding):
         input_args, input_kwargs = super().get_base_model_args(
             batch, model_input, start_at_embedding
@@ -151,7 +159,14 @@ class GemmaReplacement(ReplacementModel):
             layer_idx, layer, *args, **kwargs
         )
         layer_kwargs["position_embeddings"] = kwargs["position_embeddings"]
-        layer_kwargs["attention_mask"] = kwargs["attention_mask"][layer.attention_type]
+        if hasattr(layer, "attention_type"):
+            layer_kwargs["attention_mask"] = kwargs["attention_mask"][
+                layer.attention_type
+            ]
+        else:
+            layer_kwargs["attention_mask"] = kwargs["attention_mask"][
+                layer.self_attn.layer_type
+            ]
         return layer_args, layer_kwargs
 
 
@@ -247,6 +262,7 @@ def make_replacement_model(
     object.__setattr__(new_instance, "sae_layers", replacement_layers)
     object.__setattr__(new_instance, "layer_path", layer_path)
     object.__setattr__(new_instance, "layer_class", layer_class)
+    new_instance.post_init()
 
     assert isinstance(new_instance, ReplacementModel)
     return new_instance

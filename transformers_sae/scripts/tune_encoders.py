@@ -9,7 +9,6 @@ import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from transformers_sae.benchmark.cqa import CQA
 from transformers_sae.ops import (
     MemoryTrackingMode,
     method_to_saes,
@@ -33,12 +32,12 @@ else:
 model_id = "google/gemma-2-2b"
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-# training_dataset = load_dataset(
-#     "monology/pile-uncopyrighted-parquet",
-#     split="train",
-#     streaming=True,
-#     columns=["text"],
-# )
+training_dataset = load_dataset(
+    "monology/pile-uncopyrighted-parquet",
+    split="train",
+    streaming=True,
+    columns=["text"],
+)
 validation_dataset = load_dataset(
     "monology/pile-test-val",
     split="validation",
@@ -65,18 +64,6 @@ with MemoryTrackingMode() as mtm:
     )
     model.eval()
     model.requires_grad_(False)
-
-cqa = CQA(
-    n_shots=10,
-    subsets=["all"],
-    max_context=model.context_length,
-    debiasing_sample_fraction=0.0,
-    max_samples=None,
-    run_permutations=False,
-    split="train",
-)
-training_dataset = cqa.dataset
-
 
 print(model)
 print(mtm.memory_max)
@@ -193,7 +180,7 @@ for training_method in args.training_methods:
             training_config,
             num_encoder_tuning_tokens=NUM_ENCODER_TUNING_TOKENS,
             num_threshold_tuning_tokens=NUM_THRESHOLD_TUNING_TOKENS,
-            checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{start_layer}_cqa",
+            checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{training_method}_tuned_encoder_{start_layer}",
             force_retrain=False,
             train_encoders_from_scratch=False,
             # run_full_evals=True,

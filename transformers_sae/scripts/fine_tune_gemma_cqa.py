@@ -1,11 +1,15 @@
+from datasets.iterable_dataset import IterableDataset
+from typing import Any
 import argparse
 import os
+from functools import partial
 
 import numpy as np
 import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from transformers_sae.benchmark.cqa import CQA
 from transformers_sae.ops import MemoryTrackingMode
 from transformers_sae.replacement_model import GemmaReplacement, make_replacement_model
 from transformers_sae.training import (
@@ -28,12 +32,12 @@ else:
 
 model_id = "google/gemma-2-2b"
 tokenizer = AutoTokenizer.from_pretrained(model_id)
-training_dataset = load_dataset(
-    "monology/pile-uncopyrighted-parquet",
-    split="train",
-    streaming=True,
-    columns=["text"],
-)
+# training_dataset = load_dataset(
+#     "monology/pile-uncopyrighted-parquet",
+#     split="train",
+#     streaming=True,
+#     columns=["text"],
+# )
 validation_dataset = load_dataset(
     "monology/pile-test-val",
     split="validation",
@@ -66,26 +70,51 @@ print(model)
 print(mtm.memory_max)
 print(mtm.memory_cur)
 
+cqa = CQA(
+    n_shots=0,
+    subsets=["all"],
+    max_context=model.context_length,
+    debiasing_sample_fraction=0.0,
+    max_samples=None,
+    run_permutations=False,
+    split="train",
+)
+
+
+def _format_with_answers(preamble: str, example: dict[str, Any]):
+    example["text"] = preamble + cqa.format_example(example, 0, True)
+    return example
+
+
+base_dataset = cqa.prepare_dataset()[0]
+base_dataset = base_dataset.dataset.map(
+    partial(_format_with_answers, base_dataset.preamble)
+).to_list()
+
+
+def _make_training_dataset():
+    # Yield variable-sized concatenated examples as fine-tuning set
+    cur_offset = 0
+    while cur_offset < len(base_dataset):
+        num_examples = np.random.randint(5, 25)
+        yield {
+            "text": "\n\n".join(
+                e["text"] for e in base_dataset[cur_offset : cur_offset + num_examples]
+            )
+        }
+        cur_offset += num_examples
+
+
+training_dataset = IterableDataset.from_generator(_make_training_dataset).repeat(None)
+
 NUM_TRAINING_TOKENS = int(5e7)
-NUM_FINETUNE_TOKENS = int(1e7)
+NUM_FINETUNE_TOKENS = int(1e6)
 TOTAL_TOKENS = NUM_TRAINING_TOKENS + NUM_FINETUNE_TOKENS
 FINETUNE_FRACTION = NUM_FINETUNE_TOKENS / TOTAL_TOKENS
 EVAL_INTERVAL = int(1e5)
 NUM_VALIDATION_TOKENS = int(1e6)
 TOKENIZER_BATCH_SIZE = 256
 CHECKPOINT_BASE_PATH = f"{os.getenv('HF_BUCKET_LOCAL')}/gemma_2_2b"
-
-parser = argparse.ArgumentParser(
-    description="Tune encoder(s) for specified training method(s)"
-)
-parser.add_argument(
-    "-m",
-    "--method",
-    dest="training_method",
-    required=True,
-    help="Training method of input SAEs",
-)
-args = parser.parse_args()
 
 
 def linear_decay_during_finetune(frac_trained: float, **kwargs):
@@ -100,7 +129,6 @@ training_config = TrainingConfig(
     num_train_tokens=TOTAL_TOKENS,
     eval_interval=EVAL_INTERVAL,
     train_layers=list(range(0, model.num_layers)),
-    # train_layers=list(range(model.num_layers - 2, model.num_layers)),
     betas=(
         0.0,
         0.999,
@@ -116,18 +144,32 @@ training_config = TrainingConfig(
     finetune_fraction=FINETUNE_FRACTION,
 )
 
+END_LAYER = model.num_layers - 1
+
+parser = argparse.ArgumentParser(
+    description="Tune encoder(s) for specified training method(s)"
+)
+parser.add_argument(
+    "-m",
+    "--method",
+    dest="training_method",
+    required=True,
+    help="Training method of input SAEs",
+)
+args = parser.parse_args()
+
 training_results = train(
     model,
     tokenizer,
     {},
     training_dataset,
     training_config,
-    checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{args.training_method.replace('standard', 'standard_finetuned').replace('next_layer', 'next_layer_finetuned')}",
+    checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{args.training_method}_finetuned_cqa",
     fine_tune_source_dir=f"{CHECKPOINT_BASE_PATH}/{args.training_method}",
     force_retrain=False,
     offload_after_training=False,
     fine_tune_in_place=False,
-    override_token_offset=NUM_TRAINING_TOKENS,
+    override_token_offset=0
 )
 
 validations = run_validations(

@@ -1036,8 +1036,8 @@ def train(
     try:
         model.eval()
 
-        assert (override_token_offset is not None) == fine_tune_in_place, (
-            "override_token_offset only valid option if fine_tune_in_place"
+        assert override_token_offset is not None or not fine_tune_in_place, (
+            "override_token_offset must be set if fine_tune_in_place"
         )
 
         if extend_training_run:
