@@ -1,5 +1,4 @@
 from __future__ import annotations
-from transformers_sae.data_batch import DataBatch
 
 import os
 import re
@@ -28,34 +27,21 @@ import torch
 from datasets import IterableDataset
 from transformers import AutoTokenizer
 
-from transformers_sae.metrics import (
-    kl_loss,
-    l0_eval,
-    mse_loss,
-    tmse_loss,
-    cauchy_loss,
-    feature_mse_loss,
-)
-from transformers_sae.training_step.in_place_finetuned import (
-    InPlaceFinetunedTrainingStepper,
-)
+from transformers_sae.data_batch import DataBatch
+from transformers_sae.metrics import feature_mse_loss, kl_loss, l0_eval
 
 from .activation_cache import load_cache
 from .activation_data import (
     TrainingBatch,
     make_activation_batch,
     make_batch_for_evals,
-    ActivationBatch,
 )
-from .encoder import LISTA, BatchTopKActivationFunctionConfig
 from .multiline_progress import MultilineProgress
 from .ops import (
     find_checkpoint_after,
     find_latest_checkpoint,
-    get_state_dict_from_checkpoint,
     load_checkpoint,
     save_training_result,
-    hook_input,
 )
 from .replacement_model import ReplacementModel, make_replacement_model
 from .sae import SAE
@@ -63,10 +49,14 @@ from .tokenization import make_dataloader
 from .training_step import (
     EndToEndFullTrainingStepper,
     EndToEndTrainingStepper,
+    FullReplacementFinetunedTrainingStepper,
     FullReplacementTrainingStepper,
+    InPlaceFinetunedTrainingStepper,
     KLFinetuneTrainingStepper,
+    MultiSAEStepper,
     NextLayerFinetunedTrainingStepper,
     NextLayerTrainingStepper,
+    SingleSAEStepper,
     StandardTrainingStepper,
     Stepper,
 )
@@ -81,7 +71,38 @@ class TrainingMethod(Enum):
     next_layer_finetuned = "Next Layer + Fine-Tuning"
     e2e_full = "End-to-end Full Replacement"
     full_replacement = "Full Replacement"
+    full_replacement_finetuned = "Full Replacement Fine-Tuning"
     in_place_finetuned = "Next Layer + In-Place Fine-Tuning"
+
+    @classmethod
+    def _stepper_class_for(cls, method: TrainingMethod) -> type[Stepper]:
+        return {
+            cls.standard: StandardTrainingStepper,
+            cls.next_layer: NextLayerTrainingStepper,
+            cls.e2e: EndToEndTrainingStepper,
+            cls.e2e_full: EndToEndFullTrainingStepper,
+            cls.finetuned: KLFinetuneTrainingStepper,
+            cls.next_layer_finetuned: NextLayerFinetunedTrainingStepper,
+            cls.full_replacement: FullReplacementTrainingStepper,
+            cls.full_replacement_finetuned: FullReplacementFinetunedTrainingStepper,
+            cls.in_place_finetuned: InPlaceFinetunedTrainingStepper,
+        }[method]
+
+    @classmethod
+    def to_stepper(
+        cls,
+        method: TrainingMethod,
+        model: ReplacementModel,
+        layer: int,
+        saes: dict[int, SAE],
+    ):
+        stepper_class = cls._stepper_class_for(method)
+        if issubclass(stepper_class, SingleSAEStepper):
+            return stepper_class(model, layer, saes)
+        elif issubclass(stepper_class, MultiSAEStepper):
+            return stepper_class(model, saes)
+        else:
+            raise ValueError(f"Unknown stepper type: {stepper_class}")
 
 
 class LRSchedule(Protocol):
@@ -649,7 +670,9 @@ def tune_encoder(
                             next_layer_loss = kl_scale * next_layer_loss
                         else:
                             next_layer_loss = cur_layer_loss.item()
-                    loss = (cur_layer_loss + next_layer_loss) / 2
+
+                        loss = (cur_layer_loss + next_layer_loss) / 2
+                    # end autocast
 
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(
@@ -1041,9 +1064,15 @@ def train(
         )
 
         if extend_training_run:
-            assert checkpoint_dir is not None, "Must specify checkpoint_dir to extend_training_run"
-            assert not fine_tune_in_place, "Can't fine_tune_in_place with extend_training_run"
-            final_checkpoint_dir = checkpoint_dir + f"_extended_{config.num_train_tokens}_tokens"
+            assert checkpoint_dir is not None, (
+                "Must specify checkpoint_dir to extend_training_run"
+            )
+            assert not fine_tune_in_place, (
+                "Can't fine_tune_in_place with extend_training_run"
+            )
+            final_checkpoint_dir = (
+                checkpoint_dir + f"_extended_{config.num_train_tokens}_tokens"
+            )
         else:
             final_checkpoint_dir = checkpoint_dir
 
@@ -1063,7 +1092,9 @@ def train(
                 latest_checkpoint = find_latest_checkpoint(final_checkpoint_dir, layer)
                 if extend_training_run and latest_checkpoint is None:
                     latest_checkpoint = find_latest_checkpoint(checkpoint_dir, layer)
-                    assert latest_checkpoint is not None, f"Couldn't find checkpoint for layer {layer}"
+                    assert latest_checkpoint is not None, (
+                        f"Couldn't find checkpoint for layer {layer}"
+                    )
             else:
                 latest_checkpoint = None
 
@@ -1086,7 +1117,9 @@ def train(
                 training_saes[layer] = sae
                 token_offset = checkpoint.total_tokens_trained
                 if fine_tune_in_place:
-                    with open(f"{final_checkpoint_dir}/train_thresholds_{layer}", "rb") as f:
+                    with open(
+                        f"{final_checkpoint_dir}/train_thresholds_{layer}", "rb"
+                    ) as f:
                         loaded_thresholds = cloudpickle.load(f)
                     for update_layer, sae in training_saes.items():
                         sae.set_activation_thresholds(loaded_thresholds[update_layer])
@@ -1151,24 +1184,10 @@ def train(
             else:
                 make_checkpoints_at = None
 
-            if config.method is TrainingMethod.standard:
-                stepper = StandardTrainingStepper(model, layer, training_saes)
-            elif config.method is TrainingMethod.next_layer:
-                stepper = NextLayerTrainingStepper(model, layer, training_saes)
-            elif config.method is TrainingMethod.e2e:
-                stepper = EndToEndTrainingStepper(model, layer, training_saes)
-            elif config.method is TrainingMethod.e2e_full:
-                stepper = EndToEndFullTrainingStepper(model, layer, training_saes)
-            elif config.method is TrainingMethod.finetuned:
-                stepper = KLFinetuneTrainingStepper(model, layer, training_saes)
-            elif config.method is TrainingMethod.next_layer_finetuned:
-                stepper = NextLayerFinetunedTrainingStepper(model, layer, training_saes)
-            elif config.method is TrainingMethod.full_replacement:
-                stepper = FullReplacementTrainingStepper(model, training_saes)
-            elif config.method is TrainingMethod.in_place_finetuned:
-                stepper = InPlaceFinetunedTrainingStepper(model, layer, training_saes)
-
             eval_model = make_replacement_model(model, training_saes)
+            stepper = TrainingMethod.to_stepper(
+                config.method, model, layer, training_saes
+            )
 
             if config.method is TrainingMethod.full_replacement:
                 optimizer = make_optimizer(
@@ -1240,7 +1259,9 @@ def train(
                     blocking=True,
                 )
                 if fine_tune_in_place:
-                    with open(f"{final_checkpoint_dir}/train_thresholds_{layer}", "wb") as f:
+                    with open(
+                        f"{final_checkpoint_dir}/train_thresholds_{layer}", "wb"
+                    ) as f:
                         cloudpickle.dump(
                             {
                                 save_layer: sae.activation_thresholds()

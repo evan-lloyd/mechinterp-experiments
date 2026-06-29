@@ -14,12 +14,10 @@ if TYPE_CHECKING:
 
 
 class FullReplacementTrainingStepper(MultiSAEStepper):
-    def __init__(self, base_model: ReplacementModel, saes: Dict[int, SAE]):
-        super().__init__(
-            base_model,
-            make_replacement_model(base_model, saes),
-            saes,
-        )
+    def _make_replacement_model(
+        self, base_model: ReplacementModel, saes: dict[int, SAE]
+    ) -> ReplacementModel:
+        return make_replacement_model(base_model, saes)
 
     def run_baseline(
         self, batch: DataBatch, cache: torch.Tensor | None

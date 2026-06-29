@@ -14,20 +14,17 @@ if TYPE_CHECKING:
 
 
 class NextLayerFinetunedTrainingStepper(SingleSAEStepper):
-    def __init__(
-        self, base_model: ReplacementModel, target_layer: int, saes: Dict[int, SAE]
-    ):
-        super().__init__(
+    def _make_replacement_model(
+        self, base_model: ReplacementModel, saes: dict[int, SAE]
+    ) -> ReplacementModel:
+        return make_replacement_model(
             base_model,
-            make_replacement_model(
-                base_model,
-                {
-                    layer: saes[layer]
-                    for layer in range(target_layer, base_model.num_layers)
-                },
-            ),
-            target_layer,
-            saes[target_layer],
+            {
+                layer: saes[layer]
+                for layer in range(
+                    self.target_layer, min(self.target_layer + 2, base_model.num_layers)
+                )
+            },
         )
 
     def run_replacement(

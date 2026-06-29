@@ -20,10 +20,17 @@ class Stepper(ABC):
     def __init__(
         self,
         base_model: ReplacementModel,
-        replacement_model: ReplacementModel,
+        saes: dict[int, SAE],
     ):
         self.base_model = base_model
-        self.replacement_model = replacement_model
+        self.replacement_model = self._make_replacement_model(base_model, saes)
+
+    def _make_replacement_model(
+        self, base_model: ReplacementModel, saes: dict[int, SAE]
+    ) -> ReplacementModel:
+        raise NotImplementedError(
+            "EStepper subclasses must implement _make_replacement_model"
+        )
 
     @property
     def replacement_layers(self) -> List[int]:
@@ -114,13 +121,12 @@ class SingleSAEStepper(Stepper):
     def __init__(
         self,
         base_model: ReplacementModel,
-        replacement_model: ReplacementModel,
         target_layer: int,
-        sae: SAE,
+        saes: dict[int, SAE],
     ):
-        super().__init__(base_model, replacement_model)
         self.target_layer = target_layer
-        self.sae = sae
+        self.sae = saes[target_layer]
+        super().__init__(base_model, saes)
 
     def make_checkpoint(self, layer: int, offload_to_cpu: bool = True) -> SAE:
         return clone_sae(self.sae, to_device="cpu" if offload_to_cpu else None)
@@ -136,11 +142,10 @@ class MultiSAEStepper(Stepper):
     def __init__(
         self,
         base_model: ReplacementModel,
-        replacement_model: ReplacementModel,
         saes: Dict[int, SAE],
     ):
-        super().__init__(base_model, replacement_model)
         self.saes = {**saes}
+        super().__init__(base_model, saes)
 
     def make_checkpoint(self, layer: int, offload_to_cpu: bool = True) -> SAE:
         return clone_sae(self.saes[layer], to_device="cpu" if offload_to_cpu else None)

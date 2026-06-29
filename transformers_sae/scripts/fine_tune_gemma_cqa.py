@@ -1,12 +1,12 @@
-from datasets.iterable_dataset import IterableDataset
-from typing import Any
 import argparse
 import os
 from functools import partial
+from typing import Any
 
 import numpy as np
 import torch
-from datasets import load_dataset
+from datasets import interleave_datasets, load_dataset
+from datasets.iterable_dataset import IterableDataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from transformers_sae.benchmark.cqa import CQA
@@ -30,14 +30,25 @@ else:
     TRAINING_DEVICE = "cpu"
     TRAINING_BATCH_SIZE = 2
 
+RANDOM_SEED = 179081059
+NUM_TRAINING_TOKENS = int(5e7)
+NUM_FINETUNE_TOKENS = int(1e7)
+CQA_FRACTION = 0.10
+TOTAL_TOKENS = NUM_TRAINING_TOKENS + NUM_FINETUNE_TOKENS
+FINETUNE_FRACTION = NUM_FINETUNE_TOKENS / TOTAL_TOKENS
+EVAL_INTERVAL = int(1e5)
+NUM_VALIDATION_TOKENS = int(1e6)
+TOKENIZER_BATCH_SIZE = 256
+CHECKPOINT_BASE_PATH = f"{os.getenv('HF_BUCKET_LOCAL')}/gemma_2_2b"
+
 model_id = "google/gemma-2-2b"
 tokenizer = AutoTokenizer.from_pretrained(model_id)
-# training_dataset = load_dataset(
-#     "monology/pile-uncopyrighted-parquet",
-#     split="train",
-#     streaming=True,
-#     columns=["text"],
-# )
+main_training_dataset = load_dataset(
+    "monology/pile-uncopyrighted-parquet",
+    split="train",
+    streaming=True,
+    columns=["text"],
+)
 validation_dataset = load_dataset(
     "monology/pile-test-val",
     split="validation",
@@ -105,16 +116,14 @@ def _make_training_dataset():
         cur_offset += num_examples
 
 
-training_dataset = IterableDataset.from_generator(_make_training_dataset).repeat(None)
-
-NUM_TRAINING_TOKENS = int(5e7)
-NUM_FINETUNE_TOKENS = int(1e6)
-TOTAL_TOKENS = NUM_TRAINING_TOKENS + NUM_FINETUNE_TOKENS
-FINETUNE_FRACTION = NUM_FINETUNE_TOKENS / TOTAL_TOKENS
-EVAL_INTERVAL = int(1e5)
-NUM_VALIDATION_TOKENS = int(1e6)
-TOKENIZER_BATCH_SIZE = 256
-CHECKPOINT_BASE_PATH = f"{os.getenv('HF_BUCKET_LOCAL')}/gemma_2_2b"
+training_dataset = interleave_datasets(
+    [
+        IterableDataset.from_generator(_make_training_dataset).repeat(None),
+        main_training_dataset,
+    ],
+    probabilities=[CQA_FRACTION, 1.0 - CQA_FRACTION],
+    seed=RANDOM_SEED,
+)
 
 
 def linear_decay_during_finetune(frac_trained: float, **kwargs):
@@ -140,7 +149,7 @@ training_config = TrainingConfig(
     downstream_reconstruction_weight=1.0,
     reconstruction_weight=1.0,
     balance_reconstruction_losses=True,
-    method=TrainingMethod.finetuned,
+    method=TrainingMethod.next_layer_finetuned,
     finetune_fraction=FINETUNE_FRACTION,
 )
 
@@ -169,7 +178,7 @@ training_results = train(
     force_retrain=False,
     offload_after_training=False,
     fine_tune_in_place=False,
-    override_token_offset=0
+    override_token_offset=0,
 )
 
 validations = run_validations(

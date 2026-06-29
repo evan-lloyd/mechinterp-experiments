@@ -5,7 +5,7 @@ import torch
 from ..activation_data import ActivationBatch, TrainingBatch, make_activation_batch
 from ..data_batch import DataBatch
 from ..metrics import kl_loss, mse_loss
-from ..replacement_model import make_replacement_model, ReplacementModel
+from ..replacement_model import ReplacementModel, make_replacement_model
 from ..sae import SAE
 from .training_step import SingleSAEStepper
 
@@ -14,20 +14,15 @@ if TYPE_CHECKING:
 
 
 class EndToEndFullTrainingStepper(SingleSAEStepper):
-    def __init__(
-        self, base_model: ReplacementModel, target_layer: int, saes: Dict[int, SAE]
-    ):
-        super().__init__(
+    def _make_replacement_model(
+        self, base_model: ReplacementModel, saes: dict[int, SAE]
+    ) -> ReplacementModel:
+        return make_replacement_model(
             base_model,
-            make_replacement_model(
-                base_model,
-                {
-                    layer: saes[layer]
-                    for layer in range(target_layer, base_model.num_layers)
-                },
-            ),
-            target_layer,
-            saes[target_layer],
+            {
+                layer: saes[layer]
+                for layer in range(self.target_layer, base_model.num_layers)
+            },
         )
 
     def run_replacement(

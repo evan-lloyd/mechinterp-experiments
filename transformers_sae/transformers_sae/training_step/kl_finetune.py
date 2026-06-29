@@ -14,14 +14,11 @@ if TYPE_CHECKING:
 
 
 class KLFinetuneTrainingStepper(SingleSAEStepper):
-    def __init__(
-        self, base_model: ReplacementModel, target_layer: int, saes: Dict[int, SAE]
-    ):
-        super().__init__(
-            base_model,
-            make_replacement_model(base_model, {target_layer: saes[target_layer]}),
-            target_layer,
-            saes[target_layer],
+    def _make_replacement_model(
+        self, base_model: ReplacementModel, saes: dict[int, SAE]
+    ) -> ReplacementModel:
+        return make_replacement_model(
+            base_model, {self.target_layer: saes[self.target_layer]}
         )
 
     def run_replacement(
