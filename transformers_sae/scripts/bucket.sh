@@ -26,6 +26,9 @@ Examples:
   bucket.sh download checkpoint -n sparse_autoencoder
   bucket.sh upload benchmark -n standard -m gemma_2_2b -b mmlu
   bucket.sh download benchmark -n mymethod -m gemma_2_2b --all
+
+Tab completion:
+  source bucket-completion.sh (zsh: run `autoload -U +X bashcompinit && bashcompinit` first)
 EOF
 }
 
