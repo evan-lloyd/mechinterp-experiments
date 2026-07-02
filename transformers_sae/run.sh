@@ -9,17 +9,28 @@ SCRIPTS_DIR="scripts"
 _run_completions() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local scripts=""
-    
+
+    # Past the script name, delegate `run.sh bucket ...` to bucket.sh's
+    # own completion (sourced from scripts/bucket-completion.sh below)
+    if [[ $COMP_CWORD -ge 2 ]]; then
+        if [[ "${COMP_WORDS[1]}" == "bucket" ]] && command -v _bucket_sh >/dev/null; then
+            COMP_WORDS=("${COMP_WORDS[@]:1}")
+            COMP_CWORD=$((COMP_CWORD - 1))
+            _bucket_sh
+        fi
+        return
+    fi
+
     if [[ -d "$SCRIPTS_DIR" ]]; then
         for f in "$SCRIPTS_DIR"/*.py "$SCRIPTS_DIR"/*.sh; do
-            if [[ -f "$f" ]]; then
+            if [[ -f "$f" && "$f" != *-completion.sh ]]; then
                 local basename=$(basename "$f")
                 local name="${basename%.*}"
                 scripts="$scripts $name"
             fi
         done
     fi
-    
+
     COMPREPLY=($(compgen -W "$scripts" -- "$cur"))
 }
 
@@ -27,6 +38,7 @@ _run_completions() {
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
     complete -F _run_completions run.sh
     complete -F _run_completions ./run.sh
+    source "$(dirname "${BASH_SOURCE[0]:-.}")/scripts/bucket-completion.sh"
     source .venv/bin/activate
     return 0
 fi
@@ -37,7 +49,7 @@ if [[ $# -lt 1 ]]; then
     echo "Available scripts:"
     if [[ -d "$SCRIPTS_DIR" ]]; then
         for f in "$SCRIPTS_DIR"/*.py "$SCRIPTS_DIR"/*.sh; do
-            if [[ -f "$f" ]]; then
+            if [[ -f "$f" && "$f" != *-completion.sh ]]; then
                 echo "  $(basename "${f%.*}")"
             fi
         done
