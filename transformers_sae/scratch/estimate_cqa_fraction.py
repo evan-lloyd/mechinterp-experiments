@@ -12,12 +12,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers_sae.benchmark.cqa import CQA
 from transformers_sae.ops import MemoryTrackingMode
 from transformers_sae.replacement_model import GemmaReplacement, make_replacement_model
-from transformers_sae.training import (
-    TrainingConfig,
-    TrainingMethod,
-    train,
-)
-from transformers_sae.validation import generate_with_replacement, run_validations
+from transformers_sae.tokenization import make_dataloader
+from transformers_sae.training import TrainingConfig, TrainingMethod
 
 # Tweak TRAINING_BATCH_SIZE for your hardware if necessary
 if torch.cuda.is_available():
@@ -116,10 +112,6 @@ def _make_cqa_dataset():
         cur_offset += num_examples
 
 
-# NB: this doesn't guarantee that we hit the CQA fraction in terms of tokens, since the interleaving happens
-# at the level of full examples. However, I sanity checked the ratio we actually get with this setup and seed
-# (scratch/estimate_cqa_fraction.py) and it's very close:
-# CQA fraction: 0.11748465635095147 (CQA 1175084, pile 8826937, total 10002021)
 training_dataset = interleave_datasets(
     [
         IterableDataset.from_generator(_make_cqa_dataset).repeat(None),
@@ -135,33 +127,6 @@ def linear_decay_during_finetune(frac_trained: float, **kwargs):
         return 1.0
     return 1.0 - (frac_trained - (1 - FINETUNE_FRACTION)) / FINETUNE_FRACTION
 
-
-parser = argparse.ArgumentParser(
-    description="Tune encoder(s) for specified training method(s)"
-)
-parser.add_argument(
-    "-m",
-    "--method",
-    dest="training_method",
-    required=True,
-    help="Training method of input SAEs",
-)
-parser.add_argument(
-    "-f",
-    "--finetune-method",
-    dest="finetune_method",
-    default="next_layer_finetuned",
-    choices=["next_layer_finetuned", "finetuned"],
-    help="Fine-tuning method to use (default: next_layer_finetuned)",
-)
-args = parser.parse_args()
-
-if args.finetune_method == "next_layer_finetuned":
-    selected_finetune_method = TrainingMethod.next_layer_finetuned
-elif args.finetune_method == "finetuned":
-    selected_finetune_method = TrainingMethod.finetuned
-else:
-    raise ValueError(f"Unknown finetune_method: {args.finetune_method}")
 
 training_config = TrainingConfig(
     tokenizer_batch_size=TOKENIZER_BATCH_SIZE,
@@ -180,68 +145,27 @@ training_config = TrainingConfig(
     downstream_reconstruction_weight=1.0,
     reconstruction_weight=1.0,
     balance_reconstruction_losses=True,
-    method=selected_finetune_method,
+    method=TrainingMethod.next_layer_finetuned,
     finetune_fraction=FINETUNE_FRACTION,
 )
 
-END_LAYER = model.num_layers - 1
-
-training_results = train(
+num_cqa_tokens = 0
+num_pile_tokens = 0
+for batch in make_dataloader(
     model,
     tokenizer,
-    {},
     training_dataset,
-    training_config,
-    checkpoint_dir=f"{CHECKPOINT_BASE_PATH}/{args.training_method}_finetuned_cqa",
-    fine_tune_source_dir=f"{CHECKPOINT_BASE_PATH}/{args.training_method}",
-    force_retrain=False,
-    offload_after_training=False,
-    fine_tune_in_place=False,
-    override_token_offset=0,
-)
-
-validations = run_validations(
-    model,
-    tokenizer,
-    training_results.final_saes,
-    validation_dataset,
-    TOKENIZER_BATCH_SIZE,
-    TRAINING_BATCH_SIZE,
-    NUM_VALIDATION_TOKENS,
-    start_layer=training_config.train_layers[0],
-    offload=False,
-)
+    max_tokens=int(1e7),
+    tokenizer_batch_size=training_config.tokenizer_batch_size,
+    inference_batch_size=training_config.training_batch_size,
+    include_example_info=True,
+):
+    for ex in batch.example_info:
+        if ex.original_example["text"].startswith("Question:"):
+            num_cqa_tokens += ex.token_range[-1] - ex.token_range[0]
+        else:
+            num_pile_tokens += ex.token_range[-1] - ex.token_range[0]
 
 print(
-    f"mean rre={ {k: np.mean(v.rre).item() for k, v in validations.layer_results.items() if v.rre is not None} }"
+    f"CQA fraction: {num_cqa_tokens / (num_cqa_tokens + num_pile_tokens)} (CQA {num_cqa_tokens}, pile {num_pile_tokens}, total {num_cqa_tokens + num_pile_tokens})"
 )
-print(
-    f"geom mean rre={ {k: np.exp(np.mean(np.log(np.clip(v.rre, a_min=1e-9, a_max=None)))).item() for k, v in validations.layer_results.items() if v.rre is not None} }"
-)
-print(
-    f"mean l0={ {k: np.mean(v.l0).item() for k, v in validations.layer_results.items() if v.l0 is not None} }"
-)
-print(
-    f"geom mean kl={ {k: np.exp(np.mean(np.log(np.clip(v.kl, min=1e-9)))).item() for k, v in validations.layer_results.items() if v.kl is not None} }"
-)
-print(
-    f"arith mean kl={ {k: np.mean(v.kl).item() for k, v in validations.layer_results.items() if v.kl is not None} }"
-)
-print(
-    f"live features={ {k: sum(v.live_features) / training_results.final_saes[k].config.d_sae for k, v in validations.layer_results.items() if v.live_features is not None} }"
-)
-
-# with torch.autocast(
-#     device_type="cuda" if model.device.type == "cuda" else "cpu",
-#     dtype=torch.bfloat16,
-# ):
-#     generate_with_replacement(
-#         model,
-#         tokenizer,
-#         "The capital of France,",
-#         {
-#             layer: sae
-#             for layer, sae in training_results.final_saes.items()
-#             if layer >= training_config.train_layers[0]
-#         },
-#     )

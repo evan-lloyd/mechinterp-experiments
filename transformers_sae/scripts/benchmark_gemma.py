@@ -138,12 +138,12 @@ BENCHMARK_SPECS = {
 }
 
 # For dev purposes, allow forcing re-run of specific benchmarks
-OVERRIDE_EXISTING_BENCHMARKS = {"cqa"}
-# BENCHMARK_SUBSET = set(BENCHMARK_SPECS.keys())
-BENCHMARK_SUBSET = {"cqa"}
+OVERRIDE_EXISTING_BENCHMARKS = {}
+BENCHMARK_SUBSET = set(BENCHMARK_SPECS.keys())
+# BENCHMARK_SUBSET = {"cqa", "mmlu", "arc-e"}
 # For dev, allow running truncated dataset
-MAX_SAMPLES = 400
-# MAX_SAMPLES = None
+# MAX_SAMPLES = 400
+MAX_SAMPLES = None
 
 # DEBIASING_SAMPLE_FRACTION = 0.0
 DEBIASING_SAMPLE_FRACTION = 0.05

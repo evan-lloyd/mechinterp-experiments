@@ -1214,6 +1214,8 @@ def train(
                             training_saes[other_layer].eval()
                             if offload_after_training and skip_kl_eval:
                                 training_saes[other_layer].offload()
+                            else:
+                                training_saes[other_layer].onload()
                 # backward_fn = None
                 optimizer = make_optimizer(training_saes, [layer], config)
 
