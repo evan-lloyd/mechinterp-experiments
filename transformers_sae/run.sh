@@ -36,6 +36,8 @@ _run_completions() {
 
 # Register completion if being sourced
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+    alias r='./run.sh'
+    complete -F _run_completions r
     complete -F _run_completions run.sh
     complete -F _run_completions ./run.sh
     source "$(dirname "${BASH_SOURCE[0]:-.}")/scripts/bucket-completion.sh"
