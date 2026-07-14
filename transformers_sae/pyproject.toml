@@ -45,6 +45,7 @@ dev = [
     "matplotlib>=3.10.8",
     "scipy>=1.17.0",
     "tabulate>=0.10.0",
+    "pandas>=3.0.4",
 ]
 
 [[tool.uv.index]]
