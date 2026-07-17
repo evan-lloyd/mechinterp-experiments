@@ -85,7 +85,21 @@ parser.add_argument(
     required=True,
     help="Training method of input SAEs",
 )
+parser.add_argument(
+    "-f",
+    "--finetune-method",
+    dest="finetune_method",
+    choices=["next_layer_finetuned", "finetuned"],
+    required=True,
+    help="Fine-tuning method to use",
+)
 args = parser.parse_args()
+if args.finetune_method == "next_layer_finetuned":
+    selected_finetune_method = TrainingMethod.next_layer_finetuned
+elif args.finetune_method == "finetuned":
+    selected_finetune_method = TrainingMethod.finetuned
+else:
+    raise ValueError(f"Unknown finetune_method: {args.finetune_method}")
 
 
 def linear_decay_during_finetune(frac_trained: float, **kwargs):
@@ -112,7 +126,7 @@ training_config = TrainingConfig(
     downstream_reconstruction_weight=1.0,
     reconstruction_weight=1.0,
     balance_reconstruction_losses=True,
-    method=TrainingMethod.finetuned,
+    method=selected_finetune_method,
     finetune_fraction=FINETUNE_FRACTION,
 )
 
