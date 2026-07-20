@@ -89,6 +89,13 @@ parser.add_argument(
     default=0,
     help="Starting layer for SAE replacement (default: 0)",
 )
+parser.add_argument(
+    "-t",
+    "--after-tokens",
+    type=int,
+    required=False,
+    help="Number of training tokens for target checkpoint (default: latest checkpoint)",
+)
 args = parser.parse_args()
 
 start_layer = args.start_layer
@@ -110,6 +117,7 @@ for training_method in args.training_methods:
         training_method.replace("_train_activations", ""),
         range(start_layer, model.num_layers),
         TRAINING_DEVICE,
+        after_tokens=args.after_tokens,
     )
     if set(saes.keys()) != set(range(start_layer, END_LAYER)):
         raise ValueError(f"Didn't find full range of SAEs for {training_method}")

@@ -82,6 +82,13 @@ parser.add_argument(
     required=True,
     help="Training method to validate (may be specified multiple times, e.g. -m next_layer_lista_onsager -m next_layer)",
 )
+parser.add_argument(
+    "-t",
+    "--after-tokens",
+    type=int,
+    required=False,
+    help="Number of training tokens for target checkpoint (default: latest checkpoint)",
+)
 args = parser.parse_args()
 
 for training_method in args.training_methods:
@@ -101,6 +108,7 @@ for training_method in args.training_methods:
         training_method.replace("_train_activations", ""),
         range(START_LAYER, model.num_layers),
         TRAINING_DEVICE,
+        after_tokens=args.after_tokens,
     )
     if not saes:
         raise ValueError("SAEs not found")

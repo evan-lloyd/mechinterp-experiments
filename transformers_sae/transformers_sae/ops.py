@@ -147,11 +147,17 @@ def save_checkpoint(checkpoint: "SAECheckpoint", out_file: str):
                 zf.write(filepath, filename)
 
 
-def find_latest_checkpoint(checkpoint_dir: str, layer: int) -> str | None:
+def find_latest_checkpoint(
+    checkpoint_dir: str, layer: int, after_tokens: int | None = None
+) -> str | None:
     """Find the checkpoint with the most trained tokens for the given layer.
 
     Returns the path to the checkpoint file, or None if no checkpoint exists for the layer.
     """
+    if after_tokens is not None:
+        best_path, _ = find_checkpoint_after(checkpoint_dir, layer, after_tokens)
+        return best_path
+
     best_path: str | None = None
     best_tokens: int = -1
 
@@ -459,7 +465,9 @@ def load_training_result(
     return result
 
 
-def save_validations(validations: Dict[int | str, "ValidationResult"], out_dir: str) -> None:
+def save_validations(
+    validations: Dict[int | str, "ValidationResult"], out_dir: str
+) -> None:
     """Save a Dict[int, ValidationResult] to the given directory.
 
     Each ValidationResult is saved as {out_dir}/{key}.validation.cloudpickle.
@@ -475,7 +483,9 @@ def save_validations(validations: Dict[int | str, "ValidationResult"], out_dir: 
             cloudpickle.dump(result, f)
 
 
-def load_saes(checkpoint_dir: str, layers: Iterable[int]) -> Dict[int, "SAE"]:
+def load_saes(
+    checkpoint_dir: str, layers: Iterable[int], after_tokens: int | None = None
+) -> Dict[int, "SAE"]:
     saes = {}
     loaded_thresholds = {}
 
@@ -507,7 +517,7 @@ def load_saes(checkpoint_dir: str, layers: Iterable[int]) -> Dict[int, "SAE"]:
                 loaded_thresholds = cloudpickle.load(f)
 
     def load_layer_checkpoint(layer):
-        checkpoint = find_latest_checkpoint(checkpoint_dir, layer)
+        checkpoint = find_latest_checkpoint(checkpoint_dir, layer, after_tokens)
         if checkpoint is not None:
             cp = load_checkpoint(checkpoint)
             assert cp.sae is not None
@@ -946,6 +956,7 @@ def method_to_saes(
     training_method: str,
     layers: Iterable[int],
     device: torch.device,
+    after_tokens: int | None = None,
 ) -> dict[int, "SAE"]:
     if "gemma_scope" in training_method and "tuned_encoder" not in training_method:
         if "canonical" in training_method or "l0" not in training_method:
@@ -958,6 +969,7 @@ def method_to_saes(
         saes = load_saes(
             f"{base_path}/{training_method}",
             layers,
+            after_tokens=after_tokens,
         )
     else:
         saes = {}

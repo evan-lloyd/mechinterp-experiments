@@ -133,6 +133,13 @@ parser.add_argument(
     type=int,
     help="Starting layer for SAE replacement in the reference model (default: None)",
 )
+parser.add_argument(
+    "-t",
+    "--after-tokens",
+    type=int,
+    required=False,
+    help="Number of training tokens for target checkpoint (default: latest checkpoint)",
+)
 args = parser.parse_args()
 
 
@@ -149,6 +156,7 @@ for training_method in args.training_methods:
         training_method,
         range(load_start_layer, END_LAYER + 1),
         TRAINING_DEVICE,
+        after_tokens=args.after_tokens,
     )
 
     if args.reference_start_layer is not None:
