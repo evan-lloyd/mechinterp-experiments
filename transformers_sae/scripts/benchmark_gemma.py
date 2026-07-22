@@ -95,7 +95,7 @@ BENCHMARK_SPECS = {
             "high_school_biology",
             "high_school_chemistry",
             "high_school_computer_science",
-            "high_school_european_history",
+            "high_school_european_history",  # not actually run, all examples are too long
             "high_school_geography",
             "high_school_government_and_politics",
             "high_school_macroeconomics",
@@ -104,8 +104,8 @@ BENCHMARK_SPECS = {
             "high_school_physics",
             "high_school_psychology",
             "high_school_statistics",
-            "high_school_us_history",
-            "high_school_world_history",
+            "high_school_us_history",  # examples too long
+            "high_school_world_history",  # examples too long
             "human_aging",
             "human_sexuality",
             "international_law",
@@ -122,11 +122,11 @@ BENCHMARK_SPECS = {
             "philosophy",
             "prehistory",
             "professional_accounting",
-            "professional_law",
+            "professional_law",  # examples too long
             "professional_medicine",
             "professional_psychology",
             "public_relations",
-            "security_studies",
+            "security_studies",  # examples too long
             "sociology",
             "us_foreign_policy",
             "virology",
@@ -174,7 +174,6 @@ def run_benchmarks(training_method: str, start_layer: int):
     )
     if len(saes) != model.num_layers - start_layer and training_method != "baseline":
         raise RuntimeError(f"Missing SAEs for {training_method}, aborting run")
-
 
     replacement_model = make_replacement_model(model, saes)
     for sae in saes.values():

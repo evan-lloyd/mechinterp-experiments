@@ -131,9 +131,9 @@ training_results = train(
             int(1e7),
         )
     ),
-    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/standard_fresh_init/",
+    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/standard/",
     force_retrain=False,
-    fresh_init=True,
+    fresh_init=False,
 )
 
 validations = run_validations(

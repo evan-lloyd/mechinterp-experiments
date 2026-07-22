@@ -76,7 +76,7 @@ D_MODEL = model.d_model
 TOPK = 100
 TOKENIZER_BATCH_SIZE = 256
 FINETUNE_FRACTION = 0.2
-N_ITERATIONS = 10
+N_ITERATIONS = 5
 
 empty_saes = {
     layer: SAE(
@@ -147,7 +147,7 @@ training_results = train(
             int(1e7),
         )
     ),
-    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_lista_iters_10/",
+    checkpoint_dir="/workspace/sae_checkpoints/gemma_2_2b/next_layer_lista/",
     force_retrain=False,
     offload_after_training=False,
 )
