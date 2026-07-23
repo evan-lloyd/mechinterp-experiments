@@ -164,15 +164,3 @@ for training_method in args.training_methods:
         print(
             f"live features={ {k: sum(v.live_features) / saes[k].config.d_sae for k, v in validations.layer_results.items() if v.live_features is not None} }"
         )
-        # TODO: figure out why this breaks for train_activations gemma scope
-        # with torch.autocast(
-        #     device_type="cuda" if model.device.type == "cuda" else "cpu",
-        #     dtype=torch.bfloat16,
-        # ):
-        #     generate_with_replacement(
-        #         model,
-        #         tokenizer,
-        #         "The capital of France,",
-        #         saes,
-        #         offload=False,
-        #     )
