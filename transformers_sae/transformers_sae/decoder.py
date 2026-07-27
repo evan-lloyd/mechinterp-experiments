@@ -1,6 +1,7 @@
-import torch
 from dataclasses import dataclass
-from typing import Union, Iterator
+from typing import Iterator, Union
+
+import torch
 
 
 @dataclass
